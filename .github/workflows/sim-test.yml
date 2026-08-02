@@ -43,7 +43,7 @@ jobs:
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             build
-          echo "APP_PATH=$(ls -d build/Build/Products/Debug-iphonesimulator/*.app | head -1)" >> $GITHUB_ENV
+          echo "APP_PATH=$PWD/$(ls -d build/Build/Products/Debug-iphonesimulator/*.app | head -1)" >> $GITHUB_ENV
 
       - name: Boot simulator
         run: |
@@ -75,6 +75,7 @@ jobs:
             -project Picnic.xcodeproj \
             -scheme Picnic \
             -destination "id=$SIM_UDID" \
+            -derivedDataPath build \
             -only-testing:PicnicUITests \
             CODE_SIGNING_ALLOWED=NO
 
