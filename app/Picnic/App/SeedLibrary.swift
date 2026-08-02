@@ -129,7 +129,7 @@ enum SeedLibrary {
         try await PHPhotoLibrary.shared().performChanges {
             let markerRequest = PHAssetCreationRequest.forAsset()
             if let data = makeImage(text: "SEED", color: .darkGray, size: CGSize(width: 400, height: 400)).pngData() {
-                markerRequest.addResource(forType: .photo, data: data, options: nil)
+                markerRequest.addResource(with: .photo, data: data, options: nil)
             }
             markerRequest.creationDate = sentinelDate
 
@@ -137,7 +137,7 @@ enum SeedLibrary {
                 if item.isVideo {
                     guard let url = videoURLs[item.index] else { continue }
                     let request = PHAssetCreationRequest.forAsset()
-                    request.addResource(forType: .video, fileURL: url, options: nil)
+                    request.addResource(with: .video, fileURL: url, options: nil)
                     request.creationDate = item.date
                 } else {
                     let image = makeImage(text: "\(item.index)", color: item.color, size: item.pixelSize)
@@ -148,7 +148,7 @@ enum SeedLibrary {
                     }
                     guard let data else { continue }
                     let request = PHAssetCreationRequest.forAsset()
-                    request.addResource(forType: .photo, data: data, options: nil)
+                    request.addResource(with: .photo, data: data, options: nil)
                     request.creationDate = item.date
                 }
             }
