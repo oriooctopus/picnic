@@ -59,6 +59,14 @@ struct MonthCardView: View {
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         }
         .aspectRatio(cardAspectRatio, contentMode: .fit)
+        // Single AX element for the whole card, sized to the true rendered
+        // frame (post GeometryReader/clipShape) — not one element per inner
+        // layer (cover Image + both Texts), which is what let XCUITest
+        // resolve taps/presses to a stale, unclipped Image frame instead of
+        // the actual card location.
+        .accessibilityElement(children: .ignore)
+        .accessibilityIdentifier("monthCard.\(month.key)")
+        .accessibilityLabel("\(month.monthAbbreviation), \(isSorted ? "Sorted" : "\(remainingCount) remaining")")
         .contextMenu {
             Button {
                 appState.sortStore.setMonthManuallySorted(true, monthKey: month.key)

@@ -116,10 +116,10 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(monthAppeared, "Seeded month 2025-05 (burst cluster A) should appear in the grid, even after scrolling up to 6 screens in each direction")
 
         // MARK: Long-press month card -> context menu
-        // Coordinate press (rather than pressing the element directly) for
-        // hittability robustness — the element's own hit-test can miss on
-        // some simulator/CI configurations even when it exists.
-        seededMonth.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.2)
+        // Now a single AX element per card with the true rendered frame
+        // (see MonthCardView's .accessibilityElement(children: .ignore)), so
+        // a plain element press resolves correctly — no coordinate hack.
+        seededMonth.press(forDuration: 1.2)
         XCTAssertTrue(app.buttons["month.markSorted"].waitForExistence(timeout: 5), "Long-press context menu should appear")
         capture("02-longpress-context-menu")
         tapOutside()

@@ -166,33 +166,37 @@ struct DeckView: View {
                     .background(Circle().fill(.black.opacity(0.4)))
                     .padding(12)
             }
-
-            VStack {
-                Spacer()
-                if let group = GroupingService.group(containing: asset, in: viewModel.visibleAssets),
-                   !appState.sortStore.isGroupResolved(group.id) {
-                    Button {
-                        activeCompareGroup = group
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text("Compare \(group.assets.count)")
-                            Image(systemName: "chevron.right")
-                        }
-                        .font(.subheadline.bold())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(Capsule().fill(.black.opacity(0.55)))
+        }
+        // Single AX element for the card's own frame (fill image + live-photo
+        // badge collapsed into one) — the Compare pill below is a real
+        // control and stays out of this ignored subtree so it remains its
+        // own tappable, separately-identified element rather than bleeding
+        // the "deck.card" identifier onto multiple inner layers.
+        .accessibilityElement(children: .ignore)
+        .accessibilityIdentifier("deck.card")
+        .overlay(alignment: .bottom) {
+            if let group = GroupingService.group(containing: asset, in: viewModel.visibleAssets),
+               !appState.sortStore.isGroupResolved(group.id) {
+                Button {
+                    activeCompareGroup = group
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Compare \(group.assets.count)")
+                        Image(systemName: "chevron.right")
                     }
-                    .accessibilityIdentifier("deck.comparePill")
-                    .padding(.bottom, 16)
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(.black.opacity(0.55)))
                 }
+                .accessibilityIdentifier("deck.comparePill")
+                .padding(.bottom, 16)
             }
         }
         .padding(.horizontal, 16)
         .offset(dragOffset)
         .rotationEffect(.degrees(Double(dragOffset.width / 20)))
-        .accessibilityIdentifier("deck.card")
         .gesture(
             DragGesture()
                 .onChanged { value in dragOffset = value.translation }

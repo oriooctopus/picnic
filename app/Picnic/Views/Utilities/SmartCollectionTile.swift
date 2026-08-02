@@ -17,5 +17,11 @@ struct SmartCollectionTile: View {
             Text(kind.title).font(.subheadline.bold()).foregroundStyle(.white)
             Text("\(count)").font(.caption).foregroundStyle(.white.opacity(0.6))
         }
+        // Single AX element for the whole tile — without this, the identifier
+        // applied at the call site bleeds onto the icon overlay and both Text
+        // layers as separate elements with their own (mismatched) frames.
+        .accessibilityElement(children: .ignore)
+        .accessibilityIdentifier("smartCollection.tile.\(kind.rawValue)")
+        .accessibilityLabel("\(kind.title), \(count)")
     }
 }
