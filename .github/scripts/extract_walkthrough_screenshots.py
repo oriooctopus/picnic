@@ -19,6 +19,7 @@ import shutil
 import sys
 
 EXPECTED = [
+    "00-launch",
     "01-mylife", "02-longpress-context-menu", "03-deck-first-card",
     "04-deck-swiped-x1", "05-deck-undo", "06-deck-filter-popover",
     "07-compare-initial", "08-compare-thumbsup", "09-compare-confirm-dialog",

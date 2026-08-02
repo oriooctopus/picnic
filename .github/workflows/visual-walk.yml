@@ -134,7 +134,9 @@ jobs:
           fi
           echo "Using xcresult: $XCRESULT"
 
-          xcrun xcresulttool get test-results attachments --path "$XCRESULT" --output-path extracted
+          # Xcode 16+: `export attachments` (the `get test-results attachments`
+          # spelling rejects --path on the runner's xcresulttool).
+          xcrun xcresulttool export attachments --path "$XCRESULT" --output-path extracted
 
           echo "Extracted directory contents:"
           find extracted -maxdepth 3 -type f | sort

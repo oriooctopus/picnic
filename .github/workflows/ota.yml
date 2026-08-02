@@ -6,15 +6,11 @@ name: ota
 # resulting ota-ipa artifact is picked up by an ota-install poller instance
 # (see README.md — that poller needs a parallel Picnic instance set up
 # outside this repo; it does not exist yet).
+# TEMPORARILY dispatch-only while the visual-walk iteration loop is pushing
+# frequent commits (each auto ota build mid-loop is a wasted macOS run).
+# Restore the push trigger when the loop converges:
+#   push: {branches: [main], paths-ignore: [server/**, .github/workflows/sim-test.yml, "**/*.md"]}
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "server/**"
-      - ".github/workflows/sim-test.yml"
-      - "README.md"
-      - "SPEC.md"
-      - "**/*.md"
   workflow_dispatch:
 
 concurrency:

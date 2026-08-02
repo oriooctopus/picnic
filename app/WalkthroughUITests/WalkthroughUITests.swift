@@ -59,10 +59,14 @@ final class WalkthroughUITests: XCTestCase {
         // synthesis + one PhotoKit batch insert of ~28 assets)
         let myLifeTitle = app.staticTexts["My life"]
         XCTAssertTrue(myLifeTitle.waitForExistence(timeout: 15), "My life header should appear on launch")
+        capture("00-launch")
 
-        let seededMonth = app.otherElements["monthCard.2025-05"]
-        XCTAssertTrue(seededMonth.waitForExistence(timeout: 90), "Seeded month 2025-05 (burst cluster A) should appear in the grid")
+        // Query any element type: SwiftUI may expose the card as a button,
+        // image, or plain view depending on the tap-gesture plumbing.
+        let seededMonth = app.descendants(matching: .any)["monthCard.2025-05"].firstMatch
+        let monthAppeared = seededMonth.waitForExistence(timeout: 90)
         capture("01-mylife")
+        XCTAssertTrue(monthAppeared, "Seeded month 2025-05 (burst cluster A) should appear in the grid")
 
         // MARK: Long-press month card -> context menu
         seededMonth.press(forDuration: 1.0)
@@ -72,7 +76,7 @@ final class WalkthroughUITests: XCTestCase {
 
         // MARK: Deck view, first card (burst cluster A member 1 -> Compare pill visible)
         seededMonth.tap()
-        let deckCard = app.otherElements["deck.card"]
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
         XCTAssertTrue(deckCard.waitForExistence(timeout: 20), "Deck first card should appear")
         capture("03-deck-first-card")
 
@@ -156,7 +160,7 @@ final class WalkthroughUITests: XCTestCase {
             ("smartCollection.tile.livePhotos", "16-smart-livephotos"),
         ]
         for entry in smartCollections {
-            let tile = app.otherElements[entry.identifier]
+            let tile = app.descendants(matching: .any)[entry.identifier].firstMatch
             XCTAssertTrue(tile.waitForExistence(timeout: 10), "\(entry.identifier) tile missing")
             tile.tap()
             Thread.sleep(forTimeInterval: 1.0)
