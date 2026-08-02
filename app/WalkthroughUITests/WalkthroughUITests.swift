@@ -32,6 +32,13 @@ final class WalkthroughUITests: XCTestCase {
         dismissPhotoPermissionSheetIfPresent()
     }
 
+    override func tearDown() {
+        // Always leave a picture of the final state — failing asserts
+        // otherwise capture nothing at the moment of failure.
+        capture("99-final-state", delay: 0.2)
+        super.tearDown()
+    }
+
     /// The simctl TCC grants don't reliably yield FULL photo access on the
     /// runner's simulator — the app can come up behind the system
     /// "requesting additional access" sheet (Limit Access… / Allow Full
@@ -123,10 +130,22 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(app.buttons["month.markSorted"].waitForExistence(timeout: 5), "Long-press context menu should appear")
         capture("02-longpress-context-menu")
         tapOutside()
+        // The context menu's zoom-out animation repositions the whole grid;
+        // tapping mid-animation lands on stale geometry. Wait for the menu to
+        // actually leave the hierarchy, then settle.
+        let menuGone = NSPredicate(format: "exists == false")
+        expectation(for: menuGone, evaluatedWith: app.buttons["month.markSorted"])
+        waitForExpectations(timeout: 5)
+        Thread.sleep(forTimeInterval: 1.0)
 
         // MARK: Deck view, first card (burst cluster A member 1 -> Compare pill visible)
         seededMonth.tap()
         let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        if !deckCard.waitForExistence(timeout: 10) {
+            // One settled re-tap: the first tap can be swallowed as the
+            // context-menu dismissal's tap-shield goes away.
+            seededMonth.tap()
+        }
         XCTAssertTrue(deckCard.waitForExistence(timeout: 20), "Deck first card should appear")
         capture("03-deck-first-card")
 
