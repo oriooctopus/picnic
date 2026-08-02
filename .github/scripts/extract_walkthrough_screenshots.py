@@ -31,7 +31,26 @@ EXPECTED = [
 
 def main() -> int:
     extracted_dir, screenshots_dir = sys.argv[1], sys.argv[2]
+    export_log = sys.argv[3] if len(sys.argv) > 3 else None
     found = {}
+
+    # Primary source on current Xcode: `export attachments` prints the mapping
+    # to stdout as lines like
+    #   File: 864F26C2-....png, suggested name: "01-mylife_0_DF83....png"
+    # while the on-disk files are bare UUIDs. Parse the captured stdout.
+    if export_log and os.path.exists(export_log):
+        import re
+        pat = re.compile(r'File: (\S+?),\s+suggested name: "?([^"\n]+)"?')
+        for line in open(export_log):
+            m = pat.search(line)
+            if not m:
+                continue
+            exported, suggested = m.group(1), m.group(2)
+            for exp_name in EXPECTED:
+                if suggested.startswith(exp_name) and exp_name not in found:
+                    matches = glob.glob(os.path.join(extracted_dir, "**", exported), recursive=True)
+                    if matches:
+                        found[exp_name] = matches[0]
 
     for manifest_path in glob.glob(os.path.join(extracted_dir, "**", "manifest.json"), recursive=True):
         with open(manifest_path) as f:
