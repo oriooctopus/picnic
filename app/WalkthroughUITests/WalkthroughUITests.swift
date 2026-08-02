@@ -239,7 +239,7 @@ final class WalkthroughUITests: XCTestCase {
         // MARK: Long-press month card -> context menu (LAST: its zoom
         // animation transforms the grid's AX geometry, so nothing may
         // interact with the grid after this)
-        app.buttons["tab.months"].tap()
+        app.buttons["tab.myLife"].tap()
         XCTAssertTrue(myLifeTitle.waitForExistence(timeout: 10))
         Thread.sleep(forTimeInterval: 1.0)
         let monthForMenu = app.descendants(matching: .any)["monthCard.2025-05"].firstMatch
