@@ -25,7 +25,7 @@ EXPECTED = [
     "07-compare-initial", "08-compare-thumbsup", "09-compare-confirm-dialog",
     "10-utilities", "11-smart-shuffle", "12-smart-favorites",
     "13-smart-screenshots", "14-smart-videos", "15-smart-photos",
-    "16-smart-livephotos", "17-profile",
+    "16-smart-livephotos", "17-profile", "99-final-state",
 ]
 
 
