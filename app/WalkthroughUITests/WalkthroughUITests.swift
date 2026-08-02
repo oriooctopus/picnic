@@ -127,6 +127,15 @@ final class WalkthroughUITests: XCTestCase {
         // context-menu capture (02) moved to the END of the walk because its
         // zoom animation leaves the grid's AX geometry transformed, poisoning
         // every interaction that follows it.
+        // Ground-truth AX frames immediately before the tap that has
+        // historically resolved one column to the right (July instead of
+        // May) — captures the exact geometry XCUITest is about to hit-test
+        // against, on a settled, animation-free grid.
+        let axDumpPreTap = XCTAttachment(string: app.debugDescription)
+        axDumpPreTap.name = "ax-dump-pre-tap"
+        axDumpPreTap.lifetime = .keepAlways
+        add(axDumpPreTap)
+
         seededMonth.tap()
         let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
         XCTAssertTrue(deckCard.waitForExistence(timeout: 20), "Deck first card should appear")

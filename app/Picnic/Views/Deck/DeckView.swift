@@ -28,6 +28,23 @@ struct DeckView: View {
             topBar
 
             ZStack {
+                if viewModel.currentAsset != nil {
+                    // Stack-peek: the next 1-2 cards show as scaled-down,
+                    // offset-up slivers behind the current card, matching
+                    // the reference deck's "stack of cards" read. Purely
+                    // decorative — no image loaded, just the card shape at
+                    // reduced scale/opacity — so it costs nothing extra to
+                    // fetch.
+                    ForEach(Array(stride(from: 2, through: 1, by: -1)), id: \.self) { depth in
+                        if viewModel.currentIndex + depth < viewModel.visibleAssets.count {
+                            RoundedRectangle(cornerRadius: 24)
+                                .fill(Color(white: 0.08 + Double(depth) * 0.03))
+                                .padding(.horizontal, 16 + CGFloat(depth) * 14)
+                                .offset(y: -CGFloat(depth) * 10)
+                        }
+                    }
+                }
+
                 if let asset = viewModel.currentAsset {
                     cardView(for: asset).id(asset.localIdentifier)
                 } else {

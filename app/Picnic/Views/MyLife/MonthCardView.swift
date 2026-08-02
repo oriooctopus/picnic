@@ -20,69 +20,71 @@ struct MonthCardView: View {
     private let cornerRadius: CGFloat = 16
 
     var body: some View {
-        // GeometryReader pins an EXACT pixel width/height for every layer
-        // (background fill, cover image, gradient) instead of letting the
-        // ZStack infer its own size from the cover Image's intrinsic aspect
-        // ratio. Without this, a `.resizable().aspectRatio(.fill)` Image with
-        // no explicit frame can leak its source aspect ratio upward through
-        // the ZStack and override the LazyVGrid's flexible column width —
-        // that's what produced the overlapping, wildly-different-width cards.
-        GeometryReader { geo in
-            let size = geo.size
-            ZStack(alignment: .bottomLeading) {
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .fill(Color(white: 0.15))
-
+        // Standard cell pattern: Color.clear drives layout sizing via
+        // .aspectRatio(.fit), so the card's frame comes from the LazyVGrid's
+        // flexible column width the same way every other cell in the grid
+        // does. GeometryReader previously computed its own width/height and
+        // stamped it onto every inner layer; that size could settle a frame
+        // apart from what UIKit/AX actually reported for the cell, which is
+        // what sent taps/long-presses to the neighboring month. With no
+        // GeometryReader, there's only one source of truth for the frame —
+        // the layout system's — so the accessibility element's reported
+        // frame always matches the rendered cell.
+        Color.clear
+            .aspectRatio(cardAspectRatio, contentMode: .fit)
+            .overlay {
                 if let coverImage {
                     Image(uiImage: coverImage)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: size.width, height: size.height)
-                        .clipped()
+                        .scaledToFill()
+                } else {
+                    Color(white: 0.15)
                 }
-
-                LinearGradient(colors: [.black.opacity(0.75), .clear], startPoint: .bottom, endPoint: .top)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(month.monthAbbreviation)
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                    if isSorted {
-                        Text("Sorted").font(.subheadline.bold()).foregroundStyle(.green)
-                    } else {
-                        Text("\(remainingCount)").font(.subheadline).foregroundStyle(.white.opacity(0.85))
-                    }
-                }
-                .padding(10)
             }
-            .frame(width: size.width, height: size.height)
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        }
-        .aspectRatio(cardAspectRatio, contentMode: .fit)
-        // Single AX element for the whole card, sized to the true rendered
-        // frame (post GeometryReader/clipShape) — not one element per inner
-        // layer (cover Image + both Texts), which is what let XCUITest
-        // resolve taps/presses to a stale, unclipped Image frame instead of
-        // the actual card location.
-        .accessibilityElement(children: .ignore)
-        .accessibilityIdentifier("monthCard.\(month.key)")
-        .accessibilityLabel("\(month.monthAbbreviation), \(isSorted ? "Sorted" : "\(remainingCount) remaining")")
-        .contextMenu {
-            Button {
-                appState.sortStore.setMonthManuallySorted(true, monthKey: month.key)
-            } label: {
-                Label("Mark as sorted", systemImage: "hand.thumbsup.fill")
+            .overlay(alignment: .bottomLeading) {
+                ZStack(alignment: .bottomLeading) {
+                    LinearGradient(colors: [.black.opacity(0.75), .clear], startPoint: .bottom, endPoint: .top)
+                        .frame(height: 64)
+                        .frame(maxWidth: .infinity, alignment: .bottom)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(month.monthAbbreviation)
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                        if isSorted {
+                            Text("Sorted").font(.subheadline.bold()).foregroundStyle(.green)
+                        } else {
+                            Text("\(remainingCount)").font(.subheadline).foregroundStyle(.white.opacity(0.85))
+                        }
+                    }
+                    .padding(10)
+                }
             }
-            .accessibilityIdentifier("month.markSorted")
-            Button {
-                appState.sortStore.setMonthManuallySorted(false, monthKey: month.key)
-            } label: {
-                Label("Mark as unsorted", systemImage: "circle")
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius))
+            // Single AX element for the whole card, sized to the true
+            // rendered frame — not one element per inner layer (cover Image
+            // + both Texts), which is what let XCUITest resolve taps/presses
+            // to a stale, mis-sized frame instead of the actual card location.
+            .accessibilityElement(children: .ignore)
+            .accessibilityIdentifier("monthCard.\(month.key)")
+            .accessibilityLabel("\(month.monthAbbreviation), \(isSorted ? "Sorted" : "\(remainingCount) remaining")")
+            .contextMenu {
+                Button {
+                    appState.sortStore.setMonthManuallySorted(true, monthKey: month.key)
+                } label: {
+                    Label("Mark as sorted", systemImage: "hand.thumbsup.fill")
+                }
+                .accessibilityIdentifier("month.markSorted")
+                Button {
+                    appState.sortStore.setMonthManuallySorted(false, monthKey: month.key)
+                } label: {
+                    Label("Mark as unsorted", systemImage: "circle")
+                }
+                .accessibilityIdentifier("month.markUnsorted")
             }
-            .accessibilityIdentifier("month.markUnsorted")
-        }
-        .task {
-            coverImage = await ThumbnailLoader.thumbnail(for: month.coverAsset, targetSize: CGSize(width: 240, height: 300))
-        }
+            .task {
+                coverImage = await ThumbnailLoader.thumbnail(for: month.coverAsset, targetSize: CGSize(width: 240, height: 300))
+            }
     }
 }
