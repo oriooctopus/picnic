@@ -122,31 +122,18 @@ final class WalkthroughUITests: XCTestCase {
         capture("01-mylife")
         XCTAssertTrue(monthAppeared, "Seeded month 2025-05 (burst cluster A) should appear in the grid, even after scrolling up to 6 screens in each direction")
 
-        // MARK: Long-press month card -> context menu
-        // Now a single AX element per card with the true rendered frame
-        // (see MonthCardView's .accessibilityElement(children: .ignore)), so
-        // a plain element press resolves correctly — no coordinate hack.
-        seededMonth.press(forDuration: 1.2)
-        XCTAssertTrue(app.buttons["month.markSorted"].waitForExistence(timeout: 5), "Long-press context menu should appear")
-        capture("02-longpress-context-menu")
-        tapOutside()
-        // The context menu's zoom-out animation repositions the whole grid;
-        // tapping mid-animation lands on stale geometry. Wait for the menu to
-        // actually leave the hierarchy, then settle.
-        let menuGone = NSPredicate(format: "exists == false")
-        expectation(for: menuGone, evaluatedWith: app.buttons["month.markSorted"])
-        waitForExpectations(timeout: 5)
-        Thread.sleep(forTimeInterval: 1.0)
-
         // MARK: Deck view, first card (burst cluster A member 1 -> Compare pill visible)
+        // Deck entry happens FIRST, on a fresh settled grid — the long-press
+        // context-menu capture (02) moved to the END of the walk because its
+        // zoom animation leaves the grid's AX geometry transformed, poisoning
+        // every interaction that follows it.
         seededMonth.tap()
         let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
-        if !deckCard.waitForExistence(timeout: 10) {
-            // One settled re-tap: the first tap can be swallowed as the
-            // context-menu dismissal's tap-shield goes away.
-            seededMonth.tap()
-        }
         XCTAssertTrue(deckCard.waitForExistence(timeout: 20), "Deck first card should appear")
+        // Guard against the tap landing on a neighboring card: the header
+        // must show the month we asked for.
+        XCTAssertTrue(app.staticTexts["May 2025"].waitForExistence(timeout: 5),
+                      "Deck header should show May 2025 — a different month means the grid tap resolved to the wrong card")
         capture("03-deck-first-card")
 
         // MARK: Swipe left one card -> X badge = 1
@@ -248,5 +235,18 @@ final class WalkthroughUITests: XCTestCase {
         app.buttons["tab.profile"].tap()
         XCTAssertTrue(app.staticTexts["Profile"].waitForExistence(timeout: 10))
         capture("17-profile")
+
+        // MARK: Long-press month card -> context menu (LAST: its zoom
+        // animation transforms the grid's AX geometry, so nothing may
+        // interact with the grid after this)
+        app.buttons["tab.months"].tap()
+        XCTAssertTrue(myLifeTitle.waitForExistence(timeout: 10))
+        Thread.sleep(forTimeInterval: 1.0)
+        let monthForMenu = app.descendants(matching: .any)["monthCard.2025-05"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(monthForMenu, initialTimeout: 10),
+                      "Month card should be reachable for the context-menu capture")
+        monthForMenu.press(forDuration: 1.2)
+        XCTAssertTrue(app.buttons["month.markSorted"].waitForExistence(timeout: 5), "Long-press context menu should appear")
+        capture("02-longpress-context-menu")
     }
 }
