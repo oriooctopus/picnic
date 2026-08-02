@@ -35,6 +35,7 @@ struct MyLifeView: View {
                             ForEach(entry.months) { month in
                                 MonthCardView(month: month)
                                     .environmentObject(appState)
+                                    .accessibilityIdentifier("monthCard.\(month.key)")
                                     .onTapGesture { selectedMonth = month }
                             }
                         }

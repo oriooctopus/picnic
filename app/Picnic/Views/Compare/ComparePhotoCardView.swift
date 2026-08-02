@@ -60,13 +60,16 @@ struct ComparePhotoCardView: View {
                 Button(action: onReject) {
                     Image(systemName: "trash.fill").foregroundStyle(isRejected ? .red : .white)
                 }
+                .accessibilityIdentifier("compare.reject")
                 Rectangle().fill(Color.white.opacity(0.2)).frame(width: 1, height: 20)
                 Button(action: onAccept) {
                     Image(systemName: "hand.thumbsup.fill").foregroundStyle(isAccepted ? .green : .white)
                 }
+                .accessibilityIdentifier("compare.accept")
                 Button(action: onFavorite) {
                     Image(systemName: isFavorite ? "heart.fill" : "heart").foregroundStyle(isFavorite ? .red : .white)
                 }
+                .accessibilityIdentifier("compare.favorite")
             }
             .font(.system(size: 20))
         }

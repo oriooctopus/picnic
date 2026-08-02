@@ -27,6 +27,17 @@ final class AppState: ObservableObject {
         await photoLibrary.requestAuthorization()
         guard photoLibrary.authorizationStatus == .authorized
                 || photoLibrary.authorizationStatus == .limited else { return }
+        #if DEBUG
+        // Debug-only seed path for the visual-walk CI job — never compiled
+        // into the ad-hoc/Release build. See SeedLibrary.swift.
+        if ProcessInfo.processInfo.arguments.contains("--seed-library") {
+            do {
+                try await SeedLibrary.seedIfNeeded()
+            } catch {
+                print("SeedLibrary: seeding failed: \(error)")
+            }
+        }
+        #endif
         refreshMonths()
         await mirrorQueue.drainQueue()
     }

@@ -77,6 +77,18 @@ struct DeckView: View {
 
     private var topBar: some View {
         HStack {
+            // No swipe-to-dismiss on a fullScreenCover, and the reference
+            // screenshots don't show an explicit back control either — added
+            // this so the deck is actually navigable back to My Life.
+            Button { dismiss() } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(Color(white: 0.15)))
+            }
+            .accessibilityIdentifier("deck.dismiss")
+
             Button { viewModel.shuffle() } label: {
                 Image(systemName: "shuffle")
                     .font(.system(size: 18, weight: .semibold))
@@ -84,6 +96,7 @@ struct DeckView: View {
                     .frame(width: 40, height: 40)
                     .background(Circle().fill(Color(white: 0.15)))
             }
+            .accessibilityIdentifier("deck.shuffle")
 
             Spacer()
 
@@ -111,6 +124,7 @@ struct DeckView: View {
                         .background(Circle().fill(Color(white: 0.15)))
                 }
                 .disabled(viewModel.pendingDeleteIDs.isEmpty || viewModel.isCommitting)
+                .accessibilityIdentifier("deck.commit")
 
                 if viewModel.pendingDeleteIDs.count > 0 {
                     Text("\(viewModel.pendingDeleteIDs.count)")
@@ -119,6 +133,7 @@ struct DeckView: View {
                         .padding(4)
                         .background(Circle().fill(.red))
                         .offset(x: 6, y: -6)
+                        .accessibilityIdentifier("deck.pendingCount")
                 }
             }
         }
@@ -165,6 +180,7 @@ struct DeckView: View {
                         .padding(.vertical, 8)
                         .background(Capsule().fill(.black.opacity(0.55)))
                     }
+                    .accessibilityIdentifier("deck.comparePill")
                     .padding(.bottom, 16)
                 }
             }
@@ -172,6 +188,7 @@ struct DeckView: View {
         .padding(.horizontal, 16)
         .offset(dragOffset)
         .rotationEffect(.degrees(Double(dragOffset.width / 20)))
+        .accessibilityIdentifier("deck.card")
         .gesture(
             DragGesture()
                 .onChanged { value in dragOffset = value.translation }
@@ -273,6 +290,7 @@ struct DeckView: View {
                     .background(Circle().fill(Color(white: 0.15)))
             }
             .disabled(viewModel.undoStack.isEmpty)
+            .accessibilityIdentifier("deck.undo")
 
             Spacer()
 
@@ -282,6 +300,7 @@ struct DeckView: View {
                     .frame(width: 40, height: 40)
                     .background(Circle().fill(Color(white: 0.15)))
             }
+            .accessibilityIdentifier("deck.filter")
             .popover(isPresented: $showHidePopover) {
                 HideSortedPopover(hideSorted: $viewModel.hideSorted)
                     .presentationCompactAdaptation(.popover)

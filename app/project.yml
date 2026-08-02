@@ -46,6 +46,7 @@ targets:
     scheme:
       testTargets:
         - PicnicUITests
+        - WalkthroughUITests
       gatherCoverageData: false
 
   PicnicUITests:
@@ -59,4 +60,17 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oliverullman.picnic.uitests
+        CODE_SIGN_STYLE: Automatic
+
+  WalkthroughUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: WalkthroughUITests
+    dependencies:
+      - target: Picnic
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.oliverullman.picnic.walkthroughtests
         CODE_SIGN_STYLE: Automatic

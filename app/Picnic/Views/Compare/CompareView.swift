@@ -88,6 +88,7 @@ struct CompareView: View {
                     .frame(width: 48, height: 48)
                     .background(Circle().fill(Color(white: 0.15)))
             }
+            .accessibilityIdentifier("compare.dismiss")
 
             Spacer()
 
@@ -107,6 +108,7 @@ struct CompareView: View {
             }
             .disabled(!viewModel.canConfirm || viewModel.isResolving)
             .opacity(viewModel.canConfirm ? 1 : 0.35)
+            .accessibilityIdentifier("compare.confirm")
         }
         .padding()
     }

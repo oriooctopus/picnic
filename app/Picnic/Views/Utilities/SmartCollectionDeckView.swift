@@ -20,6 +20,7 @@ struct SmartCollectionDeckView: View {
                 Button { dismiss() } label: {
                     Image(systemName: "xmark").foregroundStyle(.white)
                 }
+                .accessibilityIdentifier("smartCollection.dismiss")
             }
             .padding()
 

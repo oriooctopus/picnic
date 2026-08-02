@@ -17,6 +17,7 @@ struct UtilitiesView: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                     ForEach(recentsKinds) { kind in
                         SmartCollectionTile(kind: kind, count: counts[kind] ?? 0)
+                            .accessibilityIdentifier("smartCollection.tile.\(kind.rawValue)")
                             .onTapGesture { selectedKind = kind }
                     }
                 }
@@ -26,6 +27,7 @@ struct UtilitiesView: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                     ForEach(utilityKinds) { kind in
                         SmartCollectionTile(kind: kind, count: counts[kind] ?? 0)
+                            .accessibilityIdentifier("smartCollection.tile.\(kind.rawValue)")
                             .onTapGesture { selectedKind = kind }
                     }
                 }

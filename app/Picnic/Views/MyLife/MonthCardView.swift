@@ -49,11 +49,13 @@ struct MonthCardView: View {
             } label: {
                 Label("Mark as sorted", systemImage: "hand.thumbsup.fill")
             }
+            .accessibilityIdentifier("month.markSorted")
             Button {
                 appState.sortStore.setMonthManuallySorted(false, monthKey: month.key)
             } label: {
                 Label("Mark as unsorted", systemImage: "circle")
             }
+            .accessibilityIdentifier("month.markUnsorted")
         }
         .task {
             coverImage = await ThumbnailLoader.thumbnail(for: month.coverAsset, targetSize: CGSize(width: 240, height: 300))

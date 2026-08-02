@@ -1,0 +1,153 @@
+name: visual-walk
+
+# Full-UI visual walkthrough: seeds a real photo library via PhotoKit (no
+# mocking), then runs WalkthroughUITests to capture a named screenshot of
+# every screen/interaction state in SPEC.md's reference set. Dispatch-only —
+# this is an expensive, deliberate run, not something that should fire on
+# every push.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  visual-walk:
+    runs-on: macos-15
+    env:
+      BUNDLE_ID: com.oliverullman.picnic
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          echo "Available Xcodes:"; ls -d /Applications/Xcode_*.app
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: |
+          cd app
+          xcodegen generate
+
+      # Reference screenshots are 1170x2532 (iPhone 14 class: iPhone 12/12
+      # Pro, 13/13 Pro, and 14 all share this panel). Runner images don't
+      # reliably pre-instantiate older device names, so create the device
+      # explicitly by stable type identifier instead of grep'ing pre-existing
+      # devices, falling back down the same-resolution family if a given
+      # device type isn't supported by the installed SDK.
+      - name: "Choose + create simulator (target: iPhone 14 class, 1170x2532)"
+        run: |
+          set -euo pipefail
+          RUNTIME_ID=$(xcrun simctl list runtimes | grep -oE 'com.apple.CoreSimulator.SimRuntime.iOS-[0-9-]+' | tail -1)
+          echo "Using runtime: $RUNTIME_ID"
+
+          CHOSEN=""
+          UDID=""
+          for DT in \
+            "com.apple.CoreSimulator.SimDeviceType.iPhone-14:iPhone 14" \
+            "com.apple.CoreSimulator.SimDeviceType.iPhone-13-Pro:iPhone 13 Pro" \
+            "com.apple.CoreSimulator.SimDeviceType.iPhone-13:iPhone 13" \
+            "com.apple.CoreSimulator.SimDeviceType.iPhone-12-Pro:iPhone 12 Pro" \
+            "com.apple.CoreSimulator.SimDeviceType.iPhone-12:iPhone 12"; do
+            TYPE_ID="${DT%%:*}"
+            NAME="${DT##*:}"
+            if xcrun simctl list devicetypes | grep -q "$TYPE_ID"; then
+              if CANDIDATE_UDID=$(xcrun simctl create "picnic-walkthrough" "$TYPE_ID" "$RUNTIME_ID" 2>/tmp/create.err); then
+                CHOSEN="$NAME"
+                UDID="$CANDIDATE_UDID"
+                break
+              else
+                echo "Could not create $NAME: $(cat /tmp/create.err)"
+              fi
+            fi
+          done
+
+          test -n "$CHOSEN" || { echo "No 1170x2532-class device type available on this runner"; exit 1; }
+          echo "Chosen simulator: $CHOSEN ($UDID) — this is the reference-resolution match, recorded for the run report."
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+          echo "SIM_NAME=$CHOSEN" >> "$GITHUB_ENV"
+
+      - name: Boot simulator
+        run: |
+          xcrun simctl boot "$SIM_UDID"
+          xcrun simctl bootstatus "$SIM_UDID" -b
+
+      - name: Build once (app + WalkthroughUITests)
+        run: |
+          cd app
+          xcodebuild build-for-testing \
+            -project Picnic.xcodeproj \
+            -scheme Picnic \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            -derivedDataPath build \
+            -destination "id=$SIM_UDID" \
+            CODE_SIGNING_ALLOWED=NO
+          echo "APP_PATH=$PWD/$(ls -d build/Build/Products/Debug-iphonesimulator/*.app | head -1)" >> "$GITHUB_ENV"
+
+      - name: Install app + grant photo library access
+        run: |
+          xcrun simctl install "$SIM_UDID" "$APP_PATH"
+          xcrun simctl privacy "$SIM_UDID" grant photos "$BUNDLE_ID"
+          xcrun simctl privacy "$SIM_UDID" grant photos-add "$BUNDLE_ID"
+
+      - name: Run WalkthroughUITests (reusing derived data from the build step)
+        env:
+          # Best-effort direct write from the test runner process (which runs
+          # on the host, not inside the app's sandbox) — see WalkthroughUITests
+          # capture(). The xcresulttool extraction step above is authoritative
+          # either way, so this is a bonus, not a dependency.
+          WALKTHROUGH_SCREENSHOT_DIR: ${{ github.workspace }}/screenshots
+        run: |
+          mkdir -p "$WALKTHROUGH_SCREENSHOT_DIR"
+          cd app
+          xcodebuild test-without-building \
+            -project Picnic.xcodeproj \
+            -scheme Picnic \
+            -destination "id=$SIM_UDID" \
+            -derivedDataPath build \
+            -only-testing:WalkthroughUITests \
+            CODE_SIGNING_ALLOWED=NO
+
+      # XCUITest attachments live inside the .xcresult bundle, not as loose
+      # files. `xcresulttool get test-results attachments` (first-party,
+      # Xcode 16+) exports them plus a manifest.json mapping each exported
+      # file back to the XCTAttachment.name we set in WalkthroughUITests
+      # (e.g. "01-mylife"). Parse that manifest to produce the flat named
+      # PNGs; fall back to substring-matching raw filenames if a given Xcode
+      # version doesn't preserve names in the manifest the same way.
+      - name: Extract named screenshots from the xcresult
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p extracted screenshots
+
+          XCRESULT=$(ls -d app/build/Logs/Test/*.xcresult 2>/dev/null | head -1 || true)
+          if [ -z "$XCRESULT" ]; then
+            echo "No .xcresult bundle found under app/build/Logs/Test — the test step must not have run."
+            exit 1
+          fi
+          echo "Using xcresult: $XCRESULT"
+
+          xcrun xcresulttool get test-results attachments --path "$XCRESULT" --output-path extracted
+
+          echo "Extracted directory contents:"
+          find extracted -maxdepth 3 -type f | sort
+
+          python3 .github/scripts/extract_walkthrough_screenshots.py "$PWD/extracted" "$PWD/screenshots"
+
+          echo "Final screenshots directory:"
+          ls -la screenshots
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-walk
+          path: screenshots
+          if-no-files-found: error

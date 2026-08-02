@@ -1,0 +1,175 @@
+import XCTest
+
+/// Full-UI visual walkthrough: seeds a real photo library via PhotoKit
+/// (`--seed-library` launch argument, see SeedLibrary.swift), then drives
+/// every screen/interaction state named in the visual-walk task and captures
+/// a named screenshot at each step.
+///
+/// Screenshots are saved two ways:
+///  1. As XCTAttachments (`.keepAlways`) — visible in the .xcresult bundle.
+///  2. Directly to a flat directory via `WALKTHROUGH_SCREENSHOT_DIR` (this
+///     process is the host-side XCTest runner, not the sandboxed app, so
+///     writing to an arbitrary path here works). The workflow's authoritative
+///     extraction step still re-derives the same named PNGs from the
+///     .xcresult via xcparse, in case this direct write isn't reachable in a
+///     given CI sandbox configuration.
+final class WalkthroughUITests: XCTestCase {
+    private var app: XCUIApplication!
+    private var screenshotDir: URL?
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+        app = XCUIApplication()
+        app.launchArguments = ["--seed-library"]
+
+        if let dir = ProcessInfo.processInfo.environment["WALKTHROUGH_SCREENSHOT_DIR"] {
+            let url = URL(fileURLWithPath: dir)
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            screenshotDir = url
+        }
+
+        app.launch()
+    }
+
+    private func capture(_ name: String, delay: TimeInterval = 1.0) {
+        Thread.sleep(forTimeInterval: delay)
+        let screenshot = app.screenshot()
+
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        if let dir = screenshotDir {
+            let fileURL = dir.appendingPathComponent("\(name).png")
+            try? screenshot.pngRepresentation.write(to: fileURL)
+        }
+    }
+
+    /// Tap a coordinate away from any popover/context-menu/action-sheet
+    /// content to dismiss it — SwiftUI context menus and popovers on iOS
+    /// dismiss on an outside tap.
+    private func tapOutside() {
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.04)).tap()
+        Thread.sleep(forTimeInterval: 1.0)
+    }
+
+    func testFullWalkthrough() throws {
+        // MARK: My Life grid (seeding can take a while: image + video
+        // synthesis + one PhotoKit batch insert of ~28 assets)
+        let myLifeTitle = app.staticTexts["My life"]
+        XCTAssertTrue(myLifeTitle.waitForExistence(timeout: 15), "My life header should appear on launch")
+
+        let seededMonth = app.otherElements["monthCard.2025-05"]
+        XCTAssertTrue(seededMonth.waitForExistence(timeout: 90), "Seeded month 2025-05 (burst cluster A) should appear in the grid")
+        capture("01-mylife")
+
+        // MARK: Long-press month card -> context menu
+        seededMonth.press(forDuration: 1.0)
+        XCTAssertTrue(app.buttons["month.markSorted"].waitForExistence(timeout: 5), "Long-press context menu should appear")
+        capture("02-longpress-context-menu")
+        tapOutside()
+
+        // MARK: Deck view, first card (burst cluster A member 1 -> Compare pill visible)
+        seededMonth.tap()
+        let deckCard = app.otherElements["deck.card"]
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 20), "Deck first card should appear")
+        capture("03-deck-first-card")
+
+        // MARK: Swipe left one card -> X badge = 1
+        deckCard.swipeLeft()
+        let pendingBadge = app.staticTexts["deck.pendingCount"]
+        XCTAssertTrue(pendingBadge.waitForExistence(timeout: 5), "Pending-delete badge should appear after a swipe-left")
+        XCTAssertEqual(pendingBadge.label, "1", "Badge should read 1 after exactly one swipe-left")
+        capture("04-deck-swiped-x1")
+
+        // MARK: Undo
+        let undoButton = app.buttons["deck.undo"]
+        XCTAssertTrue(undoButton.waitForExistence(timeout: 5))
+        undoButton.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("05-deck-undo")
+
+        // MARK: Deck filter popover
+        app.buttons["deck.filter"].tap()
+        XCTAssertTrue(app.staticTexts["Hide:"].waitForExistence(timeout: 5), "Hide-sorted popover should appear")
+        capture("06-deck-filter-popover")
+        tapOutside()
+
+        // MARK: Compare pill -> Compare view initial state
+        let comparePill = app.buttons["deck.comparePill"]
+        XCTAssertTrue(comparePill.waitForExistence(timeout: 10), "Compare pill should appear on the burst-cluster card")
+        comparePill.tap()
+        XCTAssertTrue(app.staticTexts["Compare"].waitForExistence(timeout: 10), "Compare header should appear")
+        capture("07-compare-initial")
+
+        // MARK: Thumbs-up one photo in the group -> controls enabled + green dot
+        let acceptButton = app.buttons["compare.accept"].firstMatch
+        XCTAssertTrue(acceptButton.waitForExistence(timeout: 5))
+        acceptButton.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        let confirmButton = app.buttons["compare.confirm"]
+        XCTAssertTrue(confirmButton.isEnabled, "Confirm should be enabled once at least one photo is sorted")
+        capture("08-compare-thumbsup")
+
+        // MARK: Confirm group resolution -> system delete confirmation dialog
+        confirmButton.tap()
+        let systemAlert = app.alerts.firstMatch
+        XCTAssertTrue(systemAlert.waitForExistence(timeout: 10), "PhotoKit's system delete-confirmation dialog should appear")
+        capture("09-compare-confirm-dialog")
+
+        // Cancel (not Delete) so the seeded library survives for the
+        // Utilities / smart-collection steps below.
+        if systemAlert.buttons["Cancel"].exists {
+            systemAlert.buttons["Cancel"].tap()
+        } else {
+            systemAlert.buttons.element(boundBy: 0).tap()
+        }
+        Thread.sleep(forTimeInterval: 1.0)
+
+        // Cancelling the system dialog surfaces CompareViewModel's own error
+        // alert (the PhotoKit delete failed) — dismiss it too.
+        let resolveErrorAlert = app.alerts["Couldn't resolve group"]
+        if resolveErrorAlert.waitForExistence(timeout: 3) {
+            resolveErrorAlert.buttons["OK"].tap()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+
+        // MARK: Leave Compare, then leave Deck, back to My Life
+        app.buttons["compare.dismiss"].tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        app.buttons["deck.dismiss"].tap()
+        Thread.sleep(forTimeInterval: 1.0)
+
+        // MARK: Utilities tab
+        app.buttons["tab.utilities"].tap()
+        XCTAssertTrue(app.staticTexts["Utilities"].waitForExistence(timeout: 10))
+        capture("10-utilities")
+
+        // MARK: Each of the 6 Utilities smart collections
+        let smartCollections: [(identifier: String, shot: String)] = [
+            ("smartCollection.tile.shuffle", "11-smart-shuffle"),
+            ("smartCollection.tile.favorites", "12-smart-favorites"),
+            ("smartCollection.tile.screenshots", "13-smart-screenshots"),
+            ("smartCollection.tile.videos", "14-smart-videos"),
+            ("smartCollection.tile.photos", "15-smart-photos"),
+            ("smartCollection.tile.livePhotos", "16-smart-livephotos"),
+        ]
+        for entry in smartCollections {
+            let tile = app.otherElements[entry.identifier]
+            XCTAssertTrue(tile.waitForExistence(timeout: 10), "\(entry.identifier) tile missing")
+            tile.tap()
+            Thread.sleep(forTimeInterval: 1.0)
+            capture(entry.shot)
+            let dismiss = app.buttons["smartCollection.dismiss"]
+            XCTAssertTrue(dismiss.waitForExistence(timeout: 5))
+            dismiss.tap()
+            Thread.sleep(forTimeInterval: 1.0)
+        }
+
+        // MARK: Profile tab
+        app.buttons["tab.profile"].tap()
+        XCTAssertTrue(app.staticTexts["Profile"].waitForExistence(timeout: 10))
+        capture("17-profile")
+    }
+}
