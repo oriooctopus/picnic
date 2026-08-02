@@ -10,22 +10,22 @@ import AVFoundation
 /// group. Every asset is synthesized with CoreGraphics at record time so
 /// there is nothing to check into git.
 ///
-/// Idempotent-ish: a marker asset with a fixed sentinel creationDate is
-/// created alongside the seed content; if it's already present the whole
-/// routine is skipped so re-running (e.g. a second CI dispatch against a
-/// simulator that wasn't reset) does not duplicate the library.
+/// Idempotent-ish: idempotency is checked by looking for an asset whose
+/// creationDate exactly matches the first real seed item's timestamp; if
+/// it's already present the whole routine is skipped so re-running (e.g. a
+/// second CI dispatch against a simulator that wasn't reset) does not
+/// duplicate the library.
 enum SeedLibrary {
     enum SeedError: Error {
         case videoGenerationFailed
     }
 
-    // MARK: Marker / idempotency
-
-    static let sentinelDate: Date = date(2000, 1, 1, 0, 0, 0)
+    // MARK: Idempotency
 
     static func isAlreadySeeded() -> Bool {
+        let firstSeedDate = buildItems()[0].date
         let options = PHFetchOptions()
-        options.predicate = NSPredicate(format: "creationDate == %@", sentinelDate as NSDate)
+        options.predicate = NSPredicate(format: "creationDate == %@", firstSeedDate as NSDate)
         return PHAsset.fetchAssets(with: options).count > 0
     }
 
@@ -107,7 +107,7 @@ enum SeedLibrary {
 
     static func seedIfNeeded() async throws {
         guard !isAlreadySeeded() else {
-            print("SeedLibrary: seed marker already present, skipping")
+            print("SeedLibrary: first seed asset already present, skipping")
             return
         }
         print("SeedLibrary: seeding library...")
@@ -127,12 +127,6 @@ enum SeedLibrary {
         }
 
         try await PHPhotoLibrary.shared().performChanges {
-            let markerRequest = PHAssetCreationRequest.forAsset()
-            if let data = makeImage(text: "SEED", color: .darkGray, size: CGSize(width: 400, height: 400)).pngData() {
-                markerRequest.addResource(with: .photo, data: data, options: nil)
-            }
-            markerRequest.creationDate = sentinelDate
-
             for item in items {
                 if item.isVideo {
                     guard let url = videoURLs[item.index] else { continue }
@@ -154,7 +148,7 @@ enum SeedLibrary {
             }
         }
 
-        print("SeedLibrary: seeding complete (\(items.count) content assets + 1 marker)")
+        print("SeedLibrary: seeding complete (\(items.count) content assets)")
     }
 
     // MARK: Image synthesis (CoreGraphics, no network)

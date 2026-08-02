@@ -11,6 +11,7 @@ struct MyLifeView: View {
     @State private var scrollProxy: ScrollViewProxy?
     @State private var showScrollTop = false
     @State private var selectedMonth: MonthBucket?
+    @State private var hasScrolledToInitialBottom = false
 
     private var groupedByYear: [YearGroup] {
         let grouped = Dictionary(grouping: appState.monthBuckets, by: \.year)
@@ -43,6 +44,8 @@ struct MyLifeView: View {
                         }
                         .padding(.horizontal)
                     }
+
+                    Color.clear.frame(height: 1).id("bottom")
                 }
                 .background(
                     GeometryReader { geo in
@@ -57,6 +60,10 @@ struct MyLifeView: View {
             .onAppear {
                 scrollProxy = proxy
                 appState.refreshMonths()
+                scrollToBottomIfNeeded(proxy)
+            }
+            .onChange(of: appState.monthBuckets.count) { _ in
+                scrollToBottomIfNeeded(proxy)
             }
         }
         .overlay(alignment: .bottom) {
@@ -84,6 +91,18 @@ struct MyLifeView: View {
             .onDisappear { appState.refreshMonths() }
         }
         .background(Color.black.ignoresSafeArea())
+    }
+
+    /// On first appear, and again once the async seed/photo-library fetch
+    /// populates `monthBuckets`, jump to the bottom (most recent month) —
+    /// matches the reference app, which lives at the bottom with the
+    /// floating ↑ button to jump back to the top. Unanimated, and only
+    /// fires once so it doesn't yank the user back down on later data
+    /// refreshes (e.g. returning from DeckView).
+    private func scrollToBottomIfNeeded(_ proxy: ScrollViewProxy) {
+        guard !hasScrolledToInitialBottom, !appState.monthBuckets.isEmpty else { return }
+        hasScrolledToInitialBottom = true
+        proxy.scrollTo("bottom", anchor: .bottom)
     }
 
     private var header: some View {

@@ -72,6 +72,35 @@ final class WalkthroughUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)
     }
 
+    /// Waits for `element` to exist; if it doesn't show up within the
+    /// initial wait, scrolls the lazy grid to find it — the grid now opens
+    /// scrolled to the bottom (most recent month), so the element should
+    /// already be on screen, but this keeps the lookup robust against lazy
+    /// hydration timing. Tries swiping up first (content is below the fold),
+    /// then swiping down (content is above the fold), each bounded to avoid
+    /// an infinite loop if the element is genuinely absent.
+    private func waitForElementByScrolling(
+        _ element: XCUIElement,
+        initialTimeout: TimeInterval = 10,
+        maxSwipesEachDirection: Int = 6
+    ) -> Bool {
+        if element.waitForExistence(timeout: initialTimeout) { return true }
+
+        for _ in 0..<maxSwipesEachDirection {
+            if element.exists { return true }
+            app.swipeUp()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        if element.waitForExistence(timeout: 2) { return true }
+
+        for _ in 0..<maxSwipesEachDirection {
+            if element.exists { return true }
+            app.swipeDown()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        return element.waitForExistence(timeout: 2)
+    }
+
     func testFullWalkthrough() throws {
         // MARK: My Life grid (seeding can take a while: image + video
         // synthesis + one PhotoKit batch insert of ~28 assets)
@@ -82,9 +111,9 @@ final class WalkthroughUITests: XCTestCase {
         // Query any element type: SwiftUI may expose the card as a button,
         // image, or plain view depending on the tap-gesture plumbing.
         let seededMonth = app.descendants(matching: .any)["monthCard.2025-05"].firstMatch
-        let monthAppeared = seededMonth.waitForExistence(timeout: 90)
+        let monthAppeared = waitForElementByScrolling(seededMonth, initialTimeout: 90)
         capture("01-mylife")
-        XCTAssertTrue(monthAppeared, "Seeded month 2025-05 (burst cluster A) should appear in the grid")
+        XCTAssertTrue(monthAppeared, "Seeded month 2025-05 (burst cluster A) should appear in the grid, even after scrolling up to 6 screens in each direction")
 
         // MARK: Long-press month card -> context menu
         // Coordinate press (rather than pressing the element directly) for
