@@ -73,22 +73,26 @@ struct DeckView: View {
         currentImage = await ThumbnailLoader.fullImage(for: asset, targetSize: CGSize(width: 1200, height: 1600))
     }
 
+    /// Top-right X (and the quiet drag-to-dismiss below): dismiss immediately
+    /// when nothing is pending; when swipes are pending, commit first (the
+    /// existing PhotoKit batch delete + system confirm) and only dismiss once
+    /// that commit succeeds, so a declined/failed commit leaves the deck open
+    /// with the pending count intact.
+    private func exitDeck() async {
+        guard !viewModel.pendingDeleteIDs.isEmpty else {
+            dismiss()
+            return
+        }
+        await viewModel.commitDeletions()
+        if viewModel.commitError == nil {
+            dismiss()
+        }
+    }
+
     // MARK: Top bar
 
     private var topBar: some View {
         HStack {
-            // No swipe-to-dismiss on a fullScreenCover, and the reference
-            // screenshots don't show an explicit back control either — added
-            // this so the deck is actually navigable back to My Life.
-            Button { dismiss() } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 32, height: 32)
-                    .background(Circle().fill(Color(white: 0.15)))
-            }
-            .accessibilityIdentifier("deck.dismiss")
-
             Button { viewModel.shuffle() } label: {
                 Image(systemName: "shuffle")
                     .font(.system(size: 18, weight: .semibold))
@@ -115,7 +119,7 @@ struct DeckView: View {
 
             ZStack(alignment: .topTrailing) {
                 Button {
-                    Task { await viewModel.commitDeletions() }
+                    Task { await exitDeck() }
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 18, weight: .semibold))
@@ -123,7 +127,7 @@ struct DeckView: View {
                         .frame(width: 40, height: 40)
                         .background(Circle().fill(Color(white: 0.15)))
                 }
-                .disabled(viewModel.pendingDeleteIDs.isEmpty || viewModel.isCommitting)
+                .disabled(viewModel.isCommitting)
                 .accessibilityIdentifier("deck.commit")
 
                 if viewModel.pendingDeleteIDs.count > 0 {
@@ -201,6 +205,17 @@ struct DeckView: View {
 
     private func handleSwipeEnd(_ value: DragGesture.Value) {
         let threshold: CGFloat = 110
+        let dismissThreshold: CGFloat = 140
+
+        // Quiet secondary exit: a plain downward drag on the card, distinct
+        // from the horizontal delete/keep swipes, with no visible chrome.
+        // Reuses the same commit-then-dismiss logic as the top-right X.
+        if value.translation.height > dismissThreshold && abs(value.translation.width) < 80 {
+            withAnimation(.spring) { dragOffset = .zero }
+            Task { await exitDeck() }
+            return
+        }
+
         if value.translation.width < -threshold {
             withAnimation(.spring) { dragOffset = CGSize(width: -600, height: value.translation.height) }
             viewModel.markForDelete()

@@ -14,8 +14,10 @@ struct MyLifeView: View {
 
     private var groupedByYear: [YearGroup] {
         let grouped = Dictionary(grouping: appState.monthBuckets, by: \.year)
-        return grouped.keys.sorted(by: >).map { year in
-            YearGroup(year: year, months: grouped[year]!.sorted { $0.month > $1.month })
+        // Ascending: oldest year/month first, most recent at the bottom —
+        // matches the reference (2025 section above 2026, Jan→Dec within).
+        return grouped.keys.sorted(by: <).map { year in
+            YearGroup(year: year, months: grouped[year]!.sorted { $0.month < $1.month })
         }
     }
 

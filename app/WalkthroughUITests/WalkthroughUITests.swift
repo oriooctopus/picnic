@@ -87,7 +87,10 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(monthAppeared, "Seeded month 2025-05 (burst cluster A) should appear in the grid")
 
         // MARK: Long-press month card -> context menu
-        seededMonth.press(forDuration: 1.0)
+        // Coordinate press (rather than pressing the element directly) for
+        // hittability robustness — the element's own hit-test can miss on
+        // some simulator/CI configurations even when it exists.
+        seededMonth.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.2)
         XCTAssertTrue(app.buttons["month.markSorted"].waitForExistence(timeout: 5), "Long-press context menu should appear")
         capture("02-longpress-context-menu")
         tapOutside()
@@ -158,9 +161,13 @@ final class WalkthroughUITests: XCTestCase {
         }
 
         // MARK: Leave Compare, then leave Deck, back to My Life
+        // deck.dismiss (the old chevron) is gone — the X (deck.commit) is now
+        // the only exit affordance. Nothing is pending at this point (the one
+        // swipe-left was undone, and the compare resolution was cancelled),
+        // so tapping it dismisses immediately without a commit.
         app.buttons["compare.dismiss"].tap()
         Thread.sleep(forTimeInterval: 1.0)
-        app.buttons["deck.dismiss"].tap()
+        app.buttons["deck.commit"].tap()
         Thread.sleep(forTimeInterval: 1.0)
 
         // MARK: Utilities tab

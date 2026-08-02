@@ -15,34 +15,50 @@ struct MonthCardView: View {
         appState.sortStore.isMonthManuallySorted(month.key) || (month.assets.isEmpty == false && remainingCount == 0)
     }
 
+    // Portrait ~2:3 per PARITY.md.
+    private let cardAspectRatio: CGFloat = 2.0 / 3.0
+    private let cornerRadius: CGFloat = 16
+
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            RoundedRectangle(cornerRadius: 18)
-                .fill(Color(white: 0.15))
+        // GeometryReader pins an EXACT pixel width/height for every layer
+        // (background fill, cover image, gradient) instead of letting the
+        // ZStack infer its own size from the cover Image's intrinsic aspect
+        // ratio. Without this, a `.resizable().aspectRatio(.fill)` Image with
+        // no explicit frame can leak its source aspect ratio upward through
+        // the ZStack and override the LazyVGrid's flexible column width —
+        // that's what produced the overlapping, wildly-different-width cards.
+        GeometryReader { geo in
+            let size = geo.size
+            ZStack(alignment: .bottomLeading) {
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(Color(white: 0.15))
 
-            if let coverImage {
-                Image(uiImage: coverImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-            }
-
-            LinearGradient(colors: [.black.opacity(0.75), .clear], startPoint: .bottom, endPoint: .top)
-                .clipShape(RoundedRectangle(cornerRadius: 18))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(month.monthAbbreviation)
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                if isSorted {
-                    Text("Sorted").font(.subheadline.bold()).foregroundStyle(.green)
-                } else {
-                    Text("\(remainingCount)").font(.subheadline).foregroundStyle(.white.opacity(0.85))
+                if let coverImage {
+                    Image(uiImage: coverImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: size.width, height: size.height)
+                        .clipped()
                 }
+
+                LinearGradient(colors: [.black.opacity(0.75), .clear], startPoint: .bottom, endPoint: .top)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(month.monthAbbreviation)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                    if isSorted {
+                        Text("Sorted").font(.subheadline.bold()).foregroundStyle(.green)
+                    } else {
+                        Text("\(remainingCount)").font(.subheadline).foregroundStyle(.white.opacity(0.85))
+                    }
+                }
+                .padding(10)
             }
-            .padding(10)
+            .frame(width: size.width, height: size.height)
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         }
-        .aspectRatio(0.78, contentMode: .fit)
+        .aspectRatio(cardAspectRatio, contentMode: .fit)
         .contextMenu {
             Button {
                 appState.sortStore.setMonthManuallySorted(true, monthKey: month.key)
