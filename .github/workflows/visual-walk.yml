@@ -93,8 +93,12 @@ jobs:
       - name: Install app + grant photo library access
         run: |
           xcrun simctl install "$SIM_UDID" "$APP_PATH"
-          xcrun simctl privacy "$SIM_UDID" grant photos "$BUNDLE_ID"
+          # photos-add BEFORE photos: granting add-only second can downgrade
+          # the full-library grant, which leaves the app stuck behind the
+          # "requesting additional access" sheet. The walkthrough also taps
+          # "Allow Full Access" itself if the sheet appears anyway.
           xcrun simctl privacy "$SIM_UDID" grant photos-add "$BUNDLE_ID"
+          xcrun simctl privacy "$SIM_UDID" grant photos "$BUNDLE_ID"
 
       - name: Run WalkthroughUITests (reusing derived data from the build step)
         env:

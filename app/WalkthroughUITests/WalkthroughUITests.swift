@@ -29,6 +29,24 @@ final class WalkthroughUITests: XCTestCase {
         }
 
         app.launch()
+        dismissPhotoPermissionSheetIfPresent()
+    }
+
+    /// The simctl TCC grants don't reliably yield FULL photo access on the
+    /// runner's simulator — the app can come up behind the system
+    /// "requesting additional access" sheet (Limit Access… / Allow Full
+    /// Access / Keep Add Only). Tap Allow Full Access wherever it surfaces
+    /// (in-process sheet or springboard alert).
+    private func dismissPhotoPermissionSheetIfPresent() {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        for container in [app!, springboard] {
+            let allow = container.buttons["Allow Full Access"]
+            if allow.waitForExistence(timeout: 5) {
+                allow.tap()
+                Thread.sleep(forTimeInterval: 2.0)
+                return
+            }
+        }
     }
 
     private func capture(_ name: String, delay: TimeInterval = 1.0) {
