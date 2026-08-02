@@ -13,7 +13,13 @@ on:
       - "server/**"
       - ".github/workflows/sim-test.yml"
       - "README.md"
+      - "SPEC.md"
+      - "**/*.md"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   ota:

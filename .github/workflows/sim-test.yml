@@ -4,13 +4,14 @@ name: sim-test
 # launch + tab navigation. PhotoKit deletion and the mirror POST need a real
 # device with a real photo library — SPEC.md's own verification plan scopes
 # that to Oliver's manual OTA install test, not CI.
+# Dispatch-only per rules/github-actions-cost.md: only the delivery workflow
+# (ota.yml) auto-triggers; test suites are run deliberately, batched.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "app/**"
-      - ".github/workflows/sim-test.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   sim-test:
