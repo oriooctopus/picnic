@@ -1,0 +1,15 @@
+{
+  "name": "picnic-mirror-server",
+  "version": "1.0.0",
+  "description": "Picnic Google Photos mirror queue server + worker",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node queue-server.mjs",
+    "worker": "node worker.mjs",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "playwright-core": "^1.47.0"
+  }
+}

@@ -1,0 +1,95 @@
+default_platform(:ios)
+
+APP_ID = "com.oliverullman.picnic"
+ADHOC_PROFILE_NAME = "Picnic AdHoc"
+TEAM_ID = "J66WVM2DTX"
+ADHOC_OUTPUT_DIR = "build/adhoc"
+
+platform :ios do
+  desc "Build an ad-hoc signed ipa for over-the-air install on the registered device"
+  lane :adhoc do
+    api_key = asc_api_key
+    ensure_bundle_id
+
+    # First run for this brand-new bundle id: no ad hoc profile exists yet,
+    # so get_provisioning_profile (sigh) creates one against the App ID
+    # registered above. readonly stays false so a newly registered device
+    # gets folded in by regenerating the profile on later runs too.
+    get_provisioning_profile(
+      api_key: api_key,
+      adhoc: true,
+      app_identifier: APP_ID,
+      provisioning_name: ADHOC_PROFILE_NAME,
+      team_id: TEAM_ID,
+      readonly: false,
+    )
+
+    stamp_build_number
+
+    update_code_signing_settings(
+      path: "Picnic.xcodeproj",
+      targets: ["Picnic"],
+      use_automatic_signing: false,
+      team_id: TEAM_ID,
+      code_sign_identity: "Apple Distribution",
+      profile_name: ADHOC_PROFILE_NAME,
+    )
+
+    build_app(
+      project: "Picnic.xcodeproj",
+      scheme: "Picnic",
+      export_method: "ad-hoc",
+      output_directory: ADHOC_OUTPUT_DIR,
+      export_options: {
+        signingStyle: "manual",
+        provisioningProfiles: {
+          APP_ID => ADHOC_PROFILE_NAME,
+        },
+      },
+      xcargs: "CODE_SIGN_STYLE=Manual " \
+              "DEVELOPMENT_TEAM=#{TEAM_ID} " \
+              "CODE_SIGN_IDENTITY='Apple Distribution'",
+    )
+
+    UI.success("Ad hoc ipa: #{lane_context[SharedValues::IPA_OUTPUT_PATH]}")
+  end
+
+  private_lane :asc_api_key do
+    app_store_connect_api_key(
+      key_id: ENV["ASC_KEY_ID"],
+      issuer_id: ENV["ASC_ISSUER_ID"],
+      key_content: ENV["ASC_KEY_P8"],
+    )
+  end
+
+  # Picnic is a brand-new bundle id with no existing Developer Portal record.
+  # This registers it (Developer Portal App ID only — ad hoc distribution
+  # needs no App Store Connect app record, so `produce` is not used) so the
+  # very first CI run can self-provision instead of failing on "no such App ID".
+  private_lane :ensure_bundle_id do
+    Spaceship::ConnectAPI.auth(
+      key_id: ENV["ASC_KEY_ID"],
+      issuer_id: ENV["ASC_ISSUER_ID"],
+      key: ENV["ASC_KEY_P8"],
+    )
+    existing = Spaceship::ConnectAPI::BundleId
+      .all(filter: { identifier: APP_ID })
+      .find { |b| b.identifier == APP_ID }
+    if existing
+      UI.message("Bundle id #{APP_ID} is already registered")
+    else
+      Spaceship::ConnectAPI::BundleId.create(
+        name: "Picnic",
+        identifier: APP_ID,
+        platform: Spaceship::ConnectAPI::BundleIdPlatform::IOS,
+      )
+      UI.success("Registered bundle id #{APP_ID}")
+    end
+  end
+
+  private_lane :stamp_build_number do
+    build_number = Time.now.strftime("%Y%m%d%H%M")
+    set_info_plist_value(path: "Picnic/Resources/Info.plist", key: "CFBundleVersion", value: build_number)
+    build_number
+  end
+end

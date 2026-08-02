@@ -1,0 +1,86 @@
+name: sim-test
+
+# Builds Picnic for the iOS Simulator and runs a UI smoke test covering
+# launch + tab navigation. PhotoKit deletion and the mirror POST need a real
+# device with a real photo library — SPEC.md's own verification plan scopes
+# that to Oliver's manual OTA install test, not CI.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - ".github/workflows/sim-test.yml"
+
+jobs:
+  sim-test:
+    runs-on: macos-15
+    env:
+      BUNDLE_ID: com.oliverullman.picnic
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: |
+          cd app
+          xcodegen generate
+
+      - name: Build for simulator
+        run: |
+          cd app
+          xcodebuild \
+            -project Picnic.xcodeproj \
+            -scheme Picnic \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          echo "APP_PATH=$(ls -d build/Build/Products/Debug-iphonesimulator/*.app | head -1)" >> $GITHUB_ENV
+
+      - name: Boot simulator
+        run: |
+          UDID=$(xcrun simctl list devices available | grep -m1 "iPhone" | grep -oE '[0-9A-F-]{36}')
+          echo "SIM_UDID=$UDID" >> $GITHUB_ENV
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+
+      - name: Install app + grant photo library access
+        run: |
+          xcrun simctl install "$SIM_UDID" "$APP_PATH"
+          xcrun simctl privacy "$SIM_UDID" grant photos "$BUNDLE_ID"
+          xcrun simctl privacy "$SIM_UDID" grant photos-add "$BUNDLE_ID"
+
+      - name: Launch + screenshot My Life
+        run: |
+          set -x
+          xcrun simctl launch "$SIM_UDID" "$BUNDLE_ID"
+          sleep 4
+          xcrun simctl io "$SIM_UDID" screenshot "$GITHUB_WORKSPACE/my-life-screen.png" || true
+          xcrun simctl terminate "$SIM_UDID" "$BUNDLE_ID" || true
+
+      # PASS criteria: launch + tab navigation to Utilities and Profile.
+      # See app/PicnicUITests/PicnicSmokeUITests.swift for the assertions.
+      - name: Run UI smoke tests
+        run: |
+          cd app
+          xcodebuild test \
+            -project Picnic.xcodeproj \
+            -scheme Picnic \
+            -destination "id=$SIM_UDID" \
+            -only-testing:PicnicUITests \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-screens
+          path: my-life-screen.png
+          if-no-files-found: ignore

@@ -1,0 +1,18 @@
+[Unit]
+Description=Picnic Google Photos mirror queue server (port 8307 — 8306 was taken by another local service)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/coding/picnic/server
+ExecStart=/usr/bin/node %h/coding/picnic/server/queue-server.mjs
+# NOTE: currently installed pointing at the `build` worktree
+# (%h/coding/picnic/.claude/worktrees/build/server) until this branch is
+# merged into master at %h/coding/picnic/server — update WorkingDirectory/
+# ExecStart to the paths above (no worktree segment) after merge, then
+# `systemctl --user daemon-reload && systemctl --user restart picnic-mirror`.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,6 @@
+/Picnic.xcodeproj/
+Picnic/Resources/Info.plist
+build/
+*.ipa
+.DS_Store
+xcuserdata/
