@@ -5,10 +5,6 @@ struct CompareView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject var viewModel: CompareViewModel
     @State private var pageIndex = 0
-    /// Backs `.scrollPosition(id:)` — kept separate from `pageIndex` because
-    /// the scroll view can only report/accept an Int?, while `pageIndex`
-    /// (used by the thumbnail strip below) needs a non-optional default.
-    @State private var scrollPosition: Int?
 
     init(viewModel: CompareViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -18,44 +14,33 @@ struct CompareView: View {
         VStack(spacing: 0) {
             header
 
-            // One card fills the viewport edge-to-edge, snapping one at a
-            // time — no neighboring-card peek. `.containerRelativeFrame`
-            // was tried first but reserves ~24pt it doesn't account for
-            // inside this ScrollView/LazyHStack combo, silently bleeding
-            // the next card through the gap; an explicit GeometryReader
-            // width sidesteps that entirely.
-            GeometryReader { proxy in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: 0) {
-                        ForEach(Array(viewModel.group.assets.enumerated()), id: \.element.localIdentifier) { index, asset in
-                            ComparePhotoCardView(
-                                asset: asset,
-                                isBest: asset.localIdentifier == viewModel.bestAssetID,
-                                fileSize: viewModel.fileSizes[asset.localIdentifier],
-                                isAccepted: viewModel.acceptedAssetID == asset.localIdentifier,
-                                isRejected: viewModel.rejectedAssetIDs.contains(asset.localIdentifier),
-                                isFavorite: viewModel.favoritedAssetIDs.contains(asset.localIdentifier),
-                                onReject: { viewModel.reject(asset) },
-                                onAccept: { viewModel.accept(asset) },
-                                onFavorite: { Task { await viewModel.toggleFavorite(asset) } }
-                            )
-                            .frame(width: proxy.size.width)
-                            .id(index)
-                        }
-                    }
-                    .scrollTargetLayout()
-                }
-                .scrollTargetBehavior(.viewAligned)
-                .scrollPosition(id: $scrollPosition)
-                .onChange(of: scrollPosition) { _, newValue in
-                    if let newValue { pageIndex = newValue }
-                }
-                .onChange(of: pageIndex) { _, newValue in
-                    if scrollPosition != newValue {
-                        withAnimation { scrollPosition = newValue }
-                    }
+            // TabView(.page) is the primitive actually built for "one page
+            // exactly fills the view, swipe to the next, nothing else
+            // visible" — a hand-rolled ScrollView(.horizontal) +
+            // .scrollTargetBehavior(.viewAligned) was tried first (twice:
+            // once with containerRelativeFrame, once with an explicit
+            // GeometryReader width) and both left an identical ~24pt strip
+            // of the next card bleeding in on the trailing edge — that
+            // reservation turned out to be inherent to .viewAligned itself,
+            // not the card's sizing, so no amount of width-fixing touched
+            // it. TabView(.page) doesn't have that behavior.
+            TabView(selection: $pageIndex) {
+                ForEach(Array(viewModel.group.assets.enumerated()), id: \.element.localIdentifier) { index, asset in
+                    ComparePhotoCardView(
+                        asset: asset,
+                        isBest: asset.localIdentifier == viewModel.bestAssetID,
+                        fileSize: viewModel.fileSizes[asset.localIdentifier],
+                        isAccepted: viewModel.acceptedAssetID == asset.localIdentifier,
+                        isRejected: viewModel.rejectedAssetIDs.contains(asset.localIdentifier),
+                        isFavorite: viewModel.favoritedAssetIDs.contains(asset.localIdentifier),
+                        onReject: { viewModel.reject(asset) },
+                        onAccept: { viewModel.accept(asset) },
+                        onFavorite: { Task { await viewModel.toggleFavorite(asset) } }
+                    )
+                    .tag(index)
                 }
             }
+            .tabViewStyle(.page(indexDisplayMode: .never))
 
             bottomBar
         }
