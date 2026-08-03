@@ -41,7 +41,6 @@ struct ComparePhotoCardView: View {
                 RoundedRectangle(cornerRadius: 20)
                     .stroke(isAccepted ? Color.green : (isRejected ? Color.red : .clear), lineWidth: 3)
             )
-            .padding(.horizontal, 16)
 
             HStack(spacing: 6) {
                 if isBest {
@@ -55,15 +54,16 @@ struct ComparePhotoCardView: View {
                 }
             }
             .font(.footnote)
+            .textCase(.uppercase)
 
             HStack(spacing: 40) {
                 Button(action: onReject) {
-                    Image(systemName: "trash.fill").foregroundStyle(isRejected ? .red : .white)
+                    Image(systemName: isRejected ? "trash.fill" : "trash").foregroundStyle(isRejected ? .red : .white)
                 }
                 .accessibilityIdentifier("compare.reject")
                 Rectangle().fill(Color.white.opacity(0.2)).frame(width: 1, height: 20)
                 Button(action: onAccept) {
-                    Image(systemName: "hand.thumbsup.fill").foregroundStyle(isAccepted ? .green : .white)
+                    Image(systemName: isAccepted ? "hand.thumbsup.fill" : "hand.thumbsup").foregroundStyle(isAccepted ? .green : .white)
                 }
                 .accessibilityIdentifier("compare.accept")
                 Button(action: onFavorite) {
