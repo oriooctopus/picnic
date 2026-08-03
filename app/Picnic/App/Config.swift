@@ -1,10 +1,10 @@
 import Foundation
 
-/// Endpoints and other build-time constants. The mirror token itself lives in
-/// `MirrorToken.swift`, which CI overwrites with the real secret at build
-/// time (see .github/workflows/ota.yml) — never commit a real token here.
+/// Endpoints and other build-time constants. The mirror token AND host live
+/// in `MirrorToken.swift`, which CI overwrites with the real values at build
+/// time (see .github/workflows/ota.yml) — never commit either here.
 enum Config {
-    static let mirrorHost = "MIRROR_HOST"
+    static let mirrorHost = MirrorToken.host
     // NOTE: SPEC.md originally said 8306; the mirror server ended up on 8307
     // because 8306 was already taken on the host machine. This is the port
     // the actual `picnic-mirror` service listens on.

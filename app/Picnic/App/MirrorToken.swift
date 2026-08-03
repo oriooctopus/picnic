@@ -4,4 +4,8 @@
 // loudly with 401s instead of silently mirroring with no auth.
 enum MirrorToken {
     static let value = "NO_TOKEN_BAKED_IN"
+    /// Mirror server host, baked from the PICNIC_MIRROR_HOST secret. Kept out
+    /// of source so the repository can be public without publishing the
+    /// machine's address.
+    static let host = "NO_HOST_BAKED_IN"
 }
