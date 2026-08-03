@@ -9,9 +9,23 @@ struct DeckView: View {
     @State private var currentImage: UIImage?
     @State private var dragOffset: CGSize = .zero
     @State private var showHidePopover = false
-    @State private var showLivePhoto = false
-    @State private var livePhoto: PHLivePhoto?
-    @State private var activeCompareGroup: CompareGroup?
+    /// One presentation slot for both modals. Two `.fullScreenCover`
+    /// modifiers on the same view silently collapse into one in SwiftUI —
+    /// the Compare cover never presented while a live-photo cover was also
+    /// attached here.
+    @State private var presentation: DeckPresentation?
+
+    enum DeckPresentation: Identifiable {
+        case compare(CompareGroup)
+        case livePhoto(PHLivePhoto)
+
+        var id: String {
+            switch self {
+            case .compare(let group): return "compare-\(group.id)"
+            case .livePhoto: return "livePhoto"
+            }
+        }
+    }
 
     init(viewModel: DeckViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -71,18 +85,18 @@ struct DeckView: View {
         .task(id: viewModel.currentAsset?.localIdentifier) {
             await loadCurrentImage()
         }
-        .fullScreenCover(item: $activeCompareGroup) { group in
-            CompareView(viewModel: CompareViewModel(
-                group: group,
-                monthKey: viewModel.month.key,
-                sortStore: appState.sortStore,
-                photoLibrary: appState.photoLibrary,
-                mirrorQueue: appState.mirrorQueue
-            ))
-        }
-        .fullScreenCover(isPresented: $showLivePhoto) {
-            if let livePhoto {
-                LivePhotoPlayerView(livePhoto: livePhoto) { showLivePhoto = false }
+        .fullScreenCover(item: $presentation) { item in
+            switch item {
+            case .compare(let group):
+                CompareView(viewModel: CompareViewModel(
+                    group: group,
+                    monthKey: viewModel.month.key,
+                    sortStore: appState.sortStore,
+                    photoLibrary: appState.photoLibrary,
+                    mirrorQueue: appState.mirrorQueue
+                ))
+            case .livePhoto(let livePhoto):
+                LivePhotoPlayerView(livePhoto: livePhoto) { presentation = nil }
             }
         }
         .alert("Couldn't delete", isPresented: Binding(
@@ -225,7 +239,7 @@ struct DeckView: View {
             if let group = GroupingService.group(containing: asset, in: viewModel.visibleAssets),
                !appState.sortStore.isGroupResolved(group.id) {
                 Button {
-                    activeCompareGroup = group
+                    presentation = .compare(group)
                 } label: {
                     HStack(spacing: 6) {
                         Text("Compare \(group.assets.count)")
@@ -293,8 +307,8 @@ struct DeckView: View {
     private func presentLivePhotoIfNeeded(_ asset: PHAsset) {
         guard asset.mediaSubtypes.contains(.photoLive) else { return }
         Task {
-            livePhoto = await LivePhotoLoader.load(asset: asset)
-            showLivePhoto = livePhoto != nil
+            guard let loaded = await LivePhotoLoader.load(asset: asset) else { return }
+            presentation = .livePhoto(loaded)
         }
     }
 
