@@ -40,7 +40,7 @@ REQUIRED = [
     "16-smart-livephotos", "17-profile",
     "18-deck-large-month", "19-deck-exit-nothing-pending",
     "20-compare-swipe-down-exit", "21-hide-sorted-on",
-    "22-deck-drag-framerate",
+    "22-deck-drag-framerate", "23-deck-drag-framerate-large",
 ]
 
 # Best-effort: one per test method, captured in tearDown. See module

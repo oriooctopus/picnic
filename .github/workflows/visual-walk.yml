@@ -110,6 +110,17 @@ jobs:
           xcrun simctl privacy "$SIM_UDID" grant photos-add "$BUNDLE_ID"
           xcrun simctl privacy "$SIM_UDID" grant photos "$BUNDLE_ID"
 
+      # Screen recording of the whole test run. Screenshots prove layout;
+      # only video shows whether an interaction is smooth or juddering, which
+      # is the actual question for the deck's swipe.
+      - name: Start screen recording
+        run: |
+          nohup xcrun simctl io "$SIM_UDID" recordVideo --codec=h264 --force \
+            "$GITHUB_WORKSPACE/sim-recording.mp4" > /tmp/record.log 2>&1 &
+          echo "RECORD_PID=$!" >> "$GITHUB_ENV"
+          sleep 3
+          echo "recording started (pid $!)"
+
       - name: Run WalkthroughUITests (reusing derived data from the build step)
         env:
           # Best-effort direct write from the test runner process (which runs
@@ -138,6 +149,27 @@ jobs:
             -derivedDataPath build \
             "${ONLY_TESTING_FLAGS[@]}" \
             CODE_SIGNING_ALLOWED=NO
+
+      # recordVideo only finalizes the container on SIGINT — killing it any
+      # other way leaves an unplayable file.
+      - name: Stop screen recording
+        if: always()
+        run: |
+          if [ -n "${RECORD_PID:-}" ]; then kill -INT "$RECORD_PID" 2>/dev/null || true; fi
+          for _ in $(seq 1 30); do
+            pgrep -f "simctl io .* recordVideo" > /dev/null || break
+            sleep 1
+          done
+          sleep 2
+          ls -lh "$GITHUB_WORKSPACE/sim-recording.mp4" || echo "no recording produced"
+          cat /tmp/record.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sim-recording
+          path: sim-recording.mp4
+          if-no-files-found: warn
 
       # XCUITest attachments live inside the .xcresult bundle, not as loose
       # files. `xcresulttool get test-results attachments` (first-party,

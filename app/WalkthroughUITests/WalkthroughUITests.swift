@@ -508,24 +508,46 @@ final class WalkthroughUITests: XCTestCase {
     /// else is changed.
     func test15DeckDragFrameRate() throws {
         relaunch(withExtraArguments: ["--seed-large-month"])
-
         XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 30))
-        let largeMonth = app.descendants(matching: .any)["monthCard.2026-06"].firstMatch
-        XCTAssertTrue(waitForElementByScrolling(largeMonth, initialTimeout: 180),
-                      "Large seeded month should appear")
-        largeMonth.tap()
+
+        // Control first: the small hand-authored month (5 small photos). Same
+        // gesture, same code path, cheap content — so any difference against
+        // the large month is attributable to scale and decode cost rather than
+        // to the harness or the simulator having a bad day.
+        let small = measureDrags(onMonth: "monthCard.2025-05", label: "SMALL-5-photos")
+        capture("22-deck-drag-framerate")
+
+        // Then the realistic one: 300 camera-sized photos.
+        let large = measureDrags(onMonth: "monthCard.2026-06", label: "LARGE-300-realistic")
+        capture("23-deck-drag-framerate-large")
+
+        print("PERFHUD SMALL: \(small)")
+        print("PERFHUD LARGE: \(large)")
+        let comparison = "SMALL (5 photos): \(small)\nLARGE (300 realistic): \(large)"
+        let dump = XCTAttachment(string: comparison)
+        dump.name = "perf-stats"
+        dump.lifetime = .keepAlways
+        add(dump)
+    }
+
+    /// Opens a month's deck, starts the frame monitor, performs several slow
+    /// sustained drags, and returns the monitor's summary line. Slow velocity
+    /// keeps a finger down across many frames, which is where stutter shows
+    /// up — a quick flick is over before enough frames elapse to measure.
+    private func measureDrags(onMonth identifier: String, label: String) -> String {
+        let monthCard = app.descendants(matching: .any)[identifier].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(monthCard, initialTimeout: 180),
+                      "\(label): month \(identifier) should appear in the grid")
+        monthCard.tap()
 
         let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
-        XCTAssertTrue(deckCard.waitForExistence(timeout: 60), "Deck should open on the large month")
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 60), "\(label): deck should open")
 
-        // Long-press the title to start the frame monitor (same gesture Oliver
-        // uses on the phone).
+        // Long-press the title to start the monitor — the same gesture that
+        // reveals the HUD on the phone.
         app.descendants(matching: .any)["deck.title"].firstMatch.press(forDuration: 1.0)
         Thread.sleep(forTimeInterval: 0.5)
 
-        // Several deliberate, slow drags. Slow velocity keeps a finger on the
-        // screen across many frames, which is where stutter shows up; a quick
-        // flick would be over before enough frames elapsed to measure.
         for _ in 0..<5 {
             deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
                 .press(forDuration: 0.2,
@@ -536,15 +558,12 @@ final class WalkthroughUITests: XCTestCase {
         }
 
         let stats = app.descendants(matching: .any)["perf.stats"].firstMatch
-        XCTAssertTrue(stats.waitForExistence(timeout: 10), "Perf probe should be present")
-        // The probe carries the numbers in its label.
-        print("PERFHUD: \(stats.label)")
-        capture("22-deck-drag-framerate")
+        let summary = stats.waitForExistence(timeout: 10) ? stats.label : "probe missing"
 
-        let axDump = XCTAttachment(string: stats.label)
-        axDump.name = "perf-stats"
-        axDump.lifetime = .keepAlways
-        add(axDump)
+        // Back to the grid for the next measurement.
+        app.buttons["deck.commit"].tap()
+        _ = app.staticTexts["My life"].waitForExistence(timeout: 15)
+        return summary
     }
 
     /// setUp already launched the app; relaunching is how a test opts into

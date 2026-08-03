@@ -164,32 +164,47 @@ enum SeedLibrary {
         }
         print("SeedLibrary: seeding large month (\(largeMonthCount) assets)...")
 
-        // Generated outside performChanges: at camera resolution this is real
-        // CPU work, and holding the library's change block open for all of it
-        // is both slow and pointless.
-        var payloads: [(Data, Date)] = []
-        payloads.reserveCapacity(largeMonthCount)
-        for item in buildLargeMonthItems() {
-            let image = makeNoisyImage(text: "\(item.index)", color: item.color, size: item.pixelSize)
-            // Quality 0.9 on noisy content keeps the file in the MB range, the
-            // way a real camera photo is. Compressing noise hard would defeat
-            // the point.
-            guard let data = image.jpegData(compressionQuality: 0.9) else { continue }
-            payloads.append((data, item.date))
-        }
-        let totalMB = Double(payloads.reduce(0) { $0 + $1.0.count }) / 1_000_000
-        print(String(format: "SeedLibrary: generated %d realistic photos, %.0f MB total (%.1f MB each)",
-                     payloads.count, totalMB, totalMB / Double(max(payloads.count, 1))))
+        // Generated and written in chunks. A 3024x4032 bitmap is ~49 MB and
+        // its JPEG a few MB; building all of them up front held roughly a
+        // gigabyte and got the app killed mid-seed ("Lost connection to the
+        // application"). Chunking caps live memory at one batch, and the
+        // autoreleasepool releases each render's temporaries rather than
+        // letting them pile up until the loop ends.
+        let items = buildLargeMonthItems()
+        let chunkSize = 20
+        var totalBytes = 0
 
-        try await PHPhotoLibrary.shared().performChanges {
-            for (data, date) in payloads {
-                let request = PHAssetCreationRequest.forAsset()
-                request.addResource(with: .photo, data: data, options: nil)
-                request.creationDate = date
+        for start in stride(from: 0, to: items.count, by: chunkSize) {
+            let chunk = Array(items[start..<min(start + chunkSize, items.count)])
+            var payloads: [(Data, Date)] = []
+            payloads.reserveCapacity(chunk.count)
+
+            for item in chunk {
+                autoreleasepool {
+                    let image = makeNoisyImage(text: "\(item.index)", color: item.color, size: item.pixelSize)
+                    // Quality 0.9 on high-frequency content keeps the file in
+                    // the MB range, the way a real camera photo is.
+                    // Compressing it hard would defeat the point.
+                    if let data = image.jpegData(compressionQuality: 0.9) {
+                        payloads.append((data, item.date))
+                    }
+                }
             }
+
+            totalBytes += payloads.reduce(0) { $0 + $1.0.count }
+            try await PHPhotoLibrary.shared().performChanges {
+                for (data, date) in payloads {
+                    let request = PHAssetCreationRequest.forAsset()
+                    request.addResource(with: .photo, data: data, options: nil)
+                    request.creationDate = date
+                }
+            }
+            print("SeedLibrary: wrote \(min(start + chunkSize, items.count))/\(items.count)")
         }
 
-        print("SeedLibrary: large month seeding complete")
+        let totalMB = Double(totalBytes) / 1_000_000
+        print(String(format: "SeedLibrary: large month complete — %d photos, %.0f MB total (%.1f MB each)",
+                     items.count, totalMB, totalMB / Double(max(items.count, 1))))
     }
 
     // MARK: Entry point
