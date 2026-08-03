@@ -168,6 +168,14 @@ final class WalkthroughUITests: XCTestCase {
         // MARK: Compare pill -> Compare view initial state
         let comparePill = app.buttons["deck.comparePill"]
         XCTAssertTrue(comparePill.waitForExistence(timeout: 10), "Compare pill should appear on the burst-cluster card")
+        // Ground-truth AX frames immediately before the pill tap, mirroring
+        // ax-dump-pre-tap above — if the pill's reported AX frame ever
+        // diverges from where it's actually rendered again, this is what
+        // will prove it.
+        let axDumpPrePill = XCTAttachment(string: app.debugDescription)
+        axDumpPrePill.name = "ax-dump-pre-pill"
+        axDumpPrePill.lifetime = .keepAlways
+        add(axDumpPrePill)
         comparePill.tap()
         XCTAssertTrue(app.staticTexts["Compare"].waitForExistence(timeout: 10), "Compare header should appear")
         capture("07-compare-initial")

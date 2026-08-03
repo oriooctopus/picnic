@@ -21,6 +21,14 @@ struct FilmstripView: View {
                 .padding(.horizontal, 12)
             }
             .frame(height: 56)
+            .onAppear {
+                // Without this, the strip sits at its natural leading-edge
+                // scroll position (current thumbnail flush left, half cut
+                // off by the frame) until currentIndex first changes — the
+                // .onChange below never fires on initial load since nothing
+                // has changed yet.
+                proxy.scrollTo(currentIndex, anchor: .center)
+            }
             .onChange(of: currentIndex) { _, newValue in
                 withAnimation { proxy.scrollTo(newValue, anchor: .center) }
             }

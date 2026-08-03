@@ -35,12 +35,22 @@ struct DeckView: View {
                     // decorative — no image loaded, just the card shape at
                     // reduced scale/opacity — so it costs nothing extra to
                     // fetch.
+                    // Each layer is an explicit short, rounded-rect sliver
+                    // pinned to the top of the card area — not a full-height
+                    // rectangle offset by a few points. A full-height shape
+                    // offset by only 10-20pt reads as a flat, wide capsule
+                    // bar (the sliver is far shorter than the 24pt corner
+                    // radius, so the curve never shows); a real card-shaped
+                    // peek needs a visible height taller than its own corner
+                    // radius.
                     ForEach(Array(stride(from: 2, through: 1, by: -1)), id: \.self) { depth in
                         if viewModel.currentIndex + depth < viewModel.visibleAssets.count {
-                            RoundedRectangle(cornerRadius: 24)
+                            RoundedRectangle(cornerRadius: 20)
                                 .fill(Color(white: 0.08 + Double(depth) * 0.03))
-                                .padding(.horizontal, 16 + CGFloat(depth) * 14)
-                                .offset(y: -CGFloat(depth) * 10)
+                                .frame(height: 36)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                                .padding(.horizontal, 16 + CGFloat(depth) * 8)
+                                .offset(y: -CGFloat(depth) * 6)
                         }
                     }
                 }
@@ -158,8 +168,8 @@ struct DeckView: View {
                 }
             }
         }
-        .padding(.horizontal)
-        .padding(.top, 8)
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
     }
 
     // MARK: Card
@@ -191,6 +201,26 @@ struct DeckView: View {
         // the "deck.card" identifier onto multiple inner layers.
         .accessibilityElement(children: .ignore)
         .accessibilityIdentifier("deck.card")
+        // Drag + long-press are scoped to ONLY this base layer (image +
+        // live-photo badge), not to the composite that includes the Compare
+        // pill below. Previously both gestures were attached after the
+        // .overlay(...) call, so they covered the pill's Button too; an
+        // ancestor .gesture(DragGesture()) sitting over a nested Button
+        // gets first refusal on touch-down, and .onLongPressGesture in
+        // particular installs a recognizer that holds the touch waiting to
+        // see if it becomes a long-press, delaying (and in practice
+        // swallowing) the Button's own tap recognition. Scoping the
+        // gestures below the pill removes the conflict outright instead of
+        // trying to out-prioritize it.
+        .contentShape(RoundedRectangle(cornerRadius: 24))
+        .gesture(
+            DragGesture()
+                .onChanged { value in dragOffset = value.translation }
+                .onEnded { value in handleSwipeEnd(value) }
+        )
+        .onLongPressGesture(minimumDuration: 0.35) {
+            presentLivePhotoIfNeeded(asset)
+        }
         .overlay(alignment: .bottom) {
             if let group = GroupingService.group(containing: asset, in: viewModel.visibleAssets),
                !appState.sortStore.isGroupResolved(group.id) {
@@ -207,6 +237,7 @@ struct DeckView: View {
                     .padding(.vertical, 8)
                     .background(Capsule().fill(.black.opacity(0.55)))
                 }
+                .buttonStyle(.plain)
                 .accessibilityIdentifier("deck.comparePill")
                 .padding(.bottom, 16)
             }
@@ -214,14 +245,6 @@ struct DeckView: View {
         .padding(.horizontal, 16)
         .offset(dragOffset)
         .rotationEffect(.degrees(Double(dragOffset.width / 20)))
-        .gesture(
-            DragGesture()
-                .onChanged { value in dragOffset = value.translation }
-                .onEnded { value in handleSwipeEnd(value) }
-        )
-        .onLongPressGesture(minimumDuration: 0.35) {
-            presentLivePhotoIfNeeded(asset)
-        }
     }
 
     private func handleSwipeEnd(_ value: DragGesture.Value) {
