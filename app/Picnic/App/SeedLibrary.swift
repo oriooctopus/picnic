@@ -264,39 +264,53 @@ enum SeedLibrary {
         }
     }
 
-    /// Camera-like content: coloured noise plus gradient bands, so the JPEG
-    /// encoder cannot collapse it and the decoder has to do real work. A flat
-    /// fill at this resolution still compresses to a handful of KB, which is
-    /// exactly the trap the earlier stress test fell into.
+    /// A full-resolution noise field, built once and reused.
+    ///
+    /// Drawing per-pixel noise into 300 separate 12-megapixel canvases would
+    /// mean tens of millions of fill operations and take longer than the CI
+    /// job. Only the decode cost of the resulting JPEGs matters for what this
+    /// is measuring, and that is identical whether every photo has its own
+    /// noise or they share one field — so it is generated once from a small
+    /// tile scaled up, then tinted and numbered per asset.
+    private static let noiseBase: UIImage = {
+        // A small tile of true per-pixel noise...
+        let tileSide = 64
+        var pixels = [UInt8](repeating: 0, count: tileSide * tileSide * 4)
+        var seed: UInt64 = 0x9E3779B97F4A7C15
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17
+            pixels[i] = UInt8(seed & 0xFF)
+            pixels[i + 1] = UInt8((seed >> 8) & 0xFF)
+            pixels[i + 2] = UInt8((seed >> 16) & 0xFF)
+            pixels[i + 3] = 255
+        }
+        let ctx = CGContext(
+            data: &pixels, width: tileSide, height: tileSide,
+            bitsPerComponent: 8, bytesPerRow: tileSide * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )
+        let tile = ctx!.makeImage()!
+
+        // ...blown up to camera resolution with interpolation off, so the
+        // result stays high-frequency and refuses to compress away.
+        let renderer = UIGraphicsImageRenderer(size: realisticPixelSize)
+        return renderer.image { g in
+            g.cgContext.interpolationQuality = .none
+            g.cgContext.draw(tile, in: CGRect(origin: .zero, size: realisticPixelSize))
+        }
+    }()
+
+    /// Camera-sized, high-frequency content, so the JPEG encoder cannot
+    /// collapse it and the decoder has to do real work. A flat fill at this
+    /// resolution still compresses to a handful of KB, which is exactly the
+    /// trap the earlier stress test fell into.
     private static func makeNoisyImage(text: String, color: UIColor, size: CGSize) -> UIImage {
         let renderer = UIGraphicsImageRenderer(size: size)
-        return renderer.image { ctx in
-            color.setFill()
+        return renderer.image { _ in
+            noiseBase.draw(in: CGRect(origin: .zero, size: size))
+            color.withAlphaComponent(0.25).setFill()
             UIRectFill(CGRect(origin: .zero, size: size))
-
-            // Deterministic per-image so runs stay comparable.
-            var seed = UInt64(truncatingIfNeeded: text.hashValue) | 1
-            func next() -> Double {
-                seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17
-                return Double(seed % 1000) / 1000
-            }
-
-            // Coarse noise blocks — fine enough to defeat compression, coarse
-            // enough that generating 300 of these doesn't take all day.
-            let block: CGFloat = 8
-            var y: CGFloat = 0
-            while y < size.height {
-                var x: CGFloat = 0
-                while x < size.width {
-                    UIColor(
-                        red: CGFloat(next()), green: CGFloat(next()),
-                        blue: CGFloat(next()), alpha: 0.55
-                    ).setFill()
-                    ctx.fill(CGRect(x: x, y: y, width: block, height: block))
-                    x += block
-                }
-                y += block
-            }
 
             let font = UIFont.boldSystemFont(ofSize: size.height * 0.3)
             let attrs: [NSAttributedString.Key: Any] = [
