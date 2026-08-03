@@ -8,6 +8,10 @@ struct DeckView: View {
 
     @State private var currentImage: UIImage?
     @State private var showHidePopover = false
+    /// Long-press the month title to reveal the frame-rate readout. Hidden by
+    /// default so it never intrudes on normal use, but present in the ad-hoc
+    /// build because the phone is the only place the stutter reproduces.
+    @State private var showPerfHUD = false
     /// One presentation slot for both modals. Two `.fullScreenCover`
     /// modifiers on the same view silently collapse into one in SwiftUI —
     /// the Compare cover never presented while a live-photo cover was also
@@ -96,6 +100,14 @@ struct DeckView: View {
             bottomControls
         }
         .background(Color.black.ignoresSafeArea())
+        .overlay(alignment: .topLeading) {
+            if showPerfHUD {
+                PerfHUD().padding(.leading, 12).padding(.top, 64)
+            }
+        }
+        // Always mounted (invisible) so a UI test can read the numbers without
+        // needing the HUD itself shown.
+        .overlay(alignment: .topLeading) { PerfStatsProbe() }
         .task(id: viewModel.currentAsset?.localIdentifier) {
             await loadCurrentImage()
         }
@@ -168,6 +180,11 @@ struct DeckView: View {
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.6))
                 }
+            }
+            .accessibilityIdentifier("deck.title")
+            .onLongPressGesture(minimumDuration: 0.8) {
+                showPerfHUD.toggle()
+                if showPerfHUD { PerfMonitor.shared.start() } else { PerfMonitor.shared.stop() }
             }
 
             Spacer()

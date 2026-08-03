@@ -40,6 +40,7 @@ REQUIRED = [
     "16-smart-livephotos", "17-profile",
     "18-deck-large-month", "19-deck-exit-nothing-pending",
     "20-compare-swipe-down-exit", "21-hide-sorted-on",
+    "22-deck-drag-framerate",
 ]
 
 # Best-effort: one per test method, captured in tearDown. See module
@@ -60,6 +61,7 @@ OPTIONAL = [
     "99-final-test12DeckExitWithNothingPending",
     "99-final-test13CompareSwipeDownToExit",
     "99-final-test14HideSortedActuallyFilters",
+    "99-final-test15DeckDragFrameRate",
 ]
 
 EXPECTED = REQUIRED + OPTIONAL

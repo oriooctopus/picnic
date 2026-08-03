@@ -32,6 +32,17 @@ enum SeedLibrary {
     private static let largeMonthYear = 2026
     private static let largeMonthMonth = 6
 
+    /// Camera-sized, and deliberately noisy.
+    ///
+    /// This is the difference between a stress test and a fake one. The
+    /// previous large-month seed used 200x300 flat-colour JPEGs — a solid
+    /// colour at that size compresses to a couple of KB and decodes for free,
+    /// so `ThumbnailLoader` looked instant no matter how many times it was
+    /// called. A real photo is ~4032x3024 and several MB, and decoding one is
+    /// orders of magnitude more work. Any deck-performance measurement taken
+    /// against flat colour is measuring nothing.
+    private static let realisticPixelSize = CGSize(width: 3024, height: 4032)
+
     // MARK: Idempotency
 
     static func isAlreadySeeded() -> Bool {
@@ -139,7 +150,7 @@ enum SeedLibrary {
                 date: date(largeMonthYear, largeMonthMonth, day, hour, 0, 0),
                 index: i + 1,
                 color: palette[i % palette.count],
-                pixelSize: CGSize(width: 200, height: 300),
+                pixelSize: realisticPixelSize,
                 format: .jpeg,
                 isVideo: false
             )
@@ -153,13 +164,28 @@ enum SeedLibrary {
         }
         print("SeedLibrary: seeding large month (\(largeMonthCount) assets)...")
 
+        // Generated outside performChanges: at camera resolution this is real
+        // CPU work, and holding the library's change block open for all of it
+        // is both slow and pointless.
+        var payloads: [(Data, Date)] = []
+        payloads.reserveCapacity(largeMonthCount)
+        for item in buildLargeMonthItems() {
+            let image = makeNoisyImage(text: "\(item.index)", color: item.color, size: item.pixelSize)
+            // Quality 0.9 on noisy content keeps the file in the MB range, the
+            // way a real camera photo is. Compressing noise hard would defeat
+            // the point.
+            guard let data = image.jpegData(compressionQuality: 0.9) else { continue }
+            payloads.append((data, item.date))
+        }
+        let totalMB = Double(payloads.reduce(0) { $0 + $1.0.count }) / 1_000_000
+        print(String(format: "SeedLibrary: generated %d realistic photos, %.0f MB total (%.1f MB each)",
+                     payloads.count, totalMB, totalMB / Double(max(payloads.count, 1))))
+
         try await PHPhotoLibrary.shared().performChanges {
-            for item in buildLargeMonthItems() {
-                let image = makeImage(text: "\(item.index)", color: item.color, size: item.pixelSize)
-                guard let data = image.jpegData(compressionQuality: 0.7) else { continue }
+            for (data, date) in payloads {
                 let request = PHAssetCreationRequest.forAsset()
                 request.addResource(with: .photo, data: data, options: nil)
-                request.creationDate = item.date
+                request.creationDate = date
             }
         }
 
@@ -235,6 +261,54 @@ enum SeedLibrary {
                 height: textSize.height
             )
             text.draw(in: rect, withAttributes: attrs)
+        }
+    }
+
+    /// Camera-like content: coloured noise plus gradient bands, so the JPEG
+    /// encoder cannot collapse it and the decoder has to do real work. A flat
+    /// fill at this resolution still compresses to a handful of KB, which is
+    /// exactly the trap the earlier stress test fell into.
+    private static func makeNoisyImage(text: String, color: UIColor, size: CGSize) -> UIImage {
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { ctx in
+            color.setFill()
+            UIRectFill(CGRect(origin: .zero, size: size))
+
+            // Deterministic per-image so runs stay comparable.
+            var seed = UInt64(truncatingIfNeeded: text.hashValue) | 1
+            func next() -> Double {
+                seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17
+                return Double(seed % 1000) / 1000
+            }
+
+            // Coarse noise blocks — fine enough to defeat compression, coarse
+            // enough that generating 300 of these doesn't take all day.
+            let block: CGFloat = 8
+            var y: CGFloat = 0
+            while y < size.height {
+                var x: CGFloat = 0
+                while x < size.width {
+                    UIColor(
+                        red: CGFloat(next()), green: CGFloat(next()),
+                        blue: CGFloat(next()), alpha: 0.55
+                    ).setFill()
+                    ctx.fill(CGRect(x: x, y: y, width: block, height: block))
+                    x += block
+                }
+                y += block
+            }
+
+            let font = UIFont.boldSystemFont(ofSize: size.height * 0.3)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: UIColor.white,
+            ]
+            let textSize = text.size(withAttributes: attrs)
+            text.draw(in: CGRect(
+                x: (size.width - textSize.width) / 2,
+                y: (size.height - textSize.height) / 2,
+                width: textSize.width, height: textSize.height
+            ), withAttributes: attrs)
         }
     }
 

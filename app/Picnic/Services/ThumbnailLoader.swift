@@ -1,5 +1,6 @@
 import Photos
 import UIKit
+import QuartzCore
 
 /// PHImageManager wrappers. Both use `.highQualityFormat` deliberately —
 /// `.opportunistic` calls its result handler twice (low-res, then high-res),
@@ -24,16 +25,26 @@ enum ThumbnailLoader {
     }
 
     static func fullImage(for asset: PHAsset, targetSize: CGSize) async -> UIImage? {
-        await withCheckedContinuation { continuation in
+        let started = CACurrentMediaTime()
+        return await withCheckedContinuation { continuation in
             let options = PHImageRequestOptions()
             options.deliveryMode = .highQualityFormat
             options.isNetworkAccessAllowed = true
             var didResume = false
             PHImageManager.default().requestImage(
                 for: asset, targetSize: targetSize, contentMode: .aspectFit, options: options
-            ) { image, _ in
+            ) { image, info in
                 guard !didResume else { return }
                 didResume = true
+                // Whether PhotoKit had to pull this from iCloud rather than
+                // local storage. On a phone with Optimize Storage on, this is
+                // a network round trip per card — and it can never happen on a
+                // simulator, whose library is always local, so no CI run can
+                // surface it.
+                let fromICloud = (info?[PHImageResultIsInCloudKey] as? Bool) ?? false
+                PerfMonitor.shared.recordImageLoad(
+                    seconds: CACurrentMediaTime() - started, fromICloud: fromICloud
+                )
                 continuation.resume(returning: image)
             }
         }

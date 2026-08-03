@@ -497,6 +497,56 @@ final class WalkthroughUITests: XCTestCase {
         return value
     }
 
+    /// Measures the thing the user actually feels: frames dropped while
+    /// dragging. test11's wall-clock timings passed comfortably while the app
+    /// still stuttered on a real phone, because total latency and smoothness
+    /// are different measurements — a drag can finish in 3 seconds and judder
+    /// the entire way.
+    ///
+    /// This does NOT assert a threshold. Its job right now is to report real
+    /// numbers so the stutter can be reproduced and attributed before anything
+    /// else is changed.
+    func test15DeckDragFrameRate() throws {
+        relaunch(withExtraArguments: ["--seed-large-month"])
+
+        XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 30))
+        let largeMonth = app.descendants(matching: .any)["monthCard.2026-06"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(largeMonth, initialTimeout: 180),
+                      "Large seeded month should appear")
+        largeMonth.tap()
+
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 60), "Deck should open on the large month")
+
+        // Long-press the title to start the frame monitor (same gesture Oliver
+        // uses on the phone).
+        app.descendants(matching: .any)["deck.title"].firstMatch.press(forDuration: 1.0)
+        Thread.sleep(forTimeInterval: 0.5)
+
+        // Several deliberate, slow drags. Slow velocity keeps a finger on the
+        // screen across many frames, which is where stutter shows up; a quick
+        // flick would be over before enough frames elapsed to measure.
+        for _ in 0..<5 {
+            deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+                .press(forDuration: 0.2,
+                       thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)),
+                       withVelocity: .slow,
+                       thenHoldForDuration: 0.2)
+            Thread.sleep(forTimeInterval: 0.4)
+        }
+
+        let stats = app.descendants(matching: .any)["perf.stats"].firstMatch
+        XCTAssertTrue(stats.waitForExistence(timeout: 10), "Perf probe should be present")
+        // The probe carries the numbers in its label.
+        print("PERFHUD: \(stats.label)")
+        capture("22-deck-drag-framerate")
+
+        let axDump = XCTAttachment(string: stats.label)
+        axDump.name = "perf-stats"
+        axDump.lifetime = .keepAlways
+        add(axDump)
+    }
+
     /// setUp already launched the app; relaunching is how a test opts into
     /// extra seeding without making every other test pay for it.
     private func relaunch(withExtraArguments extra: [String]) {
