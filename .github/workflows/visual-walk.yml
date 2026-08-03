@@ -7,6 +7,11 @@ name: visual-walk
 # every push.
 on:
   workflow_dispatch:
+    inputs:
+      only_testing:
+        description: 'Comma-separated WalkthroughUITests method names to run (blank = full suite)'
+        required: false
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -115,12 +120,23 @@ jobs:
         run: |
           mkdir -p "$WALKTHROUGH_SCREENSHOT_DIR"
           cd app
+
+          ONLY_TESTING_FLAGS=()
+          IFS=',' read -ra METHODS <<< "${{ github.event.inputs.only_testing }}"
+          if [ -n "${{ github.event.inputs.only_testing }}" ]; then
+            for m in "${METHODS[@]}"; do
+              ONLY_TESTING_FLAGS+=("-only-testing:WalkthroughUITests/$m")
+            done
+          else
+            ONLY_TESTING_FLAGS+=("-only-testing:WalkthroughUITests")
+          fi
+
           xcodebuild test-without-building \
             -project Picnic.xcodeproj \
             -scheme Picnic \
             -destination "id=$SIM_UDID" \
             -derivedDataPath build \
-            -only-testing:WalkthroughUITests \
+            "${ONLY_TESTING_FLAGS[@]}" \
             CODE_SIGNING_ALLOWED=NO
 
       # XCUITest attachments live inside the .xcresult bundle, not as loose
