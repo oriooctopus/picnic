@@ -72,6 +72,21 @@ final class PhotoLibraryService: ObservableObject {
         PHAsset.fetchAssets(with: fetchOptions(for: kind)).count
     }
 
+    /// A single representative asset for the Utilities tile's cover photo —
+    /// most-recent for the date/type-scoped collections, a random pick for
+    /// Shuffle (matching its dice glyph). `nil` when the collection is
+    /// empty, in which case the tile stays the plain dark placeholder.
+    func coverAsset(for kind: SmartCollectionKind) -> PHAsset? {
+        if kind == .shuffle {
+            let result = PHAsset.fetchAssets(with: fetchOptions(for: kind))
+            guard result.count > 0 else { return nil }
+            return result.object(at: Int.random(in: 0..<result.count))
+        }
+        let options = fetchOptions(for: kind)
+        options.fetchLimit = 1
+        return PHAsset.fetchAssets(with: options).firstObject
+    }
+
     func fetchSmartCollection(_ kind: SmartCollectionKind) -> [PHAsset] {
         let result = PHAsset.fetchAssets(with: fetchOptions(for: kind))
         var assets: [PHAsset] = []

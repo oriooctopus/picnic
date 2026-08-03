@@ -32,6 +32,10 @@ struct UtilitiesView: View {
                 .padding(.horizontal)
             }
         }
+        // Matches MyLifeView's clearance for the floating tab-bar pill
+        // (defect A) — the last row's captions were rendering behind it.
+        .contentMargins(.top, 4, for: .scrollContent)
+        .contentMargins(.bottom, 110, for: .scrollContent)
         .background(Color.black.ignoresSafeArea())
         .task { await loadCounts() }
         .fullScreenCover(item: $selectedKind) { kind in

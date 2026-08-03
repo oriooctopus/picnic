@@ -5,6 +5,10 @@ struct CompareView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject var viewModel: CompareViewModel
     @State private var pageIndex = 0
+    /// Backs `.scrollPosition(id:)` — kept separate from `pageIndex` because
+    /// the scroll view can only report/accept an Int?, while `pageIndex`
+    /// (used by the thumbnail strip below) needs a non-optional default.
+    @State private var scrollPosition: Int?
 
     init(viewModel: CompareViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -14,29 +18,45 @@ struct CompareView: View {
         VStack(spacing: 0) {
             header
 
-            TabView(selection: $pageIndex) {
-                ForEach(Array(viewModel.group.assets.enumerated()), id: \.element.localIdentifier) { index, asset in
-                    ComparePhotoCardView(
-                        asset: asset,
-                        isBest: asset.localIdentifier == viewModel.bestAssetID,
-                        fileSize: viewModel.fileSizes[asset.localIdentifier],
-                        isAccepted: viewModel.acceptedAssetID == asset.localIdentifier,
-                        isRejected: viewModel.rejectedAssetIDs.contains(asset.localIdentifier),
-                        isFavorite: viewModel.favoritedAssetIDs.contains(asset.localIdentifier),
-                        onReject: { viewModel.reject(asset) },
-                        onAccept: { viewModel.accept(asset) },
-                        onFavorite: { Task { await viewModel.toggleFavorite(asset) } }
-                    )
-                    .tag(index)
+            // A `TabView(.page)` with `.scrollClipDisabled()` was tried here
+            // first to get neighboring cards to peek in at the edges, but
+            // page-style TabView clips its pages to its own bounds
+            // regardless — the modifier had no effect. A view-aligned
+            // horizontal ScrollView genuinely supports peeking neighbors:
+            // `.contentMargins` insets the viewport (so adjacent cards spill
+            // into the freed-up edges) while `.scrollTargetBehavior(.paging)`
+            // still snaps one card at a time like the reference.
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 16) {
+                    ForEach(Array(viewModel.group.assets.enumerated()), id: \.element.localIdentifier) { index, asset in
+                        ComparePhotoCardView(
+                            asset: asset,
+                            isBest: asset.localIdentifier == viewModel.bestAssetID,
+                            fileSize: viewModel.fileSizes[asset.localIdentifier],
+                            isAccepted: viewModel.acceptedAssetID == asset.localIdentifier,
+                            isRejected: viewModel.rejectedAssetIDs.contains(asset.localIdentifier),
+                            isFavorite: viewModel.favoritedAssetIDs.contains(asset.localIdentifier),
+                            onReject: { viewModel.reject(asset) },
+                            onAccept: { viewModel.accept(asset) },
+                            onFavorite: { Task { await viewModel.toggleFavorite(asset) } }
+                        )
+                        .containerRelativeFrame(.horizontal)
+                        .id(index)
+                    }
+                }
+                .scrollTargetLayout()
+            }
+            .contentMargins(.horizontal, 24, for: .scrollContent)
+            .scrollTargetBehavior(.viewAligned)
+            .scrollPosition(id: $scrollPosition)
+            .onChange(of: scrollPosition) { _, newValue in
+                if let newValue { pageIndex = newValue }
+            }
+            .onChange(of: pageIndex) { _, newValue in
+                if scrollPosition != newValue {
+                    withAnimation { scrollPosition = newValue }
                 }
             }
-            .tabViewStyle(.page(indexDisplayMode: .never))
-            // Inset the paging container itself (not the card) so the
-            // adjacent pages, which sit flush against this container's own
-            // edges, peek into the screen once clipping is disabled —
-            // matches the reference's edge-peeking carousel.
-            .padding(.horizontal, 24)
-            .scrollClipDisabled()
 
             bottomBar
         }

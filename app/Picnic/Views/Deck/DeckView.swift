@@ -43,28 +43,28 @@ struct DeckView: View {
 
             ZStack {
                 if viewModel.currentAsset != nil {
-                    // Stack-peek: the next 1-2 cards show as scaled-down,
-                    // offset-up slivers behind the current card, matching
+                    // Stack-peek: the next 1-2 cards show as narrower,
+                    // offset-up card shapes behind the current card, matching
                     // the reference deck's "stack of cards" read. Purely
                     // decorative — no image loaded, just the card shape at
                     // reduced scale/opacity — so it costs nothing extra to
                     // fetch.
-                    // Each layer is an explicit short, rounded-rect sliver
-                    // pinned to the top of the card area — not a full-height
-                    // rectangle offset by a few points. A full-height shape
-                    // offset by only 10-20pt reads as a flat, wide capsule
-                    // bar (the sliver is far shorter than the 24pt corner
-                    // radius, so the curve never shows); a real card-shaped
-                    // peek needs a visible height taller than its own corner
-                    // radius.
+                    // Each layer mirrors the real card's own frame (same
+                    // ZStack region, default-centered) rather than being
+                    // pinned to the top of the whole remaining height — the
+                    // previous version's top-alignment made the sliver span
+                    // the full card area's top edge, which sat flush against
+                    // (and behind) the header above it instead of behind the
+                    // card. Narrower horizontal insets keep it visibly
+                    // "behind" the card's sides, and the small upward offset
+                    // is enough to show a sliver of rounded top edge just
+                    // above the card without reaching the header.
                     ForEach(Array(stride(from: 2, through: 1, by: -1)), id: \.self) { depth in
                         if viewModel.currentIndex + depth < viewModel.visibleAssets.count {
-                            RoundedRectangle(cornerRadius: 20)
+                            RoundedRectangle(cornerRadius: 24)
                                 .fill(Color(white: 0.08 + Double(depth) * 0.03))
-                                .frame(height: 36)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                                .padding(.horizontal, 16 + CGFloat(depth) * 8)
-                                .offset(y: -CGFloat(depth) * 6)
+                                .padding(.horizontal, 20 + CGFloat(depth) * 14)
+                                .offset(y: -CGFloat(depth) * 8)
                         }
                     }
                 }
@@ -76,6 +76,9 @@ struct DeckView: View {
                 }
             }
             .frame(maxHeight: .infinity)
+            // Gap below the two-line header so the card (and its stack-peek
+            // layers) never overlaps the date/time subline (defect C1/C5).
+            .padding(.top, 16)
 
             bottomActionsRow
             positionAndFilmstrip
@@ -256,7 +259,7 @@ struct DeckView: View {
                 .padding(.bottom, 16)
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 20)
         .offset(dragOffset)
         .rotationEffect(.degrees(Double(dragOffset.width / 20)))
     }

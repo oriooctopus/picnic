@@ -217,6 +217,22 @@ final class WalkthroughUITests: XCTestCase {
         return confirmButton
     }
 
+    /// PhotoKit's system delete-confirmation dialog (like the photo-access
+    /// request sheet handled in dismissPhotoPermissionSheetIfPresent above)
+    /// can be hosted by springboard rather than the app process, depending
+    /// on the simulator/OS build. Poll both containers instead of assuming
+    /// `app.alerts` is where it lands.
+    private func firstSystemAlert(timeout: TimeInterval) -> XCUIElement? {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if app.alerts.firstMatch.exists { return app.alerts.firstMatch }
+            if springboard.alerts.firstMatch.exists { return springboard.alerts.firstMatch }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        return nil
+    }
+
     private func goToUtilities() {
         app.buttons["tab.utilities"].tap()
         XCTAssertTrue(app.staticTexts["Utilities"].waitForExistence(timeout: 10))
@@ -284,8 +300,10 @@ final class WalkthroughUITests: XCTestCase {
 
         // MARK: Confirm group resolution -> system delete confirmation dialog
         confirmButton.tap()
-        let systemAlert = app.alerts.firstMatch
-        XCTAssertTrue(systemAlert.waitForExistence(timeout: 10), "PhotoKit's system delete-confirmation dialog should appear")
+        guard let systemAlert = firstSystemAlert(timeout: 10) else {
+            XCTFail("PhotoKit's system delete-confirmation dialog should appear (checked both app.alerts and springboard.alerts)")
+            return
+        }
         capture("09-compare-confirm-dialog")
 
         // Cancel (not Delete) so the seeded library survives for any test

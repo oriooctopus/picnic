@@ -19,6 +19,15 @@ struct FilmstripView: View {
                     }
                 }
                 .padding(.horizontal, 12)
+                // When the strip's content is narrower than the available
+                // width (few thumbnails, or scrolled to the very start/end),
+                // a horizontal ScrollView leaves it flush against the
+                // leading edge by default (defect C4). Growing this wrapper
+                // to fill the ScrollView's width and centering the HStack
+                // within it fixes that for the narrow case while leaving
+                // normal leading-aligned scroll behavior intact once the
+                // content overflows.
+                .frame(maxWidth: .infinity, alignment: .center)
             }
             .frame(height: 56)
             .onAppear {

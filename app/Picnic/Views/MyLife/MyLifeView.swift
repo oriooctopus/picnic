@@ -13,6 +13,12 @@ struct MyLifeView: View {
     @State private var selectedMonth: MonthBucket?
     @State private var hasScrolledToInitialBottom = false
 
+    /// Clears the floating tab-bar pill (see RootTabView.bottomBar): its
+    /// capsule sits ~14pt vertical padding + ~20pt icon + 12pt bottom
+    /// padding + the home-indicator safe area, so scrollable content needs
+    /// at least that much bottom margin to avoid rendering behind it.
+    private static let tabBarClearance: CGFloat = 110
+
     private var emptyReason: String {
         switch appState.photoLibrary.authorizationStatus {
         case .authorized:
@@ -41,7 +47,16 @@ struct MyLifeView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
-                    header.id("top")
+                    header
+                        .id("top")
+                        // The floating ↑ button's job is "let me get back to
+                        // the header" — the header's own visibility is the
+                        // one ground truth for whether that's needed, so
+                        // drive showScrollTop directly off it scrolling in
+                        // and out of the viewport rather than a separate
+                        // pixel-offset threshold that can drift out of sync.
+                        .onAppear { showScrollTop = false }
+                        .onDisappear { showScrollTop = true }
 
                     // An empty grid has two very different causes and the
                     // user can act on only one of them, so say which it is
@@ -72,16 +87,13 @@ struct MyLifeView: View {
 
                     Color.clear.frame(height: 1).id("bottom")
                 }
-                .background(
-                    GeometryReader { geo in
-                        Color.clear.preference(key: ScrollOffsetKey.self, value: geo.frame(in: .named("scroll")).minY)
-                    }
-                )
             }
-            .coordinateSpace(name: "scroll")
-            .onPreferenceChange(ScrollOffsetKey.self) { value in
-                showScrollTop = value < -400
-            }
+            // Keep the top row clear of the status bar and the bottom row
+            // clear of the floating tab-bar pill (defect A) without
+            // disturbing the ScrollViewReader's own offset math the way
+            // extra padding inside the LazyVStack would.
+            .contentMargins(.top, 4, for: .scrollContent)
+            .contentMargins(.bottom, Self.tabBarClearance, for: .scrollContent)
             .onAppear {
                 scrollProxy = proxy
                 appState.refreshMonths()
@@ -102,7 +114,7 @@ struct MyLifeView: View {
                         .frame(width: 52, height: 52)
                         .background(Circle().fill(.white))
                 }
-                .padding(.bottom, 110)
+                .padding(.bottom, Self.tabBarClearance)
             }
         }
         .fullScreenCover(item: $selectedMonth) { month in
@@ -156,12 +168,5 @@ struct MyLifeView: View {
         }
         .padding(.horizontal)
         .padding(.top, 8)
-    }
-}
-
-struct ScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }

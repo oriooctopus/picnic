@@ -29,16 +29,16 @@ struct ComparePhotoCardView: View {
     var body: some View {
         VStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 20).fill(Color(white: 0.08))
+                RoundedRectangle(cornerRadius: 24).fill(Color(white: 0.08))
                 if let image {
                     Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                        .clipShape(RoundedRectangle(cornerRadius: 20))
+                        .clipShape(RoundedRectangle(cornerRadius: 24))
                 }
             }
             .overlay(
-                RoundedRectangle(cornerRadius: 20)
+                RoundedRectangle(cornerRadius: 24)
                     .stroke(isAccepted ? Color.green : (isRejected ? Color.red : .clear), lineWidth: 3)
             )
 
