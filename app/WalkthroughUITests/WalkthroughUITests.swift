@@ -153,7 +153,7 @@ final class WalkthroughUITests: XCTestCase {
             .press(forDuration: 0.1,
                    thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
                    withVelocity: .default,
-                   thenHoldFor: 0.1)
+                   thenHoldForDuration: 0.1)
         let pendingBadge = app.staticTexts["deck.pendingCount"]
         XCTAssertTrue(pendingBadge.waitForExistence(timeout: 5), "Pending-delete badge should appear after a swipe-left")
         XCTAssertEqual(pendingBadge.label, "1", "Badge should read 1 after exactly one swipe-left")
