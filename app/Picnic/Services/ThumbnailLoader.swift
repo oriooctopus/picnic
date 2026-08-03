@@ -30,6 +30,15 @@ enum ThumbnailLoader {
             let options = PHImageRequestOptions()
             options.deliveryMode = .highQualityFormat
             options.isNetworkAccessAllowed = true
+            // Without this the deck card holds a full-resolution photo.
+            // resizeMode defaults to .none, which tells PhotoKit not to resize
+            // at all — targetSize becomes a lower bound and a 12-megapixel
+            // original comes back whole. The card then re-renders that bitmap,
+            // masked by clipShape and transformed by offset/rotation, on every
+            // frame of a drag, which is what made swiping stutter on a real
+            // library. The sibling thumbnail() above already sets .fast; this
+            // one was simply missed.
+            options.resizeMode = .exact
             var didResume = false
             PHImageManager.default().requestImage(
                 for: asset, targetSize: targetSize, contentMode: .aspectFit, options: options
@@ -42,8 +51,16 @@ enum ThumbnailLoader {
                 // simulator, whose library is always local, so no CI run can
                 // surface it.
                 let fromICloud = (info?[PHImageResultIsInCloudKey] as? Bool) ?? false
+                // Pixel size is reported so the resizeMode above is verifiable
+                // on the device rather than taken on trust: if the HUD shows a
+                // card image anywhere near camera resolution, PhotoKit is
+                // handing back the original again.
+                let pixels = image.map { CGSize(width: $0.size.width * $0.scale,
+                                                height: $0.size.height * $0.scale) } ?? .zero
                 PerfMonitor.shared.recordImageLoad(
-                    seconds: CACurrentMediaTime() - started, fromICloud: fromICloud
+                    seconds: CACurrentMediaTime() - started,
+                    fromICloud: fromICloud,
+                    pixelSize: pixels
                 )
                 continuation.resume(returning: image)
             }

@@ -40,6 +40,7 @@ final class PerfMonitor: ObservableObject {
     @Published private(set) var imageLoads = 0
     @Published private(set) var imageLoadMsTotal = 0.0
     @Published private(set) var iCloudLoads = 0
+    @Published private(set) var lastImagePixels = CGSize.zero
 
     private var liveFrameCount = 0
     private var liveDroppedFrames = 0
@@ -47,6 +48,7 @@ final class PerfMonitor: ObservableObject {
     private var liveImageLoads = 0
     private var liveImageLoadMsTotal = 0.0
     private var liveICloudLoads = 0
+    private var liveLastImagePixels = CGSize.zero
 
     private var displayLink: CADisplayLink?
     private var snapshotTimer: Timer?
@@ -82,6 +84,7 @@ final class PerfMonitor: ObservableObject {
     func reset() {
         liveFrameCount = 0; liveDroppedFrames = 0; liveWorstFrameMs = 0
         liveImageLoads = 0; liveImageLoadMsTotal = 0; liveICloudLoads = 0
+        liveLastImagePixels = .zero
         lastTimestamp = 0
         publishSnapshot()
     }
@@ -93,6 +96,7 @@ final class PerfMonitor: ObservableObject {
         imageLoads = liveImageLoads
         imageLoadMsTotal = liveImageLoadMsTotal
         iCloudLoads = liveICloudLoads
+        lastImagePixels = liveLastImagePixels
     }
 
     /// Mutates only plain vars — nothing here may touch @Published state, or
@@ -107,11 +111,12 @@ final class PerfMonitor: ObservableObject {
         if delta > Self.droppedFrameThreshold { liveDroppedFrames += 1 }
     }
 
-    nonisolated func recordImageLoad(seconds: Double, fromICloud: Bool) {
+    nonisolated func recordImageLoad(seconds: Double, fromICloud: Bool, pixelSize: CGSize) {
         Task { @MainActor in
             liveImageLoads += 1
             liveImageLoadMsTotal += seconds * 1000
             if fromICloud { liveICloudLoads += 1 }
+            liveLastImagePixels = pixelSize
         }
     }
 
@@ -138,6 +143,6 @@ final class PerfMonitor: ObservableObject {
             format: "fps %.0f | drops %d/%d (%.0f%%) | worst %.0fms | imgs %d (%.0fms avg, %d iCloud)",
             effectiveFPS, droppedFrames, frameCount, dropRate, worstFrameMs,
             imageLoads, imageLoads > 0 ? imageLoadMsTotal / Double(imageLoads) : 0, iCloudLoads
-        )
+        ) + String(format: " | card %.0fx%.0f", lastImagePixels.width, lastImagePixels.height)
     }
 }

@@ -26,6 +26,12 @@ struct PerfHUD: View {
                         monitor.imageLoads > 0 ? monitor.imageLoadMsTotal / Double(monitor.imageLoads) : 0))
             Text("iCloud fetches \(monitor.iCloudLoads)")
                 .foregroundStyle(monitor.iCloudLoads > 0 ? .red : .white.opacity(0.7))
+            // Anywhere near camera resolution here means PhotoKit is handing
+            // back the untouched original for the card, which is what made
+            // dragging stutter.
+            Text(String(format: "card %.0f×%.0f px",
+                        monitor.lastImagePixels.width, monitor.lastImagePixels.height))
+                .foregroundStyle(monitor.lastImagePixels.width > 2000 ? .red : .white.opacity(0.7))
         }
         .font(.system(size: 11, weight: .medium, design: .monospaced))
         .foregroundStyle(.white)
