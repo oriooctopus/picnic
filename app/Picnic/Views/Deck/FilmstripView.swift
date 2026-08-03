@@ -7,15 +7,22 @@ struct FilmstripView: View {
     let pendingDeleteIDs: Set<String>
     let onSelect: (Int) -> Void
 
-    @State private var thumbnails: [String: UIImage] = [:]
-
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
+                // Lazy, not a plain HStack: a plain one builds a thumbnail view
+                // for every asset in the month the moment the deck opens, and
+                // fires every thumbnail fetch at once. On a real month of a few
+                // hundred photos that alone made swiping stutter.
+                LazyHStack(spacing: 6) {
                     ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { index, asset in
-                        thumbnail(asset: asset, index: index)
-                            .id(index)
+                        FilmstripThumbnail(
+                            asset: asset,
+                            isCurrent: index == currentIndex,
+                            isPendingDelete: pendingDeleteIDs.contains(asset.localIdentifier),
+                            onTap: { onSelect(index) }
+                        )
+                        .id(index)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -43,31 +50,45 @@ struct FilmstripView: View {
             }
         }
     }
+}
 
-    private func thumbnail(asset: PHAsset, index: Int) -> some View {
+/// One filmstrip cell, owning its own loaded image. Previously every cell wrote
+/// into a single dictionary held by FilmstripView, so each finished fetch
+/// invalidated the strip and rebuilt every other cell — N loads costing N
+/// rebuilds of N views. Keeping the image here means a finished load repaints
+/// only the cell it belongs to.
+private struct FilmstripThumbnail: View {
+    let asset: PHAsset
+    let isCurrent: Bool
+    let isPendingDelete: Bool
+    let onTap: () -> Void
+
+    @State private var image: UIImage?
+
+    var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color(white: 0.15))
-            if let image = thumbnails[asset.localIdentifier] {
+            if let image {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             }
-            if pendingDeleteIDs.contains(asset.localIdentifier) {
+            if isPendingDelete {
                 RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.35))
                 Image(systemName: "xmark").font(.caption.bold()).foregroundStyle(.white)
             }
         }
-        .frame(width: index == currentIndex ? 48 : 40, height: index == currentIndex ? 48 : 40)
+        .frame(width: isCurrent ? 48 : 40, height: isCurrent ? 48 : 40)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(index == currentIndex ? Color.white : .clear, lineWidth: 2)
+                .stroke(isCurrent ? Color.white : .clear, lineWidth: 2)
         )
-        .onTapGesture { onSelect(index) }
+        .onTapGesture { onTap() }
         .task {
-            if thumbnails[asset.localIdentifier] == nil {
-                thumbnails[asset.localIdentifier] = await ThumbnailLoader.thumbnail(
+            if image == nil {
+                image = await ThumbnailLoader.thumbnail(
                     for: asset, targetSize: CGSize(width: 96, height: 96)
                 )
             }
