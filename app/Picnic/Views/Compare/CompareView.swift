@@ -18,16 +18,13 @@ struct CompareView: View {
         VStack(spacing: 0) {
             header
 
-            // A `TabView(.page)` with `.scrollClipDisabled()` was tried here
-            // first to get neighboring cards to peek in at the edges, but
-            // page-style TabView clips its pages to its own bounds
-            // regardless — the modifier had no effect. A view-aligned
-            // horizontal ScrollView genuinely supports peeking neighbors:
-            // `.contentMargins` insets the viewport (so adjacent cards spill
-            // into the freed-up edges) while `.scrollTargetBehavior(.paging)`
-            // still snaps one card at a time like the reference.
+            // One card fills the viewport edge-to-edge, snapping one at a
+            // time — no neighboring-card peek (an earlier `.contentMargins`
+            // inset was tried to reveal adjacent cards at the edges, but
+            // that read as a layout glitch rather than an intentional
+            // carousel, so it's removed).
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 16) {
+                LazyHStack(spacing: 0) {
                     ForEach(Array(viewModel.group.assets.enumerated()), id: \.element.localIdentifier) { index, asset in
                         ComparePhotoCardView(
                             asset: asset,
@@ -46,7 +43,6 @@ struct CompareView: View {
                 }
                 .scrollTargetLayout()
             }
-            .contentMargins(.horizontal, 24, for: .scrollContent)
             .scrollTargetBehavior(.viewAligned)
             .scrollPosition(id: $scrollPosition)
             .onChange(of: scrollPosition) { _, newValue in
@@ -84,6 +80,21 @@ struct CompareView: View {
             }
         }
         .padding()
+        .contentShape(Rectangle())
+        // Swipe-down-from-the-top exits Compare, mirroring the deck's own
+        // quiet drag-to-dismiss. Unconditional (unlike the X button, which
+        // stays gated on canConfirm to match the reference's grayed-out
+        // chrome) — a gesture-based escape shouldn't require a photo to
+        // already be sorted. Scoped to the header only, so it can't compete
+        // with the card carousel's own horizontal drag.
+        .gesture(
+            DragGesture(minimumDistance: 20)
+                .onEnded { value in
+                    if value.translation.height > 60 && abs(value.translation.width) < 60 {
+                        dismiss()
+                    }
+                }
+        )
     }
 
     /// X, the group thumbnail strip, and the confirm check all sit in one

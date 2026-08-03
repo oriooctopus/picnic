@@ -9,6 +9,12 @@ struct DeckView: View {
     @State private var currentImage: UIImage?
     @State private var dragOffset: CGSize = .zero
     @State private var showHidePopover = false
+    /// `GroupingService.group(containing:)` re-sorts and re-clusters the
+    /// whole visible list — cheap once, but the swipe gesture was calling it
+    /// straight from the card's `.overlay` closure, so it re-ran on every
+    /// drag frame. Computed once per current-asset change alongside the
+    /// image load instead.
+    @State private var currentGroup: CompareGroup?
     /// One presentation slot for both modals. Two `.fullScreenCover`
     /// modifiers on the same view silently collapse into one in SwiftUI —
     /// the Compare cover never presented while a live-photo cover was also
@@ -87,6 +93,9 @@ struct DeckView: View {
         .background(Color.black.ignoresSafeArea())
         .task(id: viewModel.currentAsset?.localIdentifier) {
             await loadCurrentImage()
+            currentGroup = viewModel.currentAsset.flatMap {
+                GroupingService.group(containing: $0, in: viewModel.visibleAssets)
+            }
         }
         .fullScreenCover(item: $presentation) { item in
             switch item {
@@ -239,7 +248,7 @@ struct DeckView: View {
             presentLivePhotoIfNeeded(asset)
         }
         .overlay(alignment: .bottom) {
-            if let group = GroupingService.group(containing: asset, in: viewModel.visibleAssets),
+            if let group = currentGroup,
                !appState.sortStore.isGroupResolved(group.id) {
                 Button {
                     presentation = .compare(group)

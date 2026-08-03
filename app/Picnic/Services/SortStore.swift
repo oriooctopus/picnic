@@ -9,9 +9,25 @@ final class SortStore: ObservableObject {
     private let context: ModelContext
     @Published var streakCount: Int = 0
 
+    /// `state(for:)` and `isGroupResolved(_:)` are called from view bodies —
+    /// once per asset per render, so on every drag frame while swiping a
+    /// deck. A SwiftData fetch per call there was the actual cause of the
+    /// laggy swipe (a disk round-trip per asset, 60+ times a second while
+    /// dragging). Kept as the in-memory read path; every write still goes
+    /// through `context` first so it stays the source of truth.
+    private var stateCache: [String: SortState] = [:]
+    private var resolvedGroupCache: Set<String> = []
+
     init(context: ModelContext) {
         self.context = context
         streakCount = (try? fetchOrCreateStreak())?.count ?? 0
+        stateCache = Dictionary(
+            uniqueKeysWithValues: ((try? context.fetch(FetchDescriptor<AssetSortRecord>())) ?? [])
+                .map { ($0.assetLocalID, $0.state) }
+        )
+        resolvedGroupCache = Set(
+            ((try? context.fetch(FetchDescriptor<CompareGroupResolution>())) ?? []).map(\.groupKey)
+        )
     }
 
     // MARK: Streak
@@ -54,7 +70,7 @@ final class SortStore: ObservableObject {
     }
 
     func state(for asset: PHAsset) -> SortState {
-        record(for: asset)?.state ?? .unsorted
+        stateCache[asset.localIdentifier] ?? .unsorted
     }
 
     func setState(_ state: SortState, for asset: PHAsset, monthKey: String) {
@@ -65,6 +81,7 @@ final class SortStore: ObservableObject {
             context.insert(AssetSortRecord(assetLocalID: asset.localIdentifier, monthKey: monthKey, state: state))
         }
         try? context.save()
+        stateCache[asset.localIdentifier] = state
         if state != .unsorted { recordActivity() }
     }
 
@@ -97,12 +114,12 @@ final class SortStore: ObservableObject {
     // MARK: Compare group resolution
 
     func isGroupResolved(_ groupKey: String) -> Bool {
-        let descriptor = FetchDescriptor<CompareGroupResolution>(predicate: #Predicate { $0.groupKey == groupKey })
-        return ((try? context.fetchCount(descriptor)) ?? 0) > 0
+        resolvedGroupCache.contains(groupKey)
     }
 
     func markGroupResolved(_ groupKey: String) {
         context.insert(CompareGroupResolution(groupKey: groupKey))
         try? context.save()
+        resolvedGroupCache.insert(groupKey)
     }
 }
