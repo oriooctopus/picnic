@@ -38,6 +38,8 @@ REQUIRED = [
     "10-utilities", "11-smart-shuffle", "12-smart-favorites",
     "13-smart-screenshots", "14-smart-videos", "15-smart-photos",
     "16-smart-livephotos", "17-profile",
+    "18-deck-large-month", "19-deck-exit-nothing-pending",
+    "20-compare-swipe-down-exit", "21-hide-sorted-on",
 ]
 
 # Best-effort: one per test method, captured in tearDown. See module
@@ -54,6 +56,10 @@ OPTIONAL = [
     "99-final-test08SmartCollections",
     "99-final-test09Profile",
     "99-final-test10LongPressContextMenu",
+    "99-final-test11DeckLargeMonthStaysResponsive",
+    "99-final-test12DeckExitWithNothingPending",
+    "99-final-test13CompareSwipeDownToExit",
+    "99-final-test14HideSortedActuallyFilters",
 ]
 
 EXPECTED = REQUIRED + OPTIONAL

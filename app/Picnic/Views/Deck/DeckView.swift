@@ -257,6 +257,7 @@ struct DeckView: View {
                 Text("\(viewModel.currentIndex + 1) OF \(viewModel.visibleAssets.count)")
                     .font(.caption2.bold())
                     .foregroundStyle(.white.opacity(0.6))
+                    .accessibilityIdentifier("deck.position")
             }
         }
     }

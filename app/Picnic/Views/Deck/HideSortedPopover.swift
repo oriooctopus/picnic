@@ -18,6 +18,7 @@ struct HideSortedPopover: View {
                 }
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("deck.hideSortedToggle")
 
             Divider()
 

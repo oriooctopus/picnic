@@ -372,4 +372,137 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(app.buttons["month.markSorted"].waitForExistence(timeout: 5), "Long-press context menu should appear")
         capture("02-longpress-context-menu")
     }
+
+    /// A month of SeedLibrary.largeMonthCount assets, big enough that
+    /// per-asset work in the deck actually costs something. The default seed's
+    /// largest month is 5 cards, where a quadratic filmstrip rebuild is
+    /// indistinguishable from a linear one — which is exactly how that bug
+    /// reached Oliver's phone.
+    /// Mirrors `SeedLibrary.largeMonthCount`. UI tests run out of process and
+    /// can't reference the app target's types, so this has to be kept in sync
+    /// by hand — the position-label assertion below fails loudly if it drifts.
+    private static let largeMonthCount = 300
+
+    func test11DeckLargeMonthStaysResponsive() throws {
+        relaunch(withExtraArguments: ["--seed-large-month"])
+
+        XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 30), "My life header should appear")
+        let largeMonth = app.descendants(matching: .any)["monthCard.2026-06"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(largeMonth, initialTimeout: 120),
+                      "The large seeded month (2026-06) should appear in the grid")
+
+        // Budgets are wall-clock on a shared GitHub macOS runner, which is
+        // slower and noisier than a phone, so they are deliberately loose:
+        // they exist to catch work that scales with asset count, not to police
+        // milliseconds. The pre-fix filmstrip built and re-rendered every one
+        // of these assets repeatedly and blew far past both.
+        let openStart = Date()
+        largeMonth.tap()
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 60), "Deck should open on the large month")
+        let openSeconds = Date().timeIntervalSince(openStart)
+        capture("18-deck-large-month")
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+        // Proves the test really opened the big deck rather than a small one.
+        XCTAssertEqual(totalCount(fromPosition: position.label), Self.largeMonthCount,
+                       "Large month's deck should hold every seeded asset — got '\(position.label)'")
+
+        let swipeStart = Date()
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        XCTAssertTrue(app.staticTexts["deck.pendingCount"].waitForExistence(timeout: 30),
+                      "Swipe should register on the large month")
+        let swipeSeconds = Date().timeIntervalSince(swipeStart)
+
+        print("PERF: large-month deck open \(String(format: "%.2f", openSeconds))s, swipe \(String(format: "%.2f", swipeSeconds))s")
+        XCTAssertLessThan(openSeconds, 25, "Opening a \(Self.largeMonthCount)-asset deck took \(openSeconds)s — work is scaling with asset count")
+        XCTAssertLessThan(swipeSeconds, 15, "One swipe on a \(Self.largeMonthCount)-asset deck took \(swipeSeconds)s — work is scaling with asset count")
+    }
+
+    /// The X commits pending deletions, but with nothing swiped it should just
+    /// leave — no system delete dialog, no confirmation step.
+    func test12DeckExitWithNothingPending() throws {
+        openMayDeck()
+        XCTAssertFalse(app.staticTexts["deck.pendingCount"].exists, "Nothing should be pending before any swipe")
+
+        app.buttons["deck.commit"].tap()
+        XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 10),
+                      "X with nothing pending should return to the grid immediately")
+        XCTAssertNil(firstSystemAlert(timeout: 3),
+                     "No delete confirmation should appear when nothing was swiped")
+        capture("19-deck-exit-nothing-pending")
+    }
+
+    /// Compare's swipe-down exit is scoped to its header, so the drag has to
+    /// start there — a drag on the card is the photo carousel's own gesture.
+    func test13CompareSwipeDownToExit() throws {
+        openMayDeck()
+        openCompare()
+
+        let header = app.staticTexts["Compare"]
+        header.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+
+        XCTAssertTrue(app.descendants(matching: .any)["deck.card"].firstMatch.waitForExistence(timeout: 10),
+                      "Swiping down from the Compare header should return to the deck")
+        XCTAssertFalse(header.exists, "Compare header should be gone after the swipe-down")
+        capture("20-compare-swipe-down-exit")
+    }
+
+    /// The popover toggle is only meaningful if it removes a sorted photo from
+    /// the deck. test04 opens the popover but never toggles it, which is how a
+    /// non-working toggle shipped.
+    func test14HideSortedActuallyFilters() throws {
+        let deckCard = openMayDeck()
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+        let before = totalCount(fromPosition: position.label)
+        XCTAssertGreaterThan(before, 1, "Need more than one photo for the filter to be observable")
+
+        // Swipe right = keep = sorted.
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 1.0)
+
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should offer the 'Sorted pics' toggle")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        tapOutside()
+        capture("21-hide-sorted-on")
+
+        let after = totalCount(fromPosition: position.label)
+        XCTAssertLessThan(after, before,
+                          "Hiding sorted pics should drop the deck's total (was \(before), now \(after)) — the kept photo is still listed")
+    }
+
+    /// "3 OF 42" -> 42. Returns -1 when the label doesn't parse, so a failed
+    /// assertion reports the raw label rather than silently comparing zeros.
+    private func totalCount(fromPosition label: String) -> Int {
+        guard let tail = label.components(separatedBy: " OF ").last,
+              let value = Int(tail.trimmingCharacters(in: .whitespaces)) else { return -1 }
+        return value
+    }
+
+    /// setUp already launched the app; relaunching is how a test opts into
+    /// extra seeding without making every other test pay for it.
+    private func relaunch(withExtraArguments extra: [String]) {
+        app.terminate()
+        app.launchArguments = ["--seed-library"] + extra
+        app.launch()
+        dismissPhotoPermissionSheetIfPresent()
+    }
 }

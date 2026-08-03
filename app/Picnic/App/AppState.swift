@@ -37,6 +37,15 @@ final class AppState: ObservableObject {
                 print("SeedLibrary: seeding failed: \(error)")
             }
         }
+        // Opt-in: only the deck perf test wants a month large enough for
+        // per-asset work to be measurable.
+        if ProcessInfo.processInfo.arguments.contains("--seed-large-month") {
+            do {
+                try await SeedLibrary.seedLargeMonthIfNeeded()
+            } catch {
+                print("SeedLibrary: large-month seeding failed: \(error)")
+            }
+        }
         #endif
         refreshMonths()
         await mirrorQueue.drainQueue()

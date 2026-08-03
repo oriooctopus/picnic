@@ -20,12 +20,31 @@ enum SeedLibrary {
         case videoGenerationFailed
     }
 
+    // MARK: Large-month seed (performance coverage)
+
+    /// A month big enough for per-asset work in the deck to actually show up.
+    /// The default seed's biggest month is 5 assets, which is why a quadratic
+    /// filmstrip rebuild sat in CI unnoticed — at that size it is
+    /// indistinguishable from linear. Only the perf test asks for this, via
+    /// `--seed-large-month`, since every other test method relaunches the app
+    /// and would otherwise wait on these for nothing.
+    static let largeMonthCount = 300
+    private static let largeMonthYear = 2026
+    private static let largeMonthMonth = 6
+
     // MARK: Idempotency
 
     static func isAlreadySeeded() -> Bool {
-        let firstSeedDate = buildItems()[0].date
+        isPresent(date: buildItems()[0].date)
+    }
+
+    static func isLargeMonthAlreadySeeded() -> Bool {
+        isPresent(date: buildLargeMonthItems()[0].date)
+    }
+
+    private static func isPresent(date: Date) -> Bool {
         let options = PHFetchOptions()
-        options.predicate = NSPredicate(format: "creationDate == %@", firstSeedDate as NSDate)
+        options.predicate = NSPredicate(format: "creationDate == %@", date as NSDate)
         return PHAsset.fetchAssets(with: options).count > 0
     }
 
@@ -101,6 +120,50 @@ enum SeedLibrary {
         addVideo(2026, 3, 18, 9, 0, 0)
 
         return items
+    }
+
+    /// `largeMonthCount` assets in one month, spaced well over the 10s
+    /// grouping window so they stay individual cards rather than collapsing
+    /// into Compare groups. Deliberately small pixel sizes — this is about
+    /// asset count, and keeping them tiny keeps seeding quick.
+    private static func buildLargeMonthItems() -> [SeedItem] {
+        let palette: [UIColor] = [
+            .systemRed, .systemOrange, .systemYellow, .systemGreen, .systemTeal,
+            .systemBlue, .systemIndigo, .systemPurple, .systemPink, .systemBrown,
+        ]
+        return (0..<largeMonthCount).map { i in
+            // Spread across the month: one per hour, rolling into later days.
+            let day = 1 + (i / 20)
+            let hour = i % 20
+            return SeedItem(
+                date: date(largeMonthYear, largeMonthMonth, day, hour, 0, 0),
+                index: i + 1,
+                color: palette[i % palette.count],
+                pixelSize: CGSize(width: 200, height: 300),
+                format: .jpeg,
+                isVideo: false
+            )
+        }
+    }
+
+    static func seedLargeMonthIfNeeded() async throws {
+        guard !isLargeMonthAlreadySeeded() else {
+            print("SeedLibrary: large month already present, skipping")
+            return
+        }
+        print("SeedLibrary: seeding large month (\(largeMonthCount) assets)...")
+
+        try await PHPhotoLibrary.shared().performChanges {
+            for item in buildLargeMonthItems() {
+                let image = makeImage(text: "\(item.index)", color: item.color, size: item.pixelSize)
+                guard let data = image.jpegData(compressionQuality: 0.7) else { continue }
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .photo, data: data, options: nil)
+                request.creationDate = item.date
+            }
+        }
+
+        print("SeedLibrary: large month seeding complete")
     }
 
     // MARK: Entry point
