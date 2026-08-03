@@ -120,6 +120,11 @@ final class WalkthroughUITests: XCTestCase {
         let seededMonth = app.descendants(matching: .any)["monthCard.2025-05"].firstMatch
         let monthAppeared = waitForElementByScrolling(seededMonth, initialTimeout: 90)
         capture("01-mylife")
+        // An empty grid means the seed never became readable — almost always
+        // a photo-permission scope problem, which the app now names on screen.
+        let emptyReason = app.staticTexts["myLife.emptyReason"]
+        XCTAssertFalse(emptyReason.exists,
+                       "Library came up empty — app reports: \(emptyReason.exists ? emptyReason.label : "n/a")")
         XCTAssertTrue(monthAppeared, "Seeded month 2025-05 (burst cluster A) should appear in the grid, even after scrolling up to 6 screens in each direction")
 
         // MARK: Deck view, first card (burst cluster A member 1 -> Compare pill visible)

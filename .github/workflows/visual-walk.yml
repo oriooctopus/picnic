@@ -97,6 +97,11 @@ jobs:
           # the full-library grant, which leaves the app stuck behind the
           # "requesting additional access" sheet. The walkthrough also taps
           # "Allow Full Access" itself if the sheet appears anyway.
+          # `grant all` is the only spelling that reliably yields FULL
+          # (not add-only) library access on a fresh runner simulator;
+          # granting the two photo scopes individually intermittently left
+          # the app add-only, which reads back as an empty library.
+          xcrun simctl privacy "$SIM_UDID" grant all "$BUNDLE_ID"
           xcrun simctl privacy "$SIM_UDID" grant photos-add "$BUNDLE_ID"
           xcrun simctl privacy "$SIM_UDID" grant photos "$BUNDLE_ID"
 

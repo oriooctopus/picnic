@@ -13,6 +13,21 @@ struct MyLifeView: View {
     @State private var selectedMonth: MonthBucket?
     @State private var hasScrolledToInitialBottom = false
 
+    private var emptyReason: String {
+        switch appState.photoLibrary.authorizationStatus {
+        case .authorized:
+            return "No photos in your library yet."
+        case .limited:
+            return "Picnic can only see the photos you selected. Grant full photo access in Settings to sort your whole library."
+        case .denied, .restricted:
+            return "Photo access is off. Turn it on in Settings to sort your library."
+        case .notDetermined:
+            return "Waiting for photo access…"
+        @unknown default:
+            return "Photo access unavailable."
+        }
+    }
+
     private var groupedByYear: [YearGroup] {
         let grouped = Dictionary(grouping: appState.monthBuckets, by: \.year)
         // Ascending: oldest year/month first, most recent at the bottom —
@@ -27,6 +42,17 @@ struct MyLifeView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
                     header.id("top")
+
+                    // An empty grid has two very different causes and the
+                    // user can act on only one of them, so say which it is
+                    // rather than showing bare black.
+                    if appState.monthBuckets.isEmpty {
+                        Text(emptyReason)
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.7))
+                            .padding(.horizontal)
+                            .accessibilityIdentifier("myLife.emptyReason")
+                    }
 
                     ForEach(groupedByYear) { entry in
                         Text(String(entry.year))
