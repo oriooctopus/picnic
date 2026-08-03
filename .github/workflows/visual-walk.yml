@@ -125,7 +125,7 @@ jobs:
           IFS=',' read -ra METHODS <<< "${{ github.event.inputs.only_testing }}"
           if [ -n "${{ github.event.inputs.only_testing }}" ]; then
             for m in "${METHODS[@]}"; do
-              ONLY_TESTING_FLAGS+=("-only-testing:WalkthroughUITests/$m")
+              ONLY_TESTING_FLAGS+=("-only-testing:WalkthroughUITests/WalkthroughUITests/$m")
             done
           else
             ONLY_TESTING_FLAGS+=("-only-testing:WalkthroughUITests")
