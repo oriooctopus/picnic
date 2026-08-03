@@ -19,38 +19,41 @@ struct CompareView: View {
             header
 
             // One card fills the viewport edge-to-edge, snapping one at a
-            // time — no neighboring-card peek (an earlier `.contentMargins`
-            // inset was tried to reveal adjacent cards at the edges, but
-            // that read as a layout glitch rather than an intentional
-            // carousel, so it's removed).
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 0) {
-                    ForEach(Array(viewModel.group.assets.enumerated()), id: \.element.localIdentifier) { index, asset in
-                        ComparePhotoCardView(
-                            asset: asset,
-                            isBest: asset.localIdentifier == viewModel.bestAssetID,
-                            fileSize: viewModel.fileSizes[asset.localIdentifier],
-                            isAccepted: viewModel.acceptedAssetID == asset.localIdentifier,
-                            isRejected: viewModel.rejectedAssetIDs.contains(asset.localIdentifier),
-                            isFavorite: viewModel.favoritedAssetIDs.contains(asset.localIdentifier),
-                            onReject: { viewModel.reject(asset) },
-                            onAccept: { viewModel.accept(asset) },
-                            onFavorite: { Task { await viewModel.toggleFavorite(asset) } }
-                        )
-                        .containerRelativeFrame(.horizontal)
-                        .id(index)
+            // time — no neighboring-card peek. `.containerRelativeFrame`
+            // was tried first but reserves ~24pt it doesn't account for
+            // inside this ScrollView/LazyHStack combo, silently bleeding
+            // the next card through the gap; an explicit GeometryReader
+            // width sidesteps that entirely.
+            GeometryReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: 0) {
+                        ForEach(Array(viewModel.group.assets.enumerated()), id: \.element.localIdentifier) { index, asset in
+                            ComparePhotoCardView(
+                                asset: asset,
+                                isBest: asset.localIdentifier == viewModel.bestAssetID,
+                                fileSize: viewModel.fileSizes[asset.localIdentifier],
+                                isAccepted: viewModel.acceptedAssetID == asset.localIdentifier,
+                                isRejected: viewModel.rejectedAssetIDs.contains(asset.localIdentifier),
+                                isFavorite: viewModel.favoritedAssetIDs.contains(asset.localIdentifier),
+                                onReject: { viewModel.reject(asset) },
+                                onAccept: { viewModel.accept(asset) },
+                                onFavorite: { Task { await viewModel.toggleFavorite(asset) } }
+                            )
+                            .frame(width: proxy.size.width)
+                            .id(index)
+                        }
                     }
+                    .scrollTargetLayout()
                 }
-                .scrollTargetLayout()
-            }
-            .scrollTargetBehavior(.viewAligned)
-            .scrollPosition(id: $scrollPosition)
-            .onChange(of: scrollPosition) { _, newValue in
-                if let newValue { pageIndex = newValue }
-            }
-            .onChange(of: pageIndex) { _, newValue in
-                if scrollPosition != newValue {
-                    withAnimation { scrollPosition = newValue }
+                .scrollTargetBehavior(.viewAligned)
+                .scrollPosition(id: $scrollPosition)
+                .onChange(of: scrollPosition) { _, newValue in
+                    if let newValue { pageIndex = newValue }
+                }
+                .onChange(of: pageIndex) { _, newValue in
+                    if scrollPosition != newValue {
+                        withAnimation { scrollPosition = newValue }
+                    }
                 }
             }
 
