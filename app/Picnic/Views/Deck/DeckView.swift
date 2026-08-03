@@ -7,14 +7,7 @@ struct DeckView: View {
     @StateObject var viewModel: DeckViewModel
 
     @State private var currentImage: UIImage?
-    @State private var dragOffset: CGSize = .zero
     @State private var showHidePopover = false
-    /// `GroupingService.group(containing:)` re-sorts and re-clusters the
-    /// whole visible list — cheap once, but the swipe gesture was calling it
-    /// straight from the card's `.overlay` closure, so it re-ran on every
-    /// drag frame. Computed once per current-asset change alongside the
-    /// image load instead.
-    @State private var currentGroup: CompareGroup?
     /// One presentation slot for both modals. Two `.fullScreenCover`
     /// modifiers on the same view silently collapse into one in SwiftUI —
     /// the Compare cover never presented while a live-photo cover was also
@@ -76,7 +69,19 @@ struct DeckView: View {
                 }
 
                 if let asset = viewModel.currentAsset {
-                    cardView(for: asset).id(asset.localIdentifier)
+                    DeckCard(
+                        asset: asset,
+                        image: currentImage,
+                        compareGroup: viewModel.groupByAssetID[asset.localIdentifier].flatMap {
+                            appState.sortStore.isGroupResolved($0.id) ? nil : $0
+                        },
+                        onCompare: { presentation = .compare($0) },
+                        onLongPress: { presentLivePhotoIfNeeded(asset) },
+                        onDelete: { viewModel.markForDelete() },
+                        onKeep: { viewModel.markKept() },
+                        onDismiss: { Task { await exitDeck() } }
+                    )
+                    .id(asset.localIdentifier)
                 } else {
                     emptyState
                 }
@@ -93,9 +98,6 @@ struct DeckView: View {
         .background(Color.black.ignoresSafeArea())
         .task(id: viewModel.currentAsset?.localIdentifier) {
             await loadCurrentImage()
-            currentGroup = viewModel.currentAsset.flatMap {
-                GroupingService.group(containing: $0, in: viewModel.visibleAssets)
-            }
         }
         .fullScreenCover(item: $presentation) { item in
             switch item {
@@ -198,124 +200,6 @@ struct DeckView: View {
         .padding(.top, 12)
     }
 
-    // MARK: Card
-
-    private func cardView(for asset: PHAsset) -> some View {
-        ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 24).fill(Color(white: 0.08))
-
-            if let currentImage {
-                Image(uiImage: currentImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .clipShape(RoundedRectangle(cornerRadius: 24))
-            }
-
-            if asset.mediaSubtypes.contains(.photoLive) {
-                Image(systemName: "livephoto")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(8)
-                    .background(Circle().fill(.black.opacity(0.4)))
-                    .padding(12)
-            }
-        }
-        // Single AX element for the card's own frame (fill image + live-photo
-        // badge collapsed into one) — the Compare pill below is a real
-        // control and stays out of this ignored subtree so it remains its
-        // own tappable, separately-identified element rather than bleeding
-        // the "deck.card" identifier onto multiple inner layers.
-        .accessibilityElement(children: .ignore)
-        .accessibilityIdentifier("deck.card")
-        // Drag + long-press are scoped to ONLY this base layer (image +
-        // live-photo badge), not to the composite that includes the Compare
-        // pill below. Previously both gestures were attached after the
-        // .overlay(...) call, so they covered the pill's Button too; an
-        // ancestor .gesture(DragGesture()) sitting over a nested Button
-        // gets first refusal on touch-down, and .onLongPressGesture in
-        // particular installs a recognizer that holds the touch waiting to
-        // see if it becomes a long-press, delaying (and in practice
-        // swallowing) the Button's own tap recognition. Scoping the
-        // gestures below the pill removes the conflict outright instead of
-        // trying to out-prioritize it.
-        .contentShape(RoundedRectangle(cornerRadius: 24))
-        .gesture(
-            DragGesture()
-                .onChanged { value in dragOffset = value.translation }
-                .onEnded { value in handleSwipeEnd(value) }
-        )
-        .onLongPressGesture(minimumDuration: 0.35) {
-            presentLivePhotoIfNeeded(asset)
-        }
-        .overlay(alignment: .bottom) {
-            if let group = currentGroup,
-               !appState.sortStore.isGroupResolved(group.id) {
-                Button {
-                    presentation = .compare(group)
-                } label: {
-                    HStack(spacing: 6) {
-                        Text("Compare \(group.assets.count)")
-                        Image(systemName: "chevron.right")
-                    }
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Capsule().fill(.black.opacity(0.55)))
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("deck.comparePill")
-                .padding(.bottom, 16)
-            }
-        }
-        .padding(.horizontal, 20)
-        .offset(dragOffset)
-        .rotationEffect(.degrees(Double(dragOffset.width / 20)))
-    }
-
-    private func handleSwipeEnd(_ value: DragGesture.Value) {
-        let threshold: CGFloat = 110
-        let dismissThreshold: CGFloat = 140
-
-        // Judge the swipe by where the drag was HEADED, not where the finger
-        // happened to lift. A quick flick — the normal way people sort a
-        // deck — ends with a small raw translation but a large predicted
-        // one; using raw translation alone makes flicks silently do nothing.
-        let translation = CGSize(
-            width: max(abs(value.translation.width), abs(value.predictedEndTranslation.width))
-                * (value.translation.width < 0 ? -1 : 1),
-            height: max(abs(value.translation.height), abs(value.predictedEndTranslation.height))
-                * (value.translation.height < 0 ? -1 : 1)
-        )
-
-        // Quiet secondary exit: a plain downward drag on the card, distinct
-        // from the horizontal delete/keep swipes, with no visible chrome.
-        // Reuses the same commit-then-dismiss logic as the top-right X.
-        if translation.height > dismissThreshold && abs(translation.width) < 80 {
-            withAnimation(.spring) { dragOffset = .zero }
-            Task { await exitDeck() }
-            return
-        }
-
-        if translation.width < -threshold {
-            withAnimation(.spring) { dragOffset = CGSize(width: -600, height: value.translation.height) }
-            viewModel.markForDelete()
-            resetDragAfterSwipe()
-        } else if translation.width > threshold {
-            withAnimation(.spring) { dragOffset = CGSize(width: 600, height: value.translation.height) }
-            viewModel.markKept()
-            resetDragAfterSwipe()
-        } else {
-            withAnimation(.spring) { dragOffset = .zero }
-        }
-    }
-
-    private func resetDragAfterSwipe() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            dragOffset = .zero
-        }
-    }
-
     private func presentLivePhotoIfNeeded(_ asset: PHAsset) {
         guard asset.mediaSubtypes.contains(.photoLive) else { return }
         Task {
@@ -404,5 +288,135 @@ struct DeckView: View {
         }
         .padding(.horizontal)
         .padding(.bottom, 16)
+    }
+}
+
+/// The swipeable card, extracted so the in-flight drag offset lives here
+/// rather than on DeckView. As @State on DeckView it invalidated that whole
+/// body on every drag frame — which rebuilt the entire filmstrip's ForEach
+/// and re-read visibleAssets several times per frame, and was the actual
+/// cause of the laggy swipe. Confining it here means a drag repaints only
+/// this card.
+private struct DeckCard: View {
+    let asset: PHAsset
+    let image: UIImage?
+    /// Already filtered for group-resolved by the caller; non-nil means show
+    /// the pill.
+    let compareGroup: CompareGroup?
+    let onCompare: (CompareGroup) -> Void
+    let onLongPress: () -> Void
+    let onDelete: () -> Void
+    let onKeep: () -> Void
+    let onDismiss: () -> Void
+
+    @State private var dragOffset: CGSize = .zero
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 24).fill(Color(white: 0.08))
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .clipShape(RoundedRectangle(cornerRadius: 24))
+            }
+
+            if asset.mediaSubtypes.contains(.photoLive) {
+                Image(systemName: "livephoto")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .background(Circle().fill(.black.opacity(0.4)))
+                    .padding(12)
+            }
+        }
+        // Single AX element for the card's own frame (fill image + live-photo
+        // badge collapsed into one) — the Compare pill below is a real
+        // control and stays out of this ignored subtree so it remains its
+        // own tappable, separately-identified element rather than bleeding
+        // the "deck.card" identifier onto multiple inner layers.
+        .accessibilityElement(children: .ignore)
+        .accessibilityIdentifier("deck.card")
+        // Drag + long-press are scoped to ONLY this base layer (image +
+        // live-photo badge), not to the composite that includes the Compare
+        // pill below. An ancestor .gesture(DragGesture()) sitting over a
+        // nested Button gets first refusal on touch-down, and
+        // .onLongPressGesture in particular installs a recognizer that holds
+        // the touch waiting to see if it becomes a long-press, delaying (and
+        // in practice swallowing) the Button's own tap recognition.
+        .contentShape(RoundedRectangle(cornerRadius: 24))
+        .gesture(
+            DragGesture()
+                .onChanged { value in dragOffset = value.translation }
+                .onEnded { value in handleSwipeEnd(value) }
+        )
+        .onLongPressGesture(minimumDuration: 0.35) { onLongPress() }
+        .overlay(alignment: .bottom) {
+            if let compareGroup {
+                Button {
+                    onCompare(compareGroup)
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Compare \(compareGroup.assets.count)")
+                        Image(systemName: "chevron.right")
+                    }
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(.black.opacity(0.55)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("deck.comparePill")
+                .padding(.bottom, 16)
+            }
+        }
+        .padding(.horizontal, 20)
+        .offset(dragOffset)
+        .rotationEffect(.degrees(Double(dragOffset.width / 20)))
+    }
+
+    private func handleSwipeEnd(_ value: DragGesture.Value) {
+        let threshold: CGFloat = 110
+        let dismissThreshold: CGFloat = 140
+
+        // Judge the swipe by where the drag was HEADED, not where the finger
+        // happened to lift. A quick flick — the normal way people sort a
+        // deck — ends with a small raw translation but a large predicted
+        // one; using raw translation alone makes flicks silently do nothing.
+        let translation = CGSize(
+            width: max(abs(value.translation.width), abs(value.predictedEndTranslation.width))
+                * (value.translation.width < 0 ? -1 : 1),
+            height: max(abs(value.translation.height), abs(value.predictedEndTranslation.height))
+                * (value.translation.height < 0 ? -1 : 1)
+        )
+
+        // Quiet secondary exit: a plain downward drag on the card, distinct
+        // from the horizontal delete/keep swipes, with no visible chrome.
+        // Reuses the same commit-then-dismiss logic as the top-right X.
+        if translation.height > dismissThreshold && abs(translation.width) < 80 {
+            withAnimation(.spring) { dragOffset = .zero }
+            onDismiss()
+            return
+        }
+
+        if translation.width < -threshold {
+            withAnimation(.spring) { dragOffset = CGSize(width: -600, height: value.translation.height) }
+            onDelete()
+            resetDragAfterSwipe()
+        } else if translation.width > threshold {
+            withAnimation(.spring) { dragOffset = CGSize(width: 600, height: value.translation.height) }
+            onKeep()
+            resetDragAfterSwipe()
+        } else {
+            withAnimation(.spring) { dragOffset = .zero }
+        }
+    }
+
+    private func resetDragAfterSwipe() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            dragOffset = .zero
+        }
     }
 }
