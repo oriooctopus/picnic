@@ -251,20 +251,31 @@ struct DeckView: View {
         let threshold: CGFloat = 110
         let dismissThreshold: CGFloat = 140
 
+        // Judge the swipe by where the drag was HEADED, not where the finger
+        // happened to lift. A quick flick — the normal way people sort a
+        // deck — ends with a small raw translation but a large predicted
+        // one; using raw translation alone makes flicks silently do nothing.
+        let translation = CGSize(
+            width: max(abs(value.translation.width), abs(value.predictedEndTranslation.width))
+                * (value.translation.width < 0 ? -1 : 1),
+            height: max(abs(value.translation.height), abs(value.predictedEndTranslation.height))
+                * (value.translation.height < 0 ? -1 : 1)
+        )
+
         // Quiet secondary exit: a plain downward drag on the card, distinct
         // from the horizontal delete/keep swipes, with no visible chrome.
         // Reuses the same commit-then-dismiss logic as the top-right X.
-        if value.translation.height > dismissThreshold && abs(value.translation.width) < 80 {
+        if translation.height > dismissThreshold && abs(translation.width) < 80 {
             withAnimation(.spring) { dragOffset = .zero }
             Task { await exitDeck() }
             return
         }
 
-        if value.translation.width < -threshold {
+        if translation.width < -threshold {
             withAnimation(.spring) { dragOffset = CGSize(width: -600, height: value.translation.height) }
             viewModel.markForDelete()
             resetDragAfterSwipe()
-        } else if value.translation.width > threshold {
+        } else if translation.width > threshold {
             withAnimation(.spring) { dragOffset = CGSize(width: 600, height: value.translation.height) }
             viewModel.markKept()
             resetDragAfterSwipe()

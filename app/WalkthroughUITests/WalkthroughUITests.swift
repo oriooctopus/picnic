@@ -146,7 +146,14 @@ final class WalkthroughUITests: XCTestCase {
         capture("03-deck-first-card")
 
         // MARK: Swipe left one card -> X badge = 1
-        deckCard.swipeLeft()
+        // A sustained press-and-drag, not swipeLeft()'s quick flick: it
+        // reproduces how a person actually drags a card across and gives
+        // the gesture recognizer an unambiguous translation.
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldFor: 0.1)
         let pendingBadge = app.staticTexts["deck.pendingCount"]
         XCTAssertTrue(pendingBadge.waitForExistence(timeout: 5), "Pending-delete badge should appear after a swipe-left")
         XCTAssertEqual(pendingBadge.label, "1", "Badge should read 1 after exactly one swipe-left")
