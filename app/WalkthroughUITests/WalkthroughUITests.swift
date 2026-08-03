@@ -5,6 +5,15 @@ import XCTest
 /// every screen/interaction state named in the visual-walk task and captures
 /// a named screenshot at each step.
 ///
+/// Split into one independent `test0N...` method per screen/state so a
+/// single failing assertion can't take out the whole walkthrough — XCTest
+/// runs test methods alphabetically, hence the zero-padded numeric prefixes,
+/// and each method re-launches the app from scratch via `setUp` (seeding is
+/// idempotent) and navigates from the launch state to the screen it covers.
+/// `continueAfterFailure = true` additionally lets a soft failure *within* a
+/// method keep going, so later captures/asserts in that same method still
+/// run and report their own signal instead of aborting silently.
+///
 /// Screenshots are saved two ways:
 ///  1. As XCTAttachments (`.keepAlways`) — visible in the .xcresult bundle.
 ///  2. Directly to a flat directory via `WALKTHROUGH_SCREENSHOT_DIR` (this
@@ -18,7 +27,10 @@ final class WalkthroughUITests: XCTestCase {
     private var screenshotDir: URL?
 
     override func setUpWithError() throws {
-        continueAfterFailure = false
+        // Soft-fail: a single bad assertion inside a test method must not
+        // abort the rest of that method's steps/captures — each method is
+        // already isolated from the others by XCTest itself.
+        continueAfterFailure = true
         app = XCUIApplication()
         app.launchArguments = ["--seed-library"]
 
@@ -34,9 +46,23 @@ final class WalkthroughUITests: XCTestCase {
 
     override func tearDown() {
         // Always leave a picture of the final state — failing asserts
-        // otherwise capture nothing at the moment of failure.
-        capture("99-final-state", delay: 0.2)
+        // otherwise capture nothing at the moment of failure. Suffixed with
+        // the test method name so every test's final state survives (they
+        // all run in the same job); see extract_walkthrough_screenshots.py's
+        // EXPECTED list for the exact names this produces.
+        capture("99-final-\(currentTestMethodName())", delay: 0.2)
         super.tearDown()
+    }
+
+    /// XCTest's `name` reads like "-[WalkthroughUITests test01MyLifeGrid]" —
+    /// pull out just the method name for use in a filesystem-safe capture
+    /// name.
+    private func currentTestMethodName() -> String {
+        name
+            .components(separatedBy: " ")
+            .last?
+            .trimmingCharacters(in: CharacterSet(charactersIn: "]"))
+            ?? "unknown"
     }
 
     /// The simctl TCC grants don't reliably yield FULL photo access on the
@@ -108,30 +134,40 @@ final class WalkthroughUITests: XCTestCase {
         return element.waitForExistence(timeout: 2)
     }
 
-    func testFullWalkthrough() throws {
-        // MARK: My Life grid (seeding can take a while: image + video
-        // synthesis + one PhotoKit batch insert of ~28 assets)
+    // MARK: - Shared navigation helpers
+
+    /// My Life grid, settled and scrolled to the seeded month. Optionally
+    /// captures 00-launch (right after the header appears) and 01-mylife
+    /// (right after the seeded month search settles) — only test01 wants
+    /// those two shots, but every other test needs this same navigation to
+    /// reach its own screen from a fresh launch.
+    @discardableResult
+    private func openMyLifeGrid(capture00: Bool = false, capture01: Bool = false) -> XCUIElement {
         let myLifeTitle = app.staticTexts["My life"]
         XCTAssertTrue(myLifeTitle.waitForExistence(timeout: 15), "My life header should appear on launch")
-        capture("00-launch")
+        if capture00 { capture("00-launch") }
 
         // Query any element type: SwiftUI may expose the card as a button,
         // image, or plain view depending on the tap-gesture plumbing.
         let seededMonth = app.descendants(matching: .any)["monthCard.2025-05"].firstMatch
         let monthAppeared = waitForElementByScrolling(seededMonth, initialTimeout: 90)
-        capture("01-mylife")
+        if capture01 { capture("01-mylife") }
+
         // An empty grid means the seed never became readable — almost always
         // a photo-permission scope problem, which the app now names on screen.
         let emptyReason = app.staticTexts["myLife.emptyReason"]
         XCTAssertFalse(emptyReason.exists,
                        "Library came up empty — app reports: \(emptyReason.exists ? emptyReason.label : "n/a")")
         XCTAssertTrue(monthAppeared, "Seeded month 2025-05 (burst cluster A) should appear in the grid, even after scrolling up to 6 screens in each direction")
+        return seededMonth
+    }
 
-        // MARK: Deck view, first card (burst cluster A member 1 -> Compare pill visible)
-        // Deck entry happens FIRST, on a fresh settled grid — the long-press
-        // context-menu capture (02) moved to the END of the walk because its
-        // zoom animation leaves the grid's AX geometry transformed, poisoning
-        // every interaction that follows it.
+    /// From the My Life grid, taps the seeded month to enter Deck view on
+    /// its first card (burst cluster A member 1 -> Compare pill visible).
+    @discardableResult
+    private func openMayDeck() -> XCUIElement {
+        let seededMonth = openMyLifeGrid()
+
         // Ground-truth AX frames immediately before the tap that has
         // historically resolved one column to the right (July instead of
         // May) — captures the exact geometry XCUITest is about to hit-test
@@ -148,7 +184,57 @@ final class WalkthroughUITests: XCTestCase {
         // must show the month we asked for.
         XCTAssertTrue(app.staticTexts["May 2025"].waitForExistence(timeout: 5),
                       "Deck header should show May 2025 — a different month means the grid tap resolved to the wrong card")
+        return deckCard
+    }
+
+    /// From Deck view on the burst-cluster card, taps the Compare pill and
+    /// waits for the Compare view to appear.
+    private func openCompare() {
+        let comparePill = app.buttons["deck.comparePill"]
+        XCTAssertTrue(comparePill.waitForExistence(timeout: 10), "Compare pill should appear on the burst-cluster card")
+        // Ground-truth AX frames immediately before the pill tap, mirroring
+        // ax-dump-pre-tap above — if the pill's reported AX frame ever
+        // diverges from where it's actually rendered again, this is what
+        // will prove it.
+        let axDumpPrePill = XCTAttachment(string: app.debugDescription)
+        axDumpPrePill.name = "ax-dump-pre-pill"
+        axDumpPrePill.lifetime = .keepAlways
+        add(axDumpPrePill)
+        comparePill.tap()
+        XCTAssertTrue(app.staticTexts["Compare"].waitForExistence(timeout: 10), "Compare header should appear")
+    }
+
+    /// Thumbs-up the first photo in the Compare group and return the
+    /// (now-enabled) confirm button.
+    @discardableResult
+    private func acceptFirstComparePhoto() -> XCUIElement {
+        let acceptButton = app.buttons["compare.accept"].firstMatch
+        XCTAssertTrue(acceptButton.waitForExistence(timeout: 5))
+        acceptButton.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        let confirmButton = app.buttons["compare.confirm"]
+        XCTAssertTrue(confirmButton.isEnabled, "Confirm should be enabled once at least one photo is sorted")
+        return confirmButton
+    }
+
+    private func goToUtilities() {
+        app.buttons["tab.utilities"].tap()
+        XCTAssertTrue(app.staticTexts["Utilities"].waitForExistence(timeout: 10))
+    }
+
+    // MARK: - Tests (alphabetical == numeric order)
+
+    func test01MyLifeGrid() throws {
+        openMyLifeGrid(capture00: true, capture01: true)
+    }
+
+    func test02DeckFirstCard() throws {
+        openMayDeck()
         capture("03-deck-first-card")
+    }
+
+    func test03DeckSwipeAndUndo() throws {
+        let deckCard = openMayDeck()
 
         // MARK: Swipe left one card -> X badge = 1
         // A sustained press-and-drag, not swipeLeft()'s quick flick: it
@@ -170,36 +256,31 @@ final class WalkthroughUITests: XCTestCase {
         undoButton.tap()
         Thread.sleep(forTimeInterval: 1.0)
         capture("05-deck-undo")
+    }
 
-        // MARK: Deck filter popover
+    func test04DeckFilterPopover() throws {
+        openMayDeck()
+
         app.buttons["deck.filter"].tap()
         XCTAssertTrue(app.staticTexts["Hide:"].waitForExistence(timeout: 5), "Hide-sorted popover should appear")
         capture("06-deck-filter-popover")
         tapOutside()
+    }
 
-        // MARK: Compare pill -> Compare view initial state
-        let comparePill = app.buttons["deck.comparePill"]
-        XCTAssertTrue(comparePill.waitForExistence(timeout: 10), "Compare pill should appear on the burst-cluster card")
-        // Ground-truth AX frames immediately before the pill tap, mirroring
-        // ax-dump-pre-tap above — if the pill's reported AX frame ever
-        // diverges from where it's actually rendered again, this is what
-        // will prove it.
-        let axDumpPrePill = XCTAttachment(string: app.debugDescription)
-        axDumpPrePill.name = "ax-dump-pre-pill"
-        axDumpPrePill.lifetime = .keepAlways
-        add(axDumpPrePill)
-        comparePill.tap()
-        XCTAssertTrue(app.staticTexts["Compare"].waitForExistence(timeout: 10), "Compare header should appear")
+    func test05CompareInitialAndThumbsUp() throws {
+        openMayDeck()
+        openCompare()
         capture("07-compare-initial")
 
         // MARK: Thumbs-up one photo in the group -> controls enabled + green dot
-        let acceptButton = app.buttons["compare.accept"].firstMatch
-        XCTAssertTrue(acceptButton.waitForExistence(timeout: 5))
-        acceptButton.tap()
-        Thread.sleep(forTimeInterval: 1.0)
-        let confirmButton = app.buttons["compare.confirm"]
-        XCTAssertTrue(confirmButton.isEnabled, "Confirm should be enabled once at least one photo is sorted")
+        acceptFirstComparePhoto()
         capture("08-compare-thumbsup")
+    }
+
+    func test06CompareConfirmDialog() throws {
+        openMayDeck()
+        openCompare()
+        let confirmButton = acceptFirstComparePhoto()
 
         // MARK: Confirm group resolution -> system delete confirmation dialog
         confirmButton.tap()
@@ -207,8 +288,8 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(systemAlert.waitForExistence(timeout: 10), "PhotoKit's system delete-confirmation dialog should appear")
         capture("09-compare-confirm-dialog")
 
-        // Cancel (not Delete) so the seeded library survives for the
-        // Utilities / smart-collection steps below.
+        // Cancel (not Delete) so the seeded library survives for any test
+        // run after this one in the same job.
         if systemAlert.buttons["Cancel"].exists {
             systemAlert.buttons["Cancel"].tap()
         } else {
@@ -223,21 +304,15 @@ final class WalkthroughUITests: XCTestCase {
             resolveErrorAlert.buttons["OK"].tap()
             Thread.sleep(forTimeInterval: 0.5)
         }
+    }
 
-        // MARK: Leave Compare, then leave Deck, back to My Life
-        // deck.dismiss (the old chevron) is gone — the X (deck.commit) is now
-        // the only exit affordance. Nothing is pending at this point (the one
-        // swipe-left was undone, and the compare resolution was cancelled),
-        // so tapping it dismisses immediately without a commit.
-        app.buttons["compare.dismiss"].tap()
-        Thread.sleep(forTimeInterval: 1.0)
-        app.buttons["deck.commit"].tap()
-        Thread.sleep(forTimeInterval: 1.0)
-
-        // MARK: Utilities tab
-        app.buttons["tab.utilities"].tap()
-        XCTAssertTrue(app.staticTexts["Utilities"].waitForExistence(timeout: 10))
+    func test07Utilities() throws {
+        goToUtilities()
         capture("10-utilities")
+    }
+
+    func test08SmartCollections() throws {
+        goToUtilities()
 
         // MARK: Each of the 6 Utilities smart collections
         let smartCollections: [(identifier: String, shot: String)] = [
@@ -259,22 +334,23 @@ final class WalkthroughUITests: XCTestCase {
             dismiss.tap()
             Thread.sleep(forTimeInterval: 1.0)
         }
+    }
 
-        // MARK: Profile tab
+    func test09Profile() throws {
         app.buttons["tab.profile"].tap()
         XCTAssertTrue(app.staticTexts["Profile"].waitForExistence(timeout: 10))
         capture("17-profile")
+    }
 
-        // MARK: Long-press month card -> context menu (LAST: its zoom
-        // animation transforms the grid's AX geometry, so nothing may
-        // interact with the grid after this)
-        app.buttons["tab.myLife"].tap()
-        XCTAssertTrue(myLifeTitle.waitForExistence(timeout: 10))
+    func test10LongPressContextMenu() throws {
+        // MARK: Long-press month card -> context menu (its zoom animation
+        // transforms the grid's AX geometry, so this must be the only thing
+        // this test method does with the grid afterward).
+        let seededMonth = openMyLifeGrid()
         Thread.sleep(forTimeInterval: 1.0)
-        let monthForMenu = app.descendants(matching: .any)["monthCard.2025-05"].firstMatch
-        XCTAssertTrue(waitForElementByScrolling(monthForMenu, initialTimeout: 10),
+        XCTAssertTrue(waitForElementByScrolling(seededMonth, initialTimeout: 10),
                       "Month card should be reachable for the context-menu capture")
-        monthForMenu.press(forDuration: 1.2)
+        seededMonth.press(forDuration: 1.2)
         XCTAssertTrue(app.buttons["month.markSorted"].waitForExistence(timeout: 5), "Long-press context menu should appear")
         capture("02-longpress-context-menu")
     }

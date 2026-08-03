@@ -9,8 +9,20 @@ set (e.g. "01-mylife"). This parses that manifest and falls back to
 substring-matching raw filenames if a given Xcode version doesn't preserve
 names in the manifest the same way.
 
-Usage: extract_walkthrough_screenshots.py <extracted_dir> <screenshots_dir>
-Exits non-zero (after copying whatever was found) if any expected shot is missing.
+Usage: extract_walkthrough_screenshots.py <extracted_dir> <screenshots_dir> [export_log]
+
+WalkthroughUITests is split into independent test0N... methods (one per
+screen/state) so a single failing assertion can't take out the whole
+walkthrough. Each method's tearDown captures its own "99-final-<method>"
+shot, so those 10 are optional/best-effort — a method that never got that
+far (e.g. it failed early) simply won't have one, and that's not itself a
+reason to fail the extraction step. Every other capture is still expected
+from whichever test method produces it; only the XCTest pass/fail counts,
+not this script, mark the CI run failed.
+
+Exits non-zero only if NOTHING was extracted (a real pipeline problem, e.g.
+the xcresult never got produced) — a partial set is copied and reported so
+the workflow can still surface it as an artifact instead of throwing it away.
 """
 import glob
 import json
@@ -18,15 +30,33 @@ import os
 import shutil
 import sys
 
-EXPECTED = [
+REQUIRED = [
     "00-launch",
     "01-mylife", "02-longpress-context-menu", "03-deck-first-card",
     "04-deck-swiped-x1", "05-deck-undo", "06-deck-filter-popover",
     "07-compare-initial", "08-compare-thumbsup", "09-compare-confirm-dialog",
     "10-utilities", "11-smart-shuffle", "12-smart-favorites",
     "13-smart-screenshots", "14-smart-videos", "15-smart-photos",
-    "16-smart-livephotos", "17-profile", "99-final-state",
+    "16-smart-livephotos", "17-profile",
 ]
+
+# Best-effort: one per test method, captured in tearDown. See module
+# docstring — a missing one just means that method failed before tearDown
+# ran, which the XCTest result already reports.
+OPTIONAL = [
+    "99-final-test01MyLifeGrid",
+    "99-final-test02DeckFirstCard",
+    "99-final-test03DeckSwipeAndUndo",
+    "99-final-test04DeckFilterPopover",
+    "99-final-test05CompareInitialAndThumbsUp",
+    "99-final-test06CompareConfirmDialog",
+    "99-final-test07Utilities",
+    "99-final-test08SmartCollections",
+    "99-final-test09Profile",
+    "99-final-test10LongPressContextMenu",
+]
+
+EXPECTED = REQUIRED + OPTIONAL
 
 
 def main() -> int:
@@ -89,10 +119,22 @@ def main() -> int:
         else:
             missing.append(exp_name)
 
+    missing_required = [m for m in missing if m in REQUIRED]
+    missing_optional = [m for m in missing if m in OPTIONAL]
+
     print(f"Found {len(EXPECTED) - len(missing)}/{len(EXPECTED)} screenshots")
-    if missing:
-        print("MISSING:", missing)
+    if missing_required:
+        print("MISSING (required):", missing_required)
+    if missing_optional:
+        print("MISSING (optional 99-final-* — the owning test likely failed before tearDown):", missing_optional)
+
+    if not found:
+        print("Nothing was extracted at all — treating as a pipeline failure.")
         return 1
+
+    # A partial set is still useful signal — surface it as an artifact
+    # rather than throwing it away. The XCTest pass/fail counts are what
+    # mark the CI run failed, not this script.
     return 0
 
 
