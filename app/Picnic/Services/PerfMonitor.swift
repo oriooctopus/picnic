@@ -25,6 +25,14 @@ final class PerfMonitor: ObservableObject {
     /// for thrashing, not for a missed frame here and there.
     private static let droppedFrameThreshold: CFTimeInterval = 0.033
 
+    /// Published state is a SNAPSHOT, refreshed a few times a second.
+    ///
+    /// The counters below are deliberately plain vars, not @Published. An
+    /// earlier version published straight from the display-link callback,
+    /// which invalidated the HUD on every single frame and made the monitor
+    /// generate exactly the kind of per-frame render storm it was supposed to
+    /// be detecting — the readout was measuring itself. Anything the UI
+    /// observes must therefore change at snapshot rate, never at frame rate.
     @Published private(set) var isRunning = false
     @Published private(set) var frameCount = 0
     @Published private(set) var droppedFrames = 0
@@ -33,7 +41,15 @@ final class PerfMonitor: ObservableObject {
     @Published private(set) var imageLoadMsTotal = 0.0
     @Published private(set) var iCloudLoads = 0
 
+    private var liveFrameCount = 0
+    private var liveDroppedFrames = 0
+    private var liveWorstFrameMs = 0.0
+    private var liveImageLoads = 0
+    private var liveImageLoadMsTotal = 0.0
+    private var liveICloudLoads = 0
+
     private var displayLink: CADisplayLink?
+    private var snapshotTimer: Timer?
     private var lastTimestamp: CFTimeInterval = 0
     private var startedAt: CFTimeInterval = 0
 
@@ -46,39 +62,56 @@ final class PerfMonitor: ObservableObject {
         let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
         link.add(to: .main, forMode: .common)
         displayLink = link
+
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.publishSnapshot() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        snapshotTimer = timer
     }
 
     func stop() {
         displayLink?.invalidate()
         displayLink = nil
+        snapshotTimer?.invalidate()
+        snapshotTimer = nil
+        publishSnapshot()
         isRunning = false
     }
 
     func reset() {
-        frameCount = 0
-        droppedFrames = 0
-        worstFrameMs = 0
-        imageLoads = 0
-        imageLoadMsTotal = 0
-        iCloudLoads = 0
+        liveFrameCount = 0; liveDroppedFrames = 0; liveWorstFrameMs = 0
+        liveImageLoads = 0; liveImageLoadMsTotal = 0; liveICloudLoads = 0
         lastTimestamp = 0
+        publishSnapshot()
     }
 
+    private func publishSnapshot() {
+        frameCount = liveFrameCount
+        droppedFrames = liveDroppedFrames
+        worstFrameMs = liveWorstFrameMs
+        imageLoads = liveImageLoads
+        imageLoadMsTotal = liveImageLoadMsTotal
+        iCloudLoads = liveICloudLoads
+    }
+
+    /// Mutates only plain vars — nothing here may touch @Published state, or
+    /// the monitor perturbs the very thing it is measuring.
     @objc private func tick(_ link: CADisplayLink) {
         defer { lastTimestamp = link.timestamp }
         guard lastTimestamp != 0 else { return }
         let delta = link.timestamp - lastTimestamp
-        frameCount += 1
+        liveFrameCount += 1
         let ms = delta * 1000
-        if ms > worstFrameMs { worstFrameMs = ms }
-        if delta > Self.droppedFrameThreshold { droppedFrames += 1 }
+        if ms > liveWorstFrameMs { liveWorstFrameMs = ms }
+        if delta > Self.droppedFrameThreshold { liveDroppedFrames += 1 }
     }
 
     nonisolated func recordImageLoad(seconds: Double, fromICloud: Bool) {
         Task { @MainActor in
-            imageLoads += 1
-            imageLoadMsTotal += seconds * 1000
-            if fromICloud { iCloudLoads += 1 }
+            liveImageLoads += 1
+            liveImageLoadMsTotal += seconds * 1000
+            if fromICloud { liveICloudLoads += 1 }
         }
     }
 

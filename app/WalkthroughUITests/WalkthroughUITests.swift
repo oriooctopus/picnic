@@ -521,9 +521,16 @@ final class WalkthroughUITests: XCTestCase {
         let large = measureDrags(onMonth: "monthCard.2026-06", label: "LARGE-300-realistic")
         capture("23-deck-drag-framerate-large")
 
-        print("PERFHUD SMALL: \(small)")
-        print("PERFHUD LARGE: \(large)")
-        let comparison = "SMALL (5 photos): \(small)\nLARGE (300 realistic): \(large)"
+        print("PERFHUD SMALL idle: \(small.idle)")
+        print("PERFHUD SMALL drag: \(small.drag)")
+        print("PERFHUD LARGE idle: \(large.idle)")
+        print("PERFHUD LARGE drag: \(large.drag)")
+        let comparison = """
+        SMALL (5 photos)      idle: \(small.idle)
+        SMALL (5 photos)      drag: \(small.drag)
+        LARGE (300 realistic) idle: \(large.idle)
+        LARGE (300 realistic) drag: \(large.drag)
+        """
         let dump = XCTAttachment(string: comparison)
         dump.name = "perf-stats"
         dump.lifetime = .keepAlways
@@ -534,36 +541,52 @@ final class WalkthroughUITests: XCTestCase {
     /// sustained drags, and returns the monitor's summary line. Slow velocity
     /// keeps a finger down across many frames, which is where stutter shows
     /// up — a quick flick is over before enough frames elapse to measure.
-    private func measureDrags(onMonth identifier: String, label: String) -> String {
+    private func measureDrags(onMonth identifier: String, label: String) -> (idle: String, drag: String) {
         let monthCard = app.descendants(matching: .any)[identifier].firstMatch
         XCTAssertTrue(waitForElementByScrolling(monthCard, initialTimeout: 180),
                       "\(label): month \(identifier) should appear in the grid")
-        monthCard.tap()
+        // Coordinate tap rather than .tap(): the card can report as not
+        // hittable while perfectly visible (a floating overlay overlapping its
+        // reported frame is enough), and that aborted the previous run.
+        monthCard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
 
         let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
         XCTAssertTrue(deckCard.waitForExistence(timeout: 60), "\(label): deck should open")
-
-        // Long-press the title to start the monitor — the same gesture that
-        // reveals the HUD on the phone.
-        app.descendants(matching: .any)["deck.title"].firstMatch.press(forDuration: 1.0)
-        Thread.sleep(forTimeInterval: 0.5)
-
-        for _ in 0..<5 {
-            deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
-                .press(forDuration: 0.2,
-                       thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)),
-                       withVelocity: .slow,
-                       thenHoldForDuration: 0.2)
-            Thread.sleep(forTimeInterval: 0.4)
-        }
-
+        let title = app.descendants(matching: .any)["deck.title"].firstMatch
         let stats = app.descendants(matching: .any)["perf.stats"].firstMatch
-        let summary = stats.waitForExistence(timeout: 10) ? stats.label : "probe missing"
 
-        // Back to the grid for the next measurement.
+        // Phase 1 — idle baseline. Nothing is touched; this is what the deck
+        // costs while doing nothing. Without it a bad drag number can't be
+        // told apart from a bad baseline.
+        title.press(forDuration: 1.0)
+        Thread.sleep(forTimeInterval: 4.0)
+        let idleSummary = stats.waitForExistence(timeout: 10) ? stats.label : "probe missing"
+        title.press(forDuration: 1.0)   // stop
+
+        // Phase 2 — dragging. Deliberately SHORT drags: the swipe threshold is
+        // 110pt, and these travel well under it, so the card springs back and
+        // nothing is marked for deletion. Previously five full swipes marked
+        // every photo, and exiting via X then attempted a real PhotoKit
+        // delete and hung the test.
+        title.press(forDuration: 1.0)   // start (resets counters)
+        Thread.sleep(forTimeInterval: 0.5)
+        for i in 0..<6 {
+            let from = i % 2 == 0 ? 0.72 : 0.48
+            let to = i % 2 == 0 ? 0.48 : 0.72
+            deckCard.coordinate(withNormalizedOffset: CGVector(dx: from, dy: 0.5))
+                .press(forDuration: 0.25,
+                       thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: to, dy: 0.5)),
+                       withVelocity: .slow,
+                       thenHoldForDuration: 0.25)
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        let dragSummary = stats.waitForExistence(timeout: 10) ? stats.label : "probe missing"
+        title.press(forDuration: 1.0)   // stop
+
+        // Nothing pending, so the X is a plain dismiss.
         app.buttons["deck.commit"].tap()
-        _ = app.staticTexts["My life"].waitForExistence(timeout: 15)
-        return summary
+        _ = app.staticTexts["My life"].waitForExistence(timeout: 20)
+        return (idleSummary, dragSummary)
     }
 
     /// setUp already launched the app; relaunching is how a test opts into
