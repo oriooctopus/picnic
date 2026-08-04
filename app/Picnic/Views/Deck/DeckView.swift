@@ -7,7 +7,15 @@ struct DeckView: View {
     @StateObject var viewModel: DeckViewModel
 
     @State private var currentImage: UIImage?
+    /// The photo of the card underneath, shown dimmed as the top card is
+    /// thrown clear — the reference reveals the real next picture, not a grey
+    /// placeholder.
+    @State private var nextImage: UIImage?
     @State private var showHidePopover = false
+    /// Plain @State on purpose: it holds the object without subscribing to it,
+    /// so a drag repaints the tint and labels but never this view's body (and
+    /// therefore never the filmstrip). See DeckDragState.
+    @State private var dragState = DeckDragState()
     /// Long-press the month title to reveal the frame-rate readout. Hidden by
     /// default so it never intrudes on normal use, but present in the ad-hoc
     /// build because the phone is the only place the stutter reproduces.
@@ -45,31 +53,24 @@ struct DeckView: View {
             topBar
 
             ZStack {
-                if viewModel.currentAsset != nil {
-                    // Stack-peek: the next 1-2 cards show as narrower,
-                    // offset-up card shapes behind the current card, matching
-                    // the reference deck's "stack of cards" read. Purely
-                    // decorative — no image loaded, just the card shape at
-                    // reduced scale/opacity — so it costs nothing extra to
-                    // fetch.
-                    // Each layer mirrors the real card's own frame (same
-                    // ZStack region, default-centered) rather than being
-                    // pinned to the top of the whole remaining height — the
-                    // previous version's top-alignment made the sliver span
-                    // the full card area's top edge, which sat flush against
-                    // (and behind) the header above it instead of behind the
-                    // card. Narrower horizontal insets keep it visibly
-                    // "behind" the card's sides, and the small upward offset
-                    // is enough to show a sliver of rounded top edge just
-                    // above the card without reaching the header.
-                    ForEach(Array(stride(from: 2, through: 1, by: -1)), id: \.self) { depth in
-                        if viewModel.currentIndex + depth < viewModel.visibleAssets.count {
-                            RoundedRectangle(cornerRadius: 24)
-                                .fill(Color(white: 0.08 + Double(depth) * 0.03))
-                                .padding(.horizontal, 20 + CGFloat(depth) * 14)
-                                .offset(y: -CGFloat(depth) * 8)
+                // The card underneath, dimmed. Revealed as the top card is
+                // thrown aside, which is what gives the deck its depth in the
+                // reference — previously this was a pair of flat grey
+                // rectangles with no picture in them.
+                if viewModel.currentIndex + 1 < viewModel.visibleAssets.count {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 24).fill(Color(white: 0.08))
+                        if let nextImage {
+                            Image(uiImage: nextImage)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .clipShape(RoundedRectangle(cornerRadius: 24))
                         }
+                        RoundedRectangle(cornerRadius: 24).fill(.black.opacity(0.55))
                     }
+                    .padding(.horizontal, 20)
+                    .scaleEffect(0.96)
+                    .offset(y: -6)
                 }
 
                 if let asset = viewModel.currentAsset {
@@ -83,13 +84,15 @@ struct DeckView: View {
                         onLongPress: { presentLivePhotoIfNeeded(asset) },
                         onDelete: { viewModel.markForDelete() },
                         onKeep: { viewModel.markKept() },
-                        onDismiss: { Task { await exitDeck() } }
+                        onDismiss: { Task { await exitDeck() } },
+                        dragState: dragState
                     )
                     .id(asset.localIdentifier)
                 } else {
                     emptyState
                 }
             }
+            .overlay { SwipeVerdictLabel(state: dragState) }
             .frame(maxHeight: .infinity)
             // Gap below the two-line header so the card (and its stack-peek
             // layers) never overlaps the date/time subline (defect C1/C5).
@@ -99,7 +102,7 @@ struct DeckView: View {
             positionAndFilmstrip
             bottomControls
         }
-        .background(Color.black.ignoresSafeArea())
+        .background(DeckTintBackground(state: dragState))
         .overlay(alignment: .topLeading) {
             if showPerfHUD {
                 PerfHUD().padding(.leading, 12).padding(.top, 64)
@@ -136,8 +139,17 @@ struct DeckView: View {
     }
 
     private func loadCurrentImage() async {
-        guard let asset = viewModel.currentAsset else { currentImage = nil; return }
+        guard let asset = viewModel.currentAsset else { currentImage = nil; nextImage = nil; return }
         currentImage = await ThumbnailLoader.fullImage(for: asset, targetSize: CGSize(width: 1200, height: 1600))
+
+        // The card behind is dimmed and partly covered, so it is fetched at a
+        // fraction of the size — enough to read, cheap enough not to compete
+        // with the card actually being dragged.
+        let nextIndex = viewModel.currentIndex + 1
+        guard viewModel.visibleAssets.indices.contains(nextIndex) else { nextImage = nil; return }
+        nextImage = await ThumbnailLoader.fullImage(
+            for: viewModel.visibleAssets[nextIndex], targetSize: CGSize(width: 600, height: 800)
+        )
     }
 
     /// Top-right X (and the quiet drag-to-dismiss below): dismiss immediately
@@ -326,8 +338,17 @@ private struct DeckCard: View {
     let onDelete: () -> Void
     let onKeep: () -> Void
     let onDismiss: () -> Void
+    /// Shared so the tint and the verdict labels track the same drag. Held as
+    /// @ObservedObject here because this view genuinely must repaint per
+    /// frame; DeckView deliberately does not observe it.
+    @ObservedObject var dragState: DeckDragState
 
-    @State private var dragOffset: CGSize = .zero
+    /// What the card is actually offset by: the finger's travel amplified, so
+    /// the card leads the hand rather than sticking to it.
+    private var visualOffset: CGSize {
+        CGSize(width: dragState.translation.width * DeckSwipeMetrics.travelMultiplier,
+               height: dragState.translation.height)
+    }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -366,7 +387,7 @@ private struct DeckCard: View {
         .contentShape(RoundedRectangle(cornerRadius: 24))
         .gesture(
             DragGesture()
-                .onChanged { value in dragOffset = value.translation }
+                .onChanged { value in dragState.translation = value.translation }
                 .onEnded { value in handleSwipeEnd(value) }
         )
         .onLongPressGesture(minimumDuration: 0.35) { onLongPress() }
@@ -391,12 +412,15 @@ private struct DeckCard: View {
             }
         }
         .padding(.horizontal, 20)
-        .offset(dragOffset)
-        .rotationEffect(.degrees(Double(dragOffset.width / 20)))
+        .offset(visualOffset)
+        .rotationEffect(.degrees(Double(visualOffset.width / 26)))
     }
 
     private func handleSwipeEnd(_ value: DragGesture.Value) {
-        let threshold: CGFloat = 110
+        // Judged on the finger's real travel, not the amplified card position:
+        // amplifying the visuals should make the deck feel livelier, not make
+        // it commit off a shorter gesture than before.
+        let threshold = DeckSwipeMetrics.threshold
         let dismissThreshold: CGFloat = 140
 
         // Judge the swipe by where the drag was HEADED, not where the finger
@@ -414,27 +438,27 @@ private struct DeckCard: View {
         // from the horizontal delete/keep swipes, with no visible chrome.
         // Reuses the same commit-then-dismiss logic as the top-right X.
         if translation.height > dismissThreshold && abs(translation.width) < 80 {
-            withAnimation(.spring) { dragOffset = .zero }
+            withAnimation(.spring) { dragState.translation = .zero }
             onDismiss()
             return
         }
 
         if translation.width < -threshold {
-            withAnimation(.spring) { dragOffset = CGSize(width: -600, height: value.translation.height) }
+            withAnimation(.spring) { dragState.translation = CGSize(width: -600, height: value.translation.height) }
             onDelete()
             resetDragAfterSwipe()
         } else if translation.width > threshold {
-            withAnimation(.spring) { dragOffset = CGSize(width: 600, height: value.translation.height) }
+            withAnimation(.spring) { dragState.translation = CGSize(width: 600, height: value.translation.height) }
             onKeep()
             resetDragAfterSwipe()
         } else {
-            withAnimation(.spring) { dragOffset = .zero }
+            withAnimation(.spring) { dragState.translation = .zero }
         }
     }
 
     private func resetDragAfterSwipe() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            dragOffset = .zero
+            dragState.translation = .zero
         }
     }
 }
