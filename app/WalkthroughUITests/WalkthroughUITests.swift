@@ -514,11 +514,11 @@ final class WalkthroughUITests: XCTestCase {
         // gesture, same code path, cheap content — so any difference against
         // the large month is attributable to scale and decode cost rather than
         // to the harness or the simulator having a bad day.
-        let small = measureDrags(onMonth: "monthCard.2025-05", label: "SMALL-5-photos")
+        let small = measureDrags(onMonth: "monthCard.2025-05", label: "SMALL-5-photos", expectedCount: 5)
         capture("22-deck-drag-framerate")
 
         // Then the realistic one: 300 camera-sized photos.
-        let large = measureDrags(onMonth: "monthCard.2026-06", label: "LARGE-300-realistic")
+        let large = measureDrags(onMonth: "monthCard.2026-06", label: "LARGE-300-realistic", expectedCount: Self.largeMonthCount)
         capture("23-deck-drag-framerate-large")
 
         print("PERFHUD SMALL idle: \(small.idle)")
@@ -537,11 +537,23 @@ final class WalkthroughUITests: XCTestCase {
         add(dump)
     }
 
-    /// Opens a month's deck, starts the frame monitor, performs several slow
-    /// sustained drags, and returns the monitor's summary line. Slow velocity
-    /// keeps a finger down across many frames, which is where stutter shows
-    /// up — a quick flick is over before enough frames elapse to measure.
-    private func measureDrags(onMonth identifier: String, label: String) -> (idle: String, drag: String) {
+    /// Opens a month's deck, starts the frame monitor, performs several
+    /// sustained drags, and returns the monitor's summary line.
+    ///
+    /// Self-proving: a prior version of this test could PASS while the
+    /// gesture never reached the card at all (byte-identical perf stats
+    /// across idle/drag, and the wrong month's deck open the whole time —
+    /// see the commit that introduced these asserts). So before trusting any
+    /// perf numbers, this now asserts (1) the deck that actually opened is
+    /// the one asked for, by reading its "N OF M" position label and title,
+    /// and (2) the card's on-screen frame visibly displaces during the drag
+    /// phase, by sampling `deckCard.frame` immediately after each gesture
+    /// returns (XCUITest can't sample mid-gesture — a single press/drag/hold
+    /// call is synchronous — but the touch-up and the spring-back animation
+    /// are not simultaneous, so a same-instant read after the call returns
+    /// still catches the displaced position, same idea as it working for the
+    /// video-frame evidence).
+    private func measureDrags(onMonth identifier: String, label: String, expectedCount: Int) -> (idle: String, drag: String) {
         let monthCard = app.descendants(matching: .any)[identifier].firstMatch
         XCTAssertTrue(waitForElementByScrolling(monthCard, initialTimeout: 180),
                       "\(label): month \(identifier) should appear in the grid")
@@ -554,6 +566,19 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(deckCard.waitForExistence(timeout: 60), "\(label): deck should open")
         let title = app.descendants(matching: .any)["deck.title"].firstMatch
         let stats = app.descendants(matching: .any)["perf.stats"].firstMatch
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+
+        // Positive proof the RIGHT deck opened — the failure mode this is
+        // guarding against is silent: the wrong (already-open) deck stays on
+        // screen and every later measurement is quietly meaningless.
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "\(label): position label should appear")
+        let openedCount = totalCount(fromPosition: position.label)
+        XCTAssertEqual(openedCount, expectedCount,
+                       "\(label): opened deck holds \(openedCount) photos (position label '\(position.label)'), expected \(expectedCount) — wrong month's deck is open")
+        let axDump = XCTAttachment(string: "title='\(title.label)' position='\(position.label)' identifier=\(identifier)")
+        axDump.name = "\(label)-deck-identity"
+        axDump.lifetime = .keepAlways
+        add(axDump)
 
         // Phase 1 — idle baseline. Nothing is touched; this is what the deck
         // costs while doing nothing. Without it a bad drag number can't be
@@ -568,20 +593,50 @@ final class WalkthroughUITests: XCTestCase {
         // nothing is marked for deletion. Previously five full swipes marked
         // every photo, and exiting via X then attempted a real PhotoKit
         // delete and hung the test.
+        //
+        // Coordinates are computed from the card's real on-screen frame
+        // (`app.coordinate` + a point offset) rather than
+        // `deckCard.coordinate(withNormalizedOffset:)` — element-relative
+        // normalized coordinates on this element previously correlated with
+        // the synthesized touch getting swallowed by a system gesture
+        // instead of the app's DragGesture (the recording showed the
+        // simulator dropping to the app switcher mid-drag). Velocity is
+        // `.default` rather than `.slow`: a slow multi-second synthetic touch
+        // is exactly the shape XCUITest's gesture synthesis is known to
+        // desynchronize on.
+        let cardFrame = deckCard.frame
+        let dragY = cardFrame.midY
+        let leftX = cardFrame.minX + cardFrame.width * 0.28
+        let rightX = cardFrame.minX + cardFrame.width * 0.72
+        let restFrame = deckCard.frame
+        var maxDisplacement: CGFloat = 0
+
         title.press(forDuration: 1.0)   // start (resets counters)
         Thread.sleep(forTimeInterval: 0.5)
         for i in 0..<6 {
-            let from = i % 2 == 0 ? 0.72 : 0.48
-            let to = i % 2 == 0 ? 0.48 : 0.72
-            deckCard.coordinate(withNormalizedOffset: CGVector(dx: from, dy: 0.5))
-                .press(forDuration: 0.25,
-                       thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: to, dy: 0.5)),
-                       withVelocity: .slow,
-                       thenHoldForDuration: 0.25)
+            let goingLeft = i % 2 == 0
+            let fromX = goingLeft ? rightX : leftX
+            let toX = goingLeft ? leftX : rightX
+            let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: fromX, dy: dragY))
+            let end = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: toX, dy: dragY))
+            start.press(forDuration: 0.1,
+                        thenDragTo: end,
+                        withVelocity: .default,
+                        thenHoldForDuration: 0.1)
+
+            // Sample immediately — the touch just lifted; the spring-back
+            // animation hasn't had time to complete.
+            let displaced = abs(deckCard.frame.midX - restFrame.midX)
+            maxDisplacement = max(maxDisplacement, displaced)
+            if i == 0 { capture("22a-\(label)-drag-left-tint", delay: 0) }
+            if i == 1 { capture("22b-\(label)-drag-right-tint", delay: 0) }
             Thread.sleep(forTimeInterval: 0.2)
         }
         let dragSummary = stats.waitForExistence(timeout: 10) ? stats.label : "probe missing"
         title.press(forDuration: 1.0)   // stop
+
+        XCTAssertGreaterThan(maxDisplacement, 20,
+                             "\(label): deck card frame never visibly displaced during the drag phase (max observed \(maxDisplacement)pt) — the gesture is not reaching the card")
 
         // Nothing pending, so the X is a plain dismiss.
         app.buttons["deck.commit"].tap()
