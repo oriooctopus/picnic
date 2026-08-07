@@ -37,6 +37,12 @@ final class AppState: ObservableObject {
                 print("SeedLibrary: seeding failed: \(error)")
             }
         }
+        #endif
+        // Refresh as soon as the base seed (if any) is in, rather than
+        // waiting until the large-month seed below also finishes. See the
+        // large-month branch for why this matters.
+        refreshMonths()
+        #if DEBUG
         // Opt-in: only the deck perf test wants a month large enough for
         // per-asset work to be measurable.
         if ProcessInfo.processInfo.arguments.contains("--seed-large-month") {
@@ -45,9 +51,21 @@ final class AppState: ObservableObject {
             } catch {
                 print("SeedLibrary: large-month seeding failed: \(error)")
             }
+            // Large-month seeding (300 chunked, detached photo encodes) can
+            // take far longer than the base seed. Before this second
+            // refresh existed, refreshMonths() ran exactly once, after BOTH
+            // seed stages — so every already-seeded month, including the
+            // base seed's small control month, stayed invisible to the UI
+            // (monthBuckets empty) until the entire large-month seed
+            // finished too. That's what made monthCard.2025-05 (base seed,
+            // architecturally unrelated to --seed-large-month) vanish once
+            // the large-month encode work moved to Task.detached and
+            // started taking real wall-clock time instead of blocking (and
+            // thus bounding) bootstrap's total duration via the main
+            // thread.
+            refreshMonths()
         }
         #endif
-        refreshMonths()
         await mirrorQueue.drainQueue()
     }
 

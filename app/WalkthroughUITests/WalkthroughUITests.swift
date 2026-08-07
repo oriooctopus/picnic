@@ -507,27 +507,45 @@ final class WalkthroughUITests: XCTestCase {
     /// numbers so the stutter can be reproduced and attributed before anything
     /// else is changed.
     func test15DeckDragFrameRate() throws {
-        relaunch(withExtraArguments: ["--seed-large-month"])
+        // SMALL-MONTH ONLY. Deliberately does not pass --seed-large-month:
+        // that seed took long enough (300 camera-sized photos, chunked and
+        // detached) that bootstrap's sequencing bug (see AppState.bootstrap)
+        // could starve this control month of ever appearing. This test's
+        // whole point is to be the fast, trustworthy proof that a drag lands
+        // and displaces the card — it shouldn't depend on the large seed at
+        // all. See test16DeckDragFrameRateAtScale for the at-scale version.
+        relaunch(withExtraArguments: [])
         XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 30))
 
-        // Control first: the small hand-authored month (5 small photos). Same
-        // gesture, same code path, cheap content — so any difference against
-        // the large month is attributable to scale and decode cost rather than
-        // to the harness or the simulator having a bad day.
         let small = measureDrags(onMonth: "monthCard.2025-05", label: "SMALL-5-photos", expectedCount: 5)
         capture("22-deck-drag-framerate")
 
-        // Then the realistic one: 300 camera-sized photos.
-        let large = measureDrags(onMonth: "monthCard.2026-06", label: "LARGE-300-realistic", expectedCount: Self.largeMonthCount)
-        capture("23-deck-drag-framerate-large")
-
         print("PERFHUD SMALL idle: \(small.idle)")
         print("PERFHUD SMALL drag: \(small.drag)")
-        print("PERFHUD LARGE idle: \(large.idle)")
-        print("PERFHUD LARGE drag: \(large.drag)")
         let comparison = """
         SMALL (5 photos)      idle: \(small.idle)
         SMALL (5 photos)      drag: \(small.drag)
+        """
+        let dump = XCTAttachment(string: comparison)
+        dump.name = "perf-stats"
+        dump.lifetime = .keepAlways
+        add(dump)
+    }
+
+    /// At-scale companion to test15: same drag-proving assertions, against
+    /// the synthetic 300-photo month. Allowed to stay red for now — kept
+    /// separate so a slow/flaky large-month seed can never take test15's
+    /// trustworthy small-month evidence down with it.
+    func test16DeckDragFrameRateAtScale() throws {
+        relaunch(withExtraArguments: ["--seed-large-month"])
+        XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 30))
+
+        let large = measureDrags(onMonth: "monthCard.2026-06", label: "LARGE-300-realistic", expectedCount: Self.largeMonthCount)
+        capture("23-deck-drag-framerate-large")
+
+        print("PERFHUD LARGE idle: \(large.idle)")
+        print("PERFHUD LARGE drag: \(large.drag)")
+        let comparison = """
         LARGE (300 realistic) idle: \(large.idle)
         LARGE (300 realistic) drag: \(large.drag)
         """
