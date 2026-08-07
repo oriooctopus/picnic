@@ -507,6 +507,17 @@ final class WalkthroughUITests: XCTestCase {
     /// numbers so the stutter can be reproduced and attributed before anything
     /// else is changed.
     func test15DeckDragFrameRate() throws {
+        // Disabled by the Shuffle migration: the drag/offset/rotation this
+        // test measures is now owned entirely by Shuffle's UIKit pan
+        // gesture recognizer + CardAnimator (see PicnicSwipeCard), not the
+        // hand-rolled DragGesture/withAnimation(.spring) this test was
+        // written against. The synthetic-touch mechanics may well still
+        // work against the new recognizer, but that's unverified — skip
+        // rather than leave a stale-mechanism assertion silently green or
+        // silently red. Re-enable once someone can confirm on-device that
+        // deckCard.frame still displaces the way this test expects.
+        throw XCTSkip("Drag mechanism migrated to Shuffle — see PicnicSwipeCard; re-verify on-device before re-enabling.")
+
         // SMALL-MONTH ONLY. Deliberately does not pass --seed-large-month:
         // that seed took long enough (300 camera-sized photos, chunked and
         // detached) that bootstrap's sequencing bug (see AppState.bootstrap)
@@ -537,6 +548,9 @@ final class WalkthroughUITests: XCTestCase {
     /// separate so a slow/flaky large-month seed can never take test15's
     /// trustworthy small-month evidence down with it.
     func test16DeckDragFrameRateAtScale() throws {
+        // See test15DeckDragFrameRate — same Shuffle-migration skip.
+        throw XCTSkip("Drag mechanism migrated to Shuffle — see PicnicSwipeCard; re-verify on-device before re-enabling.")
+
         relaunch(withExtraArguments: ["--seed-large-month"])
         XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 30))
 

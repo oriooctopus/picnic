@@ -321,12 +321,12 @@ struct DeckView: View {
     }
 }
 
-/// The swipeable card, extracted so the in-flight drag offset lives here
-/// rather than on DeckView. As @State on DeckView it invalidated that whole
-/// body on every drag frame — which rebuilt the entire filmstrip's ForEach
-/// and re-read visibleAssets several times per frame, and was the actual
-/// cause of the laggy swipe. Confining it here means a drag repaints only
-/// this card.
+/// The swipeable card. Drag/offset/rotation/spring-back and the swipe commit
+/// decision are now owned entirely by Shuffle's `SwipeCard` (see
+/// `PicnicSwipeCard`), reached through a `UIViewRepresentable`. This struct
+/// is just the SwiftUI-side wiring: closures in, a live translation reading
+/// out to `dragState` so `DeckTintBackground`/`SwipeVerdictLabel` keep
+/// tracking the drag exactly as before.
 private struct DeckCard: View {
     let asset: PHAsset
     let image: UIImage?
@@ -343,122 +343,48 @@ private struct DeckCard: View {
     /// frame; DeckView deliberately does not observe it.
     @ObservedObject var dragState: DeckDragState
 
-    /// What the card is actually offset by: the finger's travel amplified, so
-    /// the card leads the hand rather than sticking to it.
-    private var visualOffset: CGSize {
-        CGSize(width: dragState.translation.width * DeckSwipeMetrics.travelMultiplier,
-               height: dragState.translation.height)
-    }
-
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 24).fill(Color(white: 0.08))
-
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .clipShape(RoundedRectangle(cornerRadius: 24))
-            }
-
-            if asset.mediaSubtypes.contains(.photoLive) {
-                Image(systemName: "livephoto")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(8)
-                    .background(Circle().fill(.black.opacity(0.4)))
-                    .padding(12)
-            }
-        }
-        // Single AX element for the card's own frame (fill image + live-photo
-        // badge collapsed into one) — the Compare pill below is a real
-        // control and stays out of this ignored subtree so it remains its
-        // own tappable, separately-identified element rather than bleeding
-        // the "deck.card" identifier onto multiple inner layers.
-        .accessibilityElement(children: .ignore)
-        .accessibilityIdentifier("deck.card")
-        // Drag + long-press are scoped to ONLY this base layer (image +
-        // live-photo badge), not to the composite that includes the Compare
-        // pill below. An ancestor .gesture(DragGesture()) sitting over a
-        // nested Button gets first refusal on touch-down, and
-        // .onLongPressGesture in particular installs a recognizer that holds
-        // the touch waiting to see if it becomes a long-press, delaying (and
-        // in practice swallowing) the Button's own tap recognition.
-        .contentShape(RoundedRectangle(cornerRadius: 24))
-        .gesture(
-            DragGesture()
-                .onChanged { value in dragState.translation = value.translation }
-                .onEnded { value in handleSwipeEnd(value) }
+        ShuffleCardRepresentable(
+            image: image,
+            isLivePhoto: asset.mediaSubtypes.contains(.photoLive),
+            compareCount: compareGroup?.assets.count,
+            onCompare: { if let compareGroup { onCompare(compareGroup) } },
+            onLongPress: onLongPress,
+            onDelete: onDelete,
+            onKeep: onKeep,
+            onDismiss: onDismiss,
+            onTranslationChange: { dragState.translation = $0 }
         )
-        .onLongPressGesture(minimumDuration: 0.35) { onLongPress() }
-        .overlay(alignment: .bottom) {
-            if let compareGroup {
-                Button {
-                    onCompare(compareGroup)
-                } label: {
-                    HStack(spacing: 6) {
-                        Text("Compare \(compareGroup.assets.count)")
-                        Image(systemName: "chevron.right")
-                    }
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Capsule().fill(.black.opacity(0.55)))
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("deck.comparePill")
-                .padding(.bottom, 16)
-            }
-        }
         .padding(.horizontal, 20)
-        .offset(visualOffset)
-        .rotationEffect(.degrees(Double(visualOffset.width / 26)))
+    }
+}
+
+/// Bridges `PicnicSwipeCard` (UIKit) into the SwiftUI tree. Live-photo badge
+/// and Compare pill live as real subviews of the UIKit card itself (see
+/// `PicnicSwipeCard`) so they ride along with Shuffle's own transform —
+/// nothing here needs to re-derive an offset for them.
+private struct ShuffleCardRepresentable: UIViewRepresentable {
+    let image: UIImage?
+    let isLivePhoto: Bool
+    let compareCount: Int?
+    let onCompare: () -> Void
+    let onLongPress: () -> Void
+    let onDelete: () -> Void
+    let onKeep: () -> Void
+    let onDismiss: () -> Void
+    let onTranslationChange: (CGSize) -> Void
+
+    func makeUIView(context: Context) -> PicnicSwipeCard {
+        PicnicSwipeCard()
     }
 
-    private func handleSwipeEnd(_ value: DragGesture.Value) {
-        // Judged on the finger's real travel, not the amplified card position:
-        // amplifying the visuals should make the deck feel livelier, not make
-        // it commit off a shorter gesture than before.
-        let threshold = DeckSwipeMetrics.threshold
-        let dismissThreshold: CGFloat = 140
-
-        // Judge the swipe by where the drag was HEADED, not where the finger
-        // happened to lift. A quick flick — the normal way people sort a
-        // deck — ends with a small raw translation but a large predicted
-        // one; using raw translation alone makes flicks silently do nothing.
-        let translation = CGSize(
-            width: max(abs(value.translation.width), abs(value.predictedEndTranslation.width))
-                * (value.translation.width < 0 ? -1 : 1),
-            height: max(abs(value.translation.height), abs(value.predictedEndTranslation.height))
-                * (value.translation.height < 0 ? -1 : 1)
-        )
-
-        // Quiet secondary exit: a plain downward drag on the card, distinct
-        // from the horizontal delete/keep swipes, with no visible chrome.
-        // Reuses the same commit-then-dismiss logic as the top-right X.
-        if translation.height > dismissThreshold && abs(translation.width) < 80 {
-            withAnimation(.spring) { dragState.translation = .zero }
-            onDismiss()
-            return
-        }
-
-        if translation.width < -threshold {
-            withAnimation(.spring) { dragState.translation = CGSize(width: -600, height: value.translation.height) }
-            onDelete()
-            resetDragAfterSwipe()
-        } else if translation.width > threshold {
-            withAnimation(.spring) { dragState.translation = CGSize(width: 600, height: value.translation.height) }
-            onKeep()
-            resetDragAfterSwipe()
-        } else {
-            withAnimation(.spring) { dragState.translation = .zero }
-        }
-    }
-
-    private func resetDragAfterSwipe() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            dragState.translation = .zero
-        }
+    func updateUIView(_ card: PicnicSwipeCard, context: Context) {
+        card.configure(image: image, isLivePhoto: isLivePhoto, compareCount: compareCount)
+        card.onCompare = onCompare
+        card.onLongPress = onLongPress
+        card.onDelete = onDelete
+        card.onKeep = onKeep
+        card.onDismiss = onDismiss
+        card.onTranslationChange = onTranslationChange
     }
 }

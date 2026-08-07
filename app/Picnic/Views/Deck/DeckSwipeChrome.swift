@@ -21,13 +21,14 @@ final class DeckDragState: ObservableObject {
 }
 
 enum DeckSwipeMetrics {
-    /// Past this much horizontal travel, releasing commits the swipe.
+    /// Past this much horizontal travel, releasing commits the swipe. Shuffle
+    /// tracks the finger 1:1 (no travel multiplier) — its own pan physics,
+    /// spring-back, and touch-anchored rotation replace the hand-rolled
+    /// versions of all three.
     static let threshold: CGFloat = 110
 
-    /// The card moves further than the finger. A 1:1 card felt sluggish —
-    /// Oliver asked for roughly double, which also matches the reference app,
-    /// where the card is thrown well clear of centre before it commits.
-    static let travelMultiplier: CGFloat = 2.0
+    /// Drag-down dismiss distance, matching the old `dismissThreshold`.
+    static let dismissThreshold: CGFloat = 140
 }
 
 /// Black, washed with red or green as the card is thrown toward archive or
