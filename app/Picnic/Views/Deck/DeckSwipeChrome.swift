@@ -133,7 +133,9 @@ struct DeckPeekCard: View {
             RoundedRectangle(cornerRadius: 24).fill(.black.opacity(dimOpacity))
         }
         .aspectRatio(cardAspectRatio, contentMode: .fit)
-        .padding(.horizontal, 20)
+        // Matches DeckCard's own 8pt margin (see DeckView.swift) so the peek
+        // card keeps sharing the top card's exact width and centre.
+        .padding(.horizontal, 8)
         .scaleEffect(scale)
         .offset(y: yOffset)
         // Tracks the drag 1:1 while it's live (no animation fighting the

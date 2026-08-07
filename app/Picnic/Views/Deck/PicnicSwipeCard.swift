@@ -1,5 +1,14 @@
 import UIKit
+import AVFoundation
 import Shuffle
+
+/// A `UIView` whose backing layer IS an `AVPlayerLayer`, so assigning
+/// `.player` is all that's needed to show video — no separate sublayer
+/// bookkeeping in `layoutSubviews`.
+private final class PlayerLayerContainerView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+}
 
 /// UIKit swipeable card view backing `DeckCard`. Subclasses Shuffle's
 /// `SwipeCard` directly (not `SwipeCardStack`) — Picnic already owns which
@@ -20,6 +29,14 @@ final class PicnicSwipeCard: SwipeCard {
     var onCompare: (() -> Void)?
 
     private let imageView = UIImageView()
+    /// Video's card-filling layer. A sibling of `imageView` inside
+    /// `dragView` (not a replacement for it) so it inherits the same drag
+    /// transform/rotation as a photo does; `configure` toggles which of the
+    /// two is visible. Deliberately does NOT own an `AVPlayer` — the player
+    /// is created and freed at the SwiftUI/DeckView level (one shared
+    /// instance for the whole deck session) and just handed in here to
+    /// display; see VideoPlayback.swift.
+    private let videoLayerView = PlayerLayerContainerView()
 
     /// Everything the drag visibly moves — photo, live-photo badge, compare
     /// pill — lives in here instead of directly on `self`.
@@ -121,6 +138,12 @@ final class PicnicSwipeCard: SwipeCard {
         imageView.clipsToBounds = true
         imageView.layer.cornerRadius = 24
 
+        videoLayerView.playerLayer.videoGravity = .resizeAspect
+        videoLayerView.backgroundColor = .black
+        videoLayerView.layer.cornerRadius = 24
+        videoLayerView.clipsToBounds = true
+        videoLayerView.isHidden = true
+
         // Deliberately NOT using Shuffle's `content` property: it adds the
         // view directly as a subview of `self` and repins its frame to
         // `bounds` in Shuffle's own layoutSubviews every pass, which would
@@ -128,6 +151,7 @@ final class PicnicSwipeCard: SwipeCard {
         // `dragView`.
         addSubview(dragView)
         dragView.addSubview(imageView)
+        dragView.addSubview(videoLayerView)
         dragView.addSubview(liveBadge)
         dragView.addSubview(comparePill)
         comparePill.accessibilityIdentifier = "deck.comparePill"
@@ -169,6 +193,7 @@ final class PicnicSwipeCard: SwipeCard {
             dragView.frame = bounds
         }
         imageView.frame = dragView.bounds
+        videoLayerView.frame = dragView.bounds
         liveBadge.frame = CGRect(x: 12, y: 12, width: 32, height: 32)
         let pillSize = comparePill.sizeThatFits(CGSize(width: dragView.bounds.width, height: 44))
         comparePill.frame = CGRect(
@@ -181,8 +206,20 @@ final class PicnicSwipeCard: SwipeCard {
         dragView.bringSubviewToFront(comparePill)
     }
 
-    func configure(image: UIImage?, isLivePhoto: Bool, compareCount: Int?) {
+    func configure(image: UIImage?, isLivePhoto: Bool, compareCount: Int?, videoPlayer: AVPlayer?) {
         imageView.image = image
+        // .fit, not .fill (same reasoning as the imageView's own contentMode
+        // above): the poster still shows through for the instant before the
+        // player has a frame ready.
+        if let videoPlayer {
+            videoLayerView.playerLayer.player = videoPlayer
+            videoLayerView.isHidden = false
+            imageView.isHidden = true
+        } else {
+            videoLayerView.playerLayer.player = nil
+            videoLayerView.isHidden = true
+            imageView.isHidden = false
+        }
         liveBadge.isHidden = !isLivePhoto
         if let compareCount {
             comparePill.configuration?.attributedTitle = Self.comparePillTitle(count: compareCount)

@@ -14,7 +14,7 @@ struct FilmstripView: View {
                 // for every asset in the month the moment the deck opens, and
                 // fires every thumbnail fetch at once. On a real month of a few
                 // hundred photos that alone made swiping stutter.
-                LazyHStack(spacing: 3) {
+                LazyHStack(spacing: 6) {
                     ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { index, asset in
                         FilmstripThumbnail(
                             asset: asset,
@@ -85,8 +85,13 @@ private struct FilmstripThumbnail: View {
         // only the stroke below marks which one is current.
         .frame(width: 24, height: 36)
         .overlay(
+            // .strokeBorder draws entirely inside the shape's bounds (unlike
+            // .stroke, which centres the line ON the edge and bleeds half its
+            // width outside the frame) — a 2pt .stroke was eating 1pt of the
+            // gap to each neighbour on every side, which is what read as the
+            // thumbnails overlapping.
             RoundedRectangle(cornerRadius: 8)
-                .stroke(isCurrent ? Color.white : .clear, lineWidth: 2)
+                .strokeBorder(isCurrent ? Color.white : .clear, lineWidth: 2)
         )
         .onTapGesture { onTap() }
         .task {

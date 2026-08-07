@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import AVFoundation
 
 struct DeckView: View {
     @EnvironmentObject var appState: AppState
@@ -16,6 +17,12 @@ struct DeckView: View {
     /// so a drag repaints the tint and labels but never this view's body (and
     /// therefore never the filmstrip). See DeckDragState.
     @State private var dragState = DeckDragState()
+    /// One AVPlayer for the whole deck session, its item swapped per video
+    /// card (see VideoPlaybackController's doc comment) — never a new
+    /// AVPlayer per swiped card. Plain @State, same reasoning as
+    /// `dragState`: this publishes a ~10Hz time update that must repaint
+    /// only VideoTimeLabel/VideoControlBar, never this view's own body.
+    @State private var videoController = VideoPlaybackController()
     /// Long-press the month title to reveal the frame-rate readout. Hidden by
     /// default so it never intrudes on normal use, but present in the ad-hoc
     /// build because the phone is the only place the stutter reproduces.
@@ -83,7 +90,8 @@ struct DeckView: View {
                         onKeep: { viewModel.markKept() },
                         onDismiss: { Task { await exitDeck() } },
                         dragState: dragState,
-                        cardAspectRatio: cardAspectRatio
+                        cardAspectRatio: cardAspectRatio,
+                        videoController: videoController
                     )
                     .id(asset.localIdentifier)
                     // The photo itself is still assigned synchronously in
@@ -105,6 +113,15 @@ struct DeckView: View {
             // layers) never overlaps the date/time subline (defect C1/C5).
             .padding(.top, 16)
 
+            // Outside and below the card on purpose — see VideoControlBar's
+            // doc comment: a scrub drag here must never compete with the
+            // card's own swipe pan gesture.
+            if let asset = viewModel.currentAsset, asset.mediaType == .video {
+                VideoControlBar(controller: videoController)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 10)
+            }
+
             bottomActionsRow
             positionAndFilmstrip
             bottomControls
@@ -120,6 +137,20 @@ struct DeckView: View {
         .overlay(alignment: .topLeading) { PerfStatsProbe() }
         .task(id: viewModel.currentAsset?.localIdentifier) {
             await loadCurrentImage()
+        }
+        // Frees the shared AVPlayer's current item when the deck itself
+        // goes away — the other half of "no leaked AVPlayer" alongside
+        // loadCurrentImage()'s per-card clear()/load() below.
+        .onDisappear { videoController.clear() }
+        // A modal covering the deck (Compare / a long-pressed live photo)
+        // shouldn't leave a video still playing (and audible) underneath
+        // it.
+        .onChange(of: presentation?.id) { _, newValue in
+            if newValue != nil {
+                videoController.pause()
+            } else {
+                videoController.resume()
+            }
         }
         .onAppear {
             // Same run-loop turn as currentIndex advancing (see advance()'s
@@ -159,8 +190,27 @@ struct DeckView: View {
     }
 
     private func loadCurrentImage() async {
-        guard let asset = viewModel.currentAsset else { currentImage = nil; nextImage = nil; return }
-        currentImage = await ThumbnailLoader.fullImage(for: asset, targetSize: CGSize(width: 1200, height: 1600))
+        guard let asset = viewModel.currentAsset else {
+            currentImage = nil; nextImage = nil
+            videoController.clear()
+            return
+        }
+        if asset.mediaType == .video {
+            // Poster frame first (cheap, shows immediately), then swap the
+            // shared player onto this asset's item once PhotoKit hands one
+            // back.
+            currentImage = await ThumbnailLoader.thumbnail(for: asset, targetSize: CGSize(width: 1200, height: 1600))
+            if let item = await VideoLoader.playerItem(for: asset) {
+                videoController.load(item: item)
+            } else {
+                videoController.clear()
+            }
+        } else {
+            // Not a video card: make sure nothing keeps playing/decoding
+            // behind a plain photo.
+            videoController.clear()
+            currentImage = await ThumbnailLoader.fullImage(for: asset, targetSize: CGSize(width: 1200, height: 1600))
+        }
 
         // The card behind is dimmed and partly covered, so it is fetched at a
         // fraction of the size — enough to read, cheap enough not to compete
@@ -363,6 +413,11 @@ private struct DeckCard: View {
     /// frame; DeckView deliberately does not observe it.
     @ObservedObject var dragState: DeckDragState
     let cardAspectRatio: CGFloat
+    /// Plain `let`, not `@ObservedObject`: this view must NOT resubscribe
+    /// to the controller's ~10Hz time updates (that's VideoTimeLabel's job,
+    /// added as a separate observing view below) — only asset.mediaType
+    /// switching what's passed to `ShuffleCardRepresentable` is read here.
+    let videoController: VideoPlaybackController
 
     var body: some View {
         // Same order as the dimmed peek card below it (aspectRatio, THEN
@@ -375,11 +430,13 @@ private struct DeckCard: View {
         // width, so the photo (and its black letterbox) spilled past the
         // card's own rounded rect and the dimmed peek card showed through
         // above/below instead of being covered by opaque black.
+        let isVideo = asset.mediaType == .video
         ShuffleCardRepresentable(
             image: image,
             isLivePhoto: asset.mediaSubtypes.contains(.photoLive),
             compareCount: compareGroup?.assets.count,
             cardAspectRatio: cardAspectRatio,
+            videoPlayer: isVideo ? videoController.player : nil,
             onCompare: { if let compareGroup { onCompare(compareGroup) } },
             onLongPress: onLongPress,
             onDelete: onDelete,
@@ -388,7 +445,18 @@ private struct DeckCard: View {
             onTranslationChange: { dragState.translation = $0 }
         )
         .aspectRatio(cardAspectRatio, contentMode: .fit)
-        .padding(.horizontal, 20)
+        // 8pt, not 20pt: the reference app runs its card almost edge to edge
+        // (~9pt margin each side). `.aspectRatio(fit)` inside this
+        // `maxHeight: .infinity` ZStack already picks whichever of the
+        // width- or height-derived box is smaller on its own — no extra
+        // GeometryReader math needed, shrinking this padding is enough to
+        // let the box grow.
+        .padding(.horizontal, 8)
+        .overlay(alignment: .bottomLeading) {
+            if isVideo {
+                VideoTimeLabel(controller: videoController)
+            }
+        }
     }
 }
 
@@ -401,6 +469,7 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
     let isLivePhoto: Bool
     let compareCount: Int?
     let cardAspectRatio: CGFloat
+    let videoPlayer: AVPlayer?
     let onCompare: () -> Void
     let onLongPress: () -> Void
     let onDelete: () -> Void
@@ -413,7 +482,7 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ card: PicnicSwipeCard, context: Context) {
-        card.configure(image: image, isLivePhoto: isLivePhoto, compareCount: compareCount)
+        card.configure(image: image, isLivePhoto: isLivePhoto, compareCount: compareCount, videoPlayer: videoPlayer)
         card.onCompare = onCompare
         card.onLongPress = onLongPress
         card.onDelete = onDelete

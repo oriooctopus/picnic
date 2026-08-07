@@ -1,6 +1,7 @@
 import Photos
 import UIKit
 import QuartzCore
+import AVFoundation
 
 /// PHImageManager wrappers. Both use `.highQualityFormat` deliberately —
 /// `.opportunistic` calls its result handler twice (low-res, then high-res),
@@ -89,6 +90,24 @@ enum LivePhotoLoader {
                 }
                 didResume = true
                 continuation.resume(returning: livePhoto)
+            }
+        }
+    }
+}
+
+/// Fetches a directly-playable `AVPlayerItem` for a video `PHAsset`, same
+/// checked-continuation shape as `ThumbnailLoader`/`LivePhotoLoader` above.
+enum VideoLoader {
+    static func playerItem(for asset: PHAsset) async -> AVPlayerItem? {
+        await withCheckedContinuation { continuation in
+            let options = PHVideoRequestOptions()
+            options.deliveryMode = .automatic
+            options.isNetworkAccessAllowed = true
+            var didResume = false
+            PHImageManager.default().requestPlayerItem(forVideo: asset, options: options) { item, _ in
+                guard !didResume else { return }
+                didResume = true
+                continuation.resume(returning: item)
             }
         }
     }
