@@ -24,6 +24,14 @@ final class DeckViewModel: ObservableObject {
     @Published var isCommitting = false
     @Published var commitError: String?
 
+    /// Fired synchronously, in the same call as `currentIndex` moving forward
+    /// by exactly one (see `advance()`), so the view can promote its already
+    /// -loaded next-image into current-image before any async reload runs.
+    /// Without this the new card mounts showing the OLD `currentImage` until
+    /// `loadCurrentImage()`'s await returns — a ~0.1s flicker of the wrong
+    /// photo.
+    var onAdvance: (() -> Void)?
+
     init(month: MonthBucket, sortStore: SortStore, photoLibrary: PhotoLibraryService, mirrorQueue: MirrorQueueStore) {
         self.month = month
         self.sortStore = sortStore
@@ -117,6 +125,7 @@ final class DeckViewModel: ObservableObject {
     private func advance() {
         if currentIndex < visibleAssets.count - 1 {
             currentIndex += 1
+            onAdvance?()
         }
     }
 

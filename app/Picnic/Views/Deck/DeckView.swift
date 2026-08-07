@@ -26,6 +26,15 @@ struct DeckView: View {
     /// attached here.
     @State private var presentation: DeckPresentation?
 
+    /// Every card — the live one and the dimmed peek underneath — renders at
+    /// this fixed portrait ratio so the outline never changes shape between
+    /// photos; landscape/square photos letterbox inside it instead. 4:5
+    /// (width:height = 0.8) sits inside the 3:4–9:16 band, reads as a
+    /// standard "portrait card" shape (matches common photo-app card ratios)
+    /// and comfortably fits between the header and the bottom rows without
+    /// clipping either.
+    private let cardAspectRatio: CGFloat = 4.0 / 5.0
+
     enum DeckPresentation: Identifiable {
         case compare(CompareGroup)
         case livePhoto(PHLivePhoto)
@@ -59,15 +68,19 @@ struct DeckView: View {
                 // rectangles with no picture in them.
                 if viewModel.currentIndex + 1 < viewModel.visibleAssets.count {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 24).fill(Color(white: 0.08))
+                        // Black, not the old dark-grey — with .fit below,
+                        // this is what shows through as the letterbox for
+                        // any photo that isn't already the card's own ratio.
+                        RoundedRectangle(cornerRadius: 24).fill(.black)
                         if let nextImage {
                             Image(uiImage: nextImage)
                                 .resizable()
-                                .aspectRatio(contentMode: .fill)
+                                .aspectRatio(contentMode: .fit)
                                 .clipShape(RoundedRectangle(cornerRadius: 24))
                         }
                         RoundedRectangle(cornerRadius: 24).fill(.black.opacity(0.55))
                     }
+                    .aspectRatio(cardAspectRatio, contentMode: .fit)
                     .padding(.horizontal, 20)
                     .scaleEffect(0.96)
                     .offset(y: -6)
@@ -88,6 +101,7 @@ struct DeckView: View {
                         dragState: dragState
                     )
                     .id(asset.localIdentifier)
+                    .aspectRatio(cardAspectRatio, contentMode: .fit)
                 } else {
                     emptyState
                 }
@@ -113,6 +127,19 @@ struct DeckView: View {
         .overlay(alignment: .topLeading) { PerfStatsProbe() }
         .task(id: viewModel.currentAsset?.localIdentifier) {
             await loadCurrentImage()
+        }
+        .onAppear {
+            // Same run-loop turn as currentIndex advancing (see advance()'s
+            // doc comment in DeckViewModel) — promotes the already-loaded
+            // peek image into currentImage before the async .task above even
+            // starts, so the new card never shows the outgoing photo. If the
+            // prefetch hadn't finished (nextImage nil), currentImage clears
+            // to the card's black background instead — a brief blank is
+            // correct, a brief WRONG photo is the bug this fixes.
+            viewModel.onAdvance = {
+                currentImage = nextImage
+                nextImage = nil
+            }
         }
         .fullScreenCover(item: $presentation) { item in
             switch item {

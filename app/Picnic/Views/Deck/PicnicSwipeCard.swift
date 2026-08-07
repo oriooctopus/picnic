@@ -93,7 +93,12 @@ final class PicnicSwipeCard: SwipeCard {
     private func setUp() {
         layer.cornerRadius = 24
 
-        imageView.contentMode = .scaleAspectFill
+        // .fit, not .fill: every card presents the whole photo at one fixed
+        // portrait ratio (DeckView.cardAspectRatio), so a landscape/square
+        // source letterboxes instead of cropping. The black background is
+        // what shows through the letterbox/pillarbox space.
+        imageView.contentMode = .scaleAspectFit
+        imageView.backgroundColor = .black
         imageView.clipsToBounds = true
         imageView.layer.cornerRadius = 24
 
@@ -150,11 +155,28 @@ final class PicnicSwipeCard: SwipeCard {
         imageView.image = image
         liveBadge.isHidden = !isLivePhoto
         if let compareCount {
-            comparePill.configuration?.title = "Compare \(compareCount)"
+            comparePill.configuration?.attributedTitle = Self.comparePillTitle(count: compareCount)
             comparePill.isHidden = false
         } else {
             comparePill.isHidden = true
         }
+    }
+
+    /// The pre-port SwiftUI pill (see `git show b7737e2^:app/Picnic/Views/Deck/DeckView.swift`,
+    /// the commit right before the Shuffle/UIKit port) used
+    /// `.font(.subheadline.bold())` — a Dynamic Type text style, not a fixed
+    /// point size. `UIButton.Configuration.filled()` supplies its own
+    /// default title font instead, which is the actual font mismatch that
+    /// was reported. Recompute per call (not a cached `static let`) so it
+    /// keeps tracking Dynamic Type/trait changes the same way the SwiftUI
+    /// version did.
+    private static func comparePillTitle(count: Int) -> AttributedString {
+        let base = UIFont.preferredFont(forTextStyle: .subheadline)
+        let boldDescriptor = base.fontDescriptor.withSymbolicTraits(.traitBold) ?? base.fontDescriptor
+        let font = UIFont(descriptor: boldDescriptor, size: base.pointSize)
+        var attributes = AttributeContainer()
+        attributes.font = font
+        return AttributedString("Compare \(count)", attributes: attributes)
     }
 
     @objc private func handleCompareTap() { onCompare?() }
