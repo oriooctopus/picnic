@@ -555,7 +555,15 @@ final class WalkthroughUITests: XCTestCase {
     /// video-frame evidence).
     private func measureDrags(onMonth identifier: String, label: String, expectedCount: Int) -> (idle: String, drag: String) {
         let monthCard = app.descendants(matching: .any)[identifier].firstMatch
-        XCTAssertTrue(waitForElementByScrolling(monthCard, initialTimeout: 180),
+        // A single long waitForExistence rather than waitForElementByScrolling:
+        // the grid already opens scrolled to the bottom (most recent month),
+        // so blind swiping buys nothing here and risks returning true on a
+        // stale match mid-scroll. It also avoids repeated full-hierarchy
+        // accessibility snapshots — each one is its own XCUITest "UI query"
+        // with its own hard internal timeout, and firing many of them back to
+        // back is more likely to catch the app mid-stall than one query that
+        // simply waits.
+        XCTAssertTrue(monthCard.waitForExistence(timeout: 180),
                       "\(label): month \(identifier) should appear in the grid")
         // Coordinate tap rather than .tap(): the card can report as not
         // hittable while perfectly visible (a floating overlay overlapping its

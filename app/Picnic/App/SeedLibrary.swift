@@ -176,20 +176,37 @@ enum SeedLibrary {
 
         for start in stride(from: 0, to: items.count, by: chunkSize) {
             let chunk = Array(items[start..<min(start + chunkSize, items.count)])
-            var payloads: [(Data, Date)] = []
-            payloads.reserveCapacity(chunk.count)
 
-            for item in chunk {
-                autoreleasepool {
-                    let image = makeNoisyImage(text: "\(item.index)", color: item.color, size: item.pixelSize)
-                    // Quality 0.9 on high-frequency content keeps the file in
-                    // the MB range, the way a real camera photo is.
-                    // Compressing it hard would defeat the point.
-                    if let data = image.jpegData(compressionQuality: 0.9) {
-                        payloads.append((data, item.date))
+            // Drawing + JPEG-encoding a chunk of full 3024x4032 images is
+            // heavy enough to stall a thread for multiple seconds. This
+            // whole call chain is a plain nonisolated async function invoked
+            // from AppState.bootstrap() (@MainActor); a nonisolated async
+            // function is not guaranteed to hop off the caller's actor for
+            // its synchronous work, so left inline this ran ON the main
+            // thread and made it stop answering XCUITest's accessibility
+            // snapshot RPC for 40+ seconds at a stretch — measured via CI
+            // run 31145901185, whose log shows steady ~1s polling for
+            // "monthCard.2025-05" from t=48s to t=77s and then a 41s silent
+            // gap before "Failed to get matching snapshots: Timed out while
+            // evaluating UI query." Task.detached forces the draw/encode
+            // work onto the concurrent thread pool so the main thread — and
+            // that RPC — stays responsive throughout seeding.
+            let payloads: [(Data, Date)] = try await Task.detached(priority: .utility) {
+                var built: [(Data, Date)] = []
+                built.reserveCapacity(chunk.count)
+                for item in chunk {
+                    autoreleasepool {
+                        let image = makeNoisyImage(text: "\(item.index)", color: item.color, size: item.pixelSize)
+                        // Quality 0.9 on high-frequency content keeps the file
+                        // in the MB range, the way a real camera photo is.
+                        // Compressing it hard would defeat the point.
+                        if let data = image.jpegData(compressionQuality: 0.9) {
+                            built.append((data, item.date))
+                        }
                     }
                 }
-            }
+                return built
+            }.value
 
             totalBytes += payloads.reduce(0) { $0 + $1.0.count }
             try await PHPhotoLibrary.shared().performChanges {
