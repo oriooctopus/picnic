@@ -21,6 +21,10 @@ final class PicnicSwipeCard: SwipeCard {
 
     private let imageView = UIImageView()
 
+    /// +1 pivots one way, -1 the other; set from where the thumb landed when
+    /// the drag began. See beginSwiping.
+    private var rotationDirectionY: CGFloat = 1
+
     // Live-photo badge and Compare pill are real subviews of this card (not
     // SwiftUI overlays synced by hand) so they inherit Shuffle's transform
     // for free — no separate offset/rotation math to keep in sync with the
@@ -132,9 +136,34 @@ final class PicnicSwipeCard: SwipeCard {
         }
     }
 
+    override func beginSwiping(_ recognizer: UIPanGestureRecognizer) {
+        super.beginSwiping(recognizer)
+        // Which half of the card the thumb grabbed decides which way the card
+        // pivots — grab the top and it leans one way, the bottom the other.
+        // Shuffle derives this from an internal `touchLocation`, so we capture
+        // our own copy at the start of the gesture.
+        let touch = recognizer.location(in: self)
+        rotationDirectionY = touch.y < bounds.height / 2 ? 1 : -1
+    }
+
     override func continueSwiping(_ recognizer: UIPanGestureRecognizer) {
         super.continueSwiping(recognizer)
-        let t = recognizer.translation(in: self)
+
+        // Shuffle's own swipeTransform() measures the drag with
+        // `translation(in: self)` — the card's OWN coordinate space, which it
+        // is simultaneously transforming. The two cancel out, so the card
+        // rotates but never actually travels. Its rotation looks right only
+        // because that one is measured against the superview.
+        //
+        // So recompute the whole transform here from the superview's frame of
+        // reference, which does not move. Same rotation formula as the
+        // library's, so only the translation behaviour changes.
+        let t = recognizer.translation(in: superview)
+        let rotationStrength = min(t.x / UIScreen.main.bounds.width, 1)
+        let angle = rotationDirectionY * rotationStrength * animationOptions.maximumRotationAngle
+        transform = CGAffineTransform(translationX: t.x, y: t.y)
+            .concatenating(CGAffineTransform(rotationAngle: angle))
+
         onTranslationChange?(CGSize(width: t.x, height: t.y))
     }
 
