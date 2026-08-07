@@ -14,7 +14,7 @@ struct FilmstripView: View {
                 // for every asset in the month the moment the deck opens, and
                 // fires every thumbnail fetch at once. On a real month of a few
                 // hundred photos that alone made swiping stutter.
-                LazyHStack(spacing: 6) {
+                LazyHStack(spacing: 3) {
                     ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { index, asset in
                         FilmstripThumbnail(
                             asset: asset,
@@ -36,7 +36,7 @@ struct FilmstripView: View {
                 // content overflows.
                 .frame(maxWidth: .infinity, alignment: .center)
             }
-            .frame(height: 56)
+            .frame(height: 36)
             .onAppear {
                 // Without this, the strip sits at its natural leading-edge
                 // scroll position (current thumbnail flush left, half cut
@@ -80,7 +80,10 @@ private struct FilmstripThumbnail: View {
                 Image(systemName: "xmark").font(.caption.bold()).foregroundStyle(.white)
             }
         }
-        .frame(width: isCurrent ? 48 : 40, height: isCurrent ? 48 : 40)
+        // Matches the reference app: every thumbnail is the same size —
+        // unlike the old 40pt/48pt jump, nothing enlarges on selection here,
+        // only the stroke below marks which one is current.
+        .frame(width: 24, height: 36)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .stroke(isCurrent ? Color.white : .clear, lineWidth: 2)
@@ -89,7 +92,7 @@ private struct FilmstripThumbnail: View {
         .task {
             if image == nil {
                 image = await ThumbnailLoader.thumbnail(
-                    for: asset, targetSize: CGSize(width: 96, height: 96)
+                    for: asset, targetSize: CGSize(width: 72, height: 72)
                 )
             }
         }

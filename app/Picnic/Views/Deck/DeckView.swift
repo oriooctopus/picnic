@@ -98,10 +98,10 @@ struct DeckView: View {
                         onDelete: { viewModel.markForDelete() },
                         onKeep: { viewModel.markKept() },
                         onDismiss: { Task { await exitDeck() } },
-                        dragState: dragState
+                        dragState: dragState,
+                        cardAspectRatio: cardAspectRatio
                     )
                     .id(asset.localIdentifier)
-                    .aspectRatio(cardAspectRatio, contentMode: .fit)
                 } else {
                     emptyState
                 }
@@ -369,8 +369,19 @@ private struct DeckCard: View {
     /// @ObservedObject here because this view genuinely must repaint per
     /// frame; DeckView deliberately does not observe it.
     @ObservedObject var dragState: DeckDragState
+    let cardAspectRatio: CGFloat
 
     var body: some View {
+        // Same order as the dimmed peek card below it (aspectRatio, THEN
+        // padding): fitting the ratio first and padding second means the
+        // 20pt margin comes out of the box the ratio was computed against,
+        // so the UIKit representable actually ends up sized/shaped like the
+        // 4:5 card. Doing it the other way — padding applied inside this
+        // view's body while `.aspectRatio` sat on the call site outside —
+        // let the representable size itself off the full, unpadded deck
+        // width, so the photo (and its black letterbox) spilled past the
+        // card's own rounded rect and the dimmed peek card showed through
+        // above/below instead of being covered by opaque black.
         ShuffleCardRepresentable(
             image: image,
             isLivePhoto: asset.mediaSubtypes.contains(.photoLive),
@@ -382,6 +393,7 @@ private struct DeckCard: View {
             onDismiss: onDismiss,
             onTranslationChange: { dragState.translation = $0 }
         )
+        .aspectRatio(cardAspectRatio, contentMode: .fit)
         .padding(.horizontal, 20)
     }
 }
