@@ -573,15 +573,19 @@ final class WalkthroughUITests: XCTestCase {
     /// video-frame evidence).
     private func measureDrags(onMonth identifier: String, label: String, expectedCount: Int) -> (idle: String, drag: String) {
         let monthCard = app.descendants(matching: .any)[identifier].firstMatch
-        // A single long waitForExistence rather than waitForElementByScrolling:
-        // the grid already opens scrolled to the bottom (most recent month),
-        // so blind swiping buys nothing here and risks returning true on a
-        // stale match mid-scroll. It also avoids repeated full-hierarchy
-        // accessibility snapshots — each one is its own XCUITest "UI query"
-        // with its own hard internal timeout, and firing many of them back to
-        // back is more likely to catch the app mid-stall than one query that
-        // simply waits.
-        XCTAssertTrue(monthCard.waitForExistence(timeout: 180),
+        // Scrolling search, not a plain waitForExistence. The grid is lazy, so
+        // a month that has never been scrolled into view is not realized and
+        // does not exist for XCUITest — waiting on it for three minutes finds
+        // nothing, which is exactly how runs 31147198399 and 31148040886
+        // failed. A brief attempt at removing the scroll was justified by the
+        // repeated-snapshot timeouts in run 31145901185, but those came from
+        // the main thread being blocked by inline seeding (fixed in 54155d5),
+        // not from scrolling.
+        //
+        // The stale-match risk that motivated dropping it is covered instead
+        // by the deck.position assertion below, which proves after the fact
+        // that the deck actually opened is the one asked for.
+        XCTAssertTrue(waitForElementByScrolling(monthCard, initialTimeout: 180),
                       "\(label): month \(identifier) should appear in the grid")
         // Coordinate tap rather than .tap(): the card can report as not
         // hittable while perfectly visible (a floating overlay overlapping its
