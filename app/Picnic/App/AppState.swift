@@ -14,6 +14,17 @@ final class AppState: ObservableObject {
     // v1 placeholder profile tab always shows the red-dot badge seen in the
     // reference screenshots; there is no real notification model yet.
     @Published var hasUnviewedProfileBadge = true
+    // True from app init through the end of bootstrap()'s seeding work, for
+    // any launch that requested a --seed-* stage. MyLifeView's one-shot
+    // "scroll to the most recent month" reads this rather than just
+    // "monthBuckets is non-empty" — see the comment below for why that
+    // distinction is load-bearing. Computed synchronously in init(), not
+    // inside bootstrap(): bootstrap's first suspension point is
+    // `await photoLibrary.requestAuthorization()`, and MyLifeView's own
+    // `.onAppear { appState.refreshMonths() }` can run before that await
+    // ever resumes — setting this flag any later than init() reopens the
+    // exact race it exists to close.
+    @Published private(set) var isSeeding: Bool
 
     private let modelContext: ModelContext
 
@@ -21,6 +32,12 @@ final class AppState: ObservableObject {
         modelContext = ModelContext(PersistenceController.container)
         sortStore = SortStore(context: modelContext)
         mirrorQueue = MirrorQueueStore(context: modelContext)
+        #if DEBUG
+        let args = ProcessInfo.processInfo.arguments
+        isSeeding = args.contains("--seed-library") || args.contains("--seed-large-month")
+        #else
+        isSeeding = false
+        #endif
     }
 
     func bootstrap() async {
@@ -30,41 +47,49 @@ final class AppState: ObservableObject {
         #if DEBUG
         // Debug-only seed path for the visual-walk CI job — never compiled
         // into the ad-hoc/Release build. See SeedLibrary.swift.
-        if ProcessInfo.processInfo.arguments.contains("--seed-library") {
+        //
+        // isSeeding matters here because the CI simulator's PhotoKit library
+        // is not actually empty at launch — Simulator ships a handful of
+        // built-in stock photos (dated across scattered past years, e.g.
+        // 2009/2011/2012/2018) — so the very first refreshMonths() call
+        // already returns a few non-empty month buckets, well before any of
+        // our seeding has run. MyLifeView's initial-scroll-to-bottom is
+        // one-shot (hasScrolledToInitialBottom): if it fires on that
+        // premature, stock-only bucket list, it never fires again, and the
+        // view stays anchored wherever that short list happened to render
+        // (which looked identical to "scrolled to top", since 4 stock months
+        // fit on one screen with room to spare). Everything seeded
+        // afterwards — including the base seed's small control month,
+        // monthCard.2025-05 — then sits below the fold forever, outside the
+        // LazyVGrid's realized range, invisible to accessibility no matter
+        // how long a test waits for it. isSeeding lets MyLifeView tell "real
+        // content, seeding done" apart from "PhotoKit answered with whatever
+        // was already on the sim". Confirmed via run 31148040886's
+        // sim-recording: the frame at the point of failure shows exactly
+        // the stock 2009/2011/2012/2018 months, not the seeded ones.
+        let willSeed = ProcessInfo.processInfo.arguments.contains("--seed-library")
+        let willSeedLargeMonth = ProcessInfo.processInfo.arguments.contains("--seed-large-month")
+        if willSeed {
             do {
                 try await SeedLibrary.seedIfNeeded()
             } catch {
                 print("SeedLibrary: seeding failed: \(error)")
             }
         }
-        #endif
-        // Refresh as soon as the base seed (if any) is in, rather than
-        // waiting until the large-month seed below also finishes. See the
-        // large-month branch for why this matters.
         refreshMonths()
-        #if DEBUG
         // Opt-in: only the deck perf test wants a month large enough for
         // per-asset work to be measurable.
-        if ProcessInfo.processInfo.arguments.contains("--seed-large-month") {
+        if willSeedLargeMonth {
             do {
                 try await SeedLibrary.seedLargeMonthIfNeeded()
             } catch {
                 print("SeedLibrary: large-month seeding failed: \(error)")
             }
-            // Large-month seeding (300 chunked, detached photo encodes) can
-            // take far longer than the base seed. Before this second
-            // refresh existed, refreshMonths() ran exactly once, after BOTH
-            // seed stages — so every already-seeded month, including the
-            // base seed's small control month, stayed invisible to the UI
-            // (monthBuckets empty) until the entire large-month seed
-            // finished too. That's what made monthCard.2025-05 (base seed,
-            // architecturally unrelated to --seed-large-month) vanish once
-            // the large-month encode work moved to Task.detached and
-            // started taking real wall-clock time instead of blocking (and
-            // thus bounding) bootstrap's total duration via the main
-            // thread.
             refreshMonths()
         }
+        isSeeding = false
+        #else
+        refreshMonths()
         #endif
         await mirrorQueue.drainQueue()
     }

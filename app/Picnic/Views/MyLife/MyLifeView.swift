@@ -102,6 +102,12 @@ struct MyLifeView: View {
             .onChange(of: appState.monthBuckets.count) { _ in
                 scrollToBottomIfNeeded(proxy)
             }
+            .onChange(of: appState.isSeeding) { _ in
+                // monthBuckets.count alone can't be trusted to fire this at
+                // the right time — see scrollToBottomIfNeeded for why
+                // isSeeding is the real signal.
+                scrollToBottomIfNeeded(proxy)
+            }
         }
         .overlay(alignment: .bottom) {
             if showScrollTop {
@@ -137,7 +143,13 @@ struct MyLifeView: View {
     /// fires once so it doesn't yank the user back down on later data
     /// refreshes (e.g. returning from DeckView).
     private func scrollToBottomIfNeeded(_ proxy: ScrollViewProxy) {
-        guard !hasScrolledToInitialBottom, !appState.monthBuckets.isEmpty else { return }
+        // While AppState is mid-seed (CI's debug seed path), PhotoKit can
+        // already report a few pre-existing, unrelated months (Simulator's
+        // built-in stock photos) before any real content lands. Waiting for
+        // isSeeding to go false — not just monthBuckets being non-empty —
+        // keeps this one-shot scroll from firing on that stale, premature
+        // list and never firing again once the real months arrive.
+        guard !hasScrolledToInitialBottom, !appState.monthBuckets.isEmpty, !appState.isSeeding else { return }
         hasScrolledToInitialBottom = true
         proxy.scrollTo("bottom", anchor: .bottom)
     }
