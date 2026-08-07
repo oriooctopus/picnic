@@ -21,6 +21,26 @@ final class PicnicSwipeCard: SwipeCard {
 
     private let imageView = UIImageView()
 
+    /// Everything the drag visibly moves — photo, live-photo badge, compare
+    /// pill — lives in here instead of directly on `self`.
+    ///
+    /// `self`'s frame is owned by SwiftUI (`ShuffleCardRepresentable` in
+    /// DeckView.swift), and DeckTintBackground/SwipeVerdictLabel both
+    /// republish `DeckDragState` every drag frame by design, which drives a
+    /// SwiftUI relayout of this view's ancestors on every frame too. That
+    /// relayout reasserts `self`'s frame — and per Apple's docs, setting
+    /// `.frame` on a view whose `.transform` is non-identity is undefined
+    /// and in practice snaps the view's center back to the untransformed
+    /// layout position. That's why the card used to rotate in place but
+    /// never travel: our translation kept getting silently canceled a
+    /// frame later.
+    ///
+    /// Keeping `self.transform` pinned to `.identity` always and doing the
+    /// real drag transform on `dragView` instead sidesteps the whole
+    /// problem — nothing but `continueSwiping`/`didCancelSwipe` below ever
+    /// touches `dragView`'s frame or transform.
+    private let dragView = UIView()
+
     /// +1 pivots one way, -1 the other; set from where the thumb landed when
     /// the drag began. See beginSwiping.
     private var rotationDirectionY: CGFloat = 1
@@ -76,10 +96,16 @@ final class PicnicSwipeCard: SwipeCard {
         imageView.contentMode = .scaleAspectFill
         imageView.clipsToBounds = true
         imageView.layer.cornerRadius = 24
-        content = imageView
 
-        addSubview(liveBadge)
-        addSubview(comparePill)
+        // Deliberately NOT using Shuffle's `content` property: it adds the
+        // view directly as a subview of `self` and repins its frame to
+        // `bounds` in Shuffle's own layoutSubviews every pass, which would
+        // keep the photo glued to `self` instead of riding along with
+        // `dragView`.
+        addSubview(dragView)
+        dragView.addSubview(imageView)
+        dragView.addSubview(liveBadge)
+        dragView.addSubview(comparePill)
         comparePill.accessibilityIdentifier = "deck.comparePill"
         comparePill.addTarget(self, action: #selector(handleCompareTap), for: .touchUpInside)
 
@@ -96,16 +122,28 @@ final class PicnicSwipeCard: SwipeCard {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+
+        // While `dragView` is mid-drag (or mid spring-back) its transform is
+        // non-identity. `self`'s frame gets reasserted by SwiftUI on every
+        // drag frame regardless (see `dragView` doc comment); skip reflowing
+        // `dragView`'s own frame during that window so that reassertion
+        // can't stomp the in-flight position the same way it used to on
+        // `self`. `self`'s size never changes mid-drag, so nothing is lost
+        // by skipping.
+        if dragView.transform.isIdentity {
+            dragView.frame = bounds
+        }
+        imageView.frame = dragView.bounds
         liveBadge.frame = CGRect(x: 12, y: 12, width: 32, height: 32)
-        let pillSize = comparePill.sizeThatFits(CGSize(width: bounds.width, height: 44))
+        let pillSize = comparePill.sizeThatFits(CGSize(width: dragView.bounds.width, height: 44))
         comparePill.frame = CGRect(
-            x: (bounds.width - pillSize.width) / 2,
-            y: bounds.height - pillSize.height - 16,
+            x: (dragView.bounds.width - pillSize.width) / 2,
+            y: dragView.bounds.height - pillSize.height - 16,
             width: pillSize.width,
             height: pillSize.height
         )
-        bringSubviewToFront(liveBadge)
-        bringSubviewToFront(comparePill)
+        dragView.bringSubviewToFront(liveBadge)
+        dragView.bringSubviewToFront(comparePill)
     }
 
     func configure(image: UIImage?, isLivePhoto: Bool, compareCount: Int?) {
@@ -149,19 +187,23 @@ final class PicnicSwipeCard: SwipeCard {
     override func continueSwiping(_ recognizer: UIPanGestureRecognizer) {
         super.continueSwiping(recognizer)
 
-        // Shuffle's own swipeTransform() measures the drag with
-        // `translation(in: self)` — the card's OWN coordinate space, which it
-        // is simultaneously transforming. The two cancel out, so the card
-        // rotates but never actually travels. Its rotation looks right only
-        // because that one is measured against the superview.
-        //
-        // So recompute the whole transform here from the superview's frame of
-        // reference, which does not move. Same rotation formula as the
-        // library's, so only the translation behaviour changes.
+        // Shuffle's own swipeTransform() (called by super, above) measures
+        // the drag with `translation(in: self)` — the card's OWN coordinate
+        // space, which it is simultaneously transforming — AND sets it on
+        // `self`. Undo that: `self` must stay at `.identity` always (see
+        // `dragView` doc comment for why), so any transform super just set
+        // gets discarded here.
+        transform = .identity
+
+        // Recompute the transform from the superview's frame of reference,
+        // which does not move, and apply it to `dragView` instead. Same
+        // rotation formula as the library's — only which view gets
+        // transformed, and which coordinate space the translation is
+        // measured in, changes.
         let t = recognizer.translation(in: superview)
         let rotationStrength = min(t.x / UIScreen.main.bounds.width, 1)
         let angle = rotationDirectionY * rotationStrength * animationOptions.maximumRotationAngle
-        transform = CGAffineTransform(translationX: t.x, y: t.y)
+        dragView.transform = CGAffineTransform(translationX: t.x, y: t.y)
             .concatenating(CGAffineTransform(rotationAngle: angle))
 
         onTranslationChange?(CGSize(width: t.x, height: t.y))
@@ -180,6 +222,19 @@ final class PicnicSwipeCard: SwipeCard {
 
     override func didCancelSwipe(_ recognizer: UIPanGestureRecognizer) {
         super.didCancelSwipe(recognizer)
+        // super's reset animation (CardAnimator.animateReset) springs
+        // `self.transform` back to `.identity` — a no-op now that `self`
+        // never leaves `.identity` in the first place. The real spring-back
+        // has to happen on `dragView`, which is what actually holds the
+        // drag's position and rotation.
+        UIView.animate(
+            withDuration: animationOptions.totalResetDuration,
+            delay: 0,
+            usingSpringWithDamping: animationOptions.resetSpringDamping,
+            initialSpringVelocity: 0,
+            options: [.curveLinear, .allowUserInteraction],
+            animations: { self.dragView.transform = .identity }
+        )
         onTranslationChange?(.zero)
     }
 }

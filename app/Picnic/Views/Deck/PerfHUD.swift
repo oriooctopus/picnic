@@ -32,6 +32,8 @@ struct PerfHUD: View {
             Text(String(format: "card %.0f×%.0f px",
                         monitor.lastImagePixels.width, monitor.lastImagePixels.height))
                 .foregroundStyle(monitor.lastImagePixels.width > 2000 ? .red : .white.opacity(0.7))
+            Text("build \(BuildInfo.gitSHA)")
+                .foregroundStyle(.white.opacity(0.5))
         }
         .font(.system(size: 11, weight: .medium, design: .monospaced))
         .foregroundStyle(.white)
