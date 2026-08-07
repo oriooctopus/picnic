@@ -67,23 +67,7 @@ struct DeckView: View {
                 // reference — previously this was a pair of flat grey
                 // rectangles with no picture in them.
                 if viewModel.currentIndex + 1 < viewModel.visibleAssets.count {
-                    ZStack {
-                        // Black, not the old dark-grey — with .fit below,
-                        // this is what shows through as the letterbox for
-                        // any photo that isn't already the card's own ratio.
-                        RoundedRectangle(cornerRadius: 24).fill(.black)
-                        if let nextImage {
-                            Image(uiImage: nextImage)
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .clipShape(RoundedRectangle(cornerRadius: 24))
-                        }
-                        RoundedRectangle(cornerRadius: 24).fill(.black.opacity(0.55))
-                    }
-                    .aspectRatio(cardAspectRatio, contentMode: .fit)
-                    .padding(.horizontal, 20)
-                    .scaleEffect(0.96)
-                    .offset(y: -6)
+                    DeckPeekCard(image: nextImage, dragState: dragState, cardAspectRatio: cardAspectRatio)
                 }
 
                 if let asset = viewModel.currentAsset {
@@ -102,6 +86,15 @@ struct DeckView: View {
                         cardAspectRatio: cardAspectRatio
                     )
                     .id(asset.localIdentifier)
+                    // The photo itself is still assigned synchronously in
+                    // onAdvance below (same run-loop turn as currentIndex
+                    // moving — see advance()'s doc comment), so this never
+                    // delays or flickers the wrong photo; it only eases the
+                    // geometry of the newly-mounted card in from the peek
+                    // card's own resting look (0.96 scale) up to full size,
+                    // instead of popping straight to full size the instant
+                    // the swipe commits.
+                    .transition(.scale(scale: 0.96).combined(with: .opacity))
                 } else {
                     emptyState
                 }
@@ -386,6 +379,7 @@ private struct DeckCard: View {
             image: image,
             isLivePhoto: asset.mediaSubtypes.contains(.photoLive),
             compareCount: compareGroup?.assets.count,
+            cardAspectRatio: cardAspectRatio,
             onCompare: { if let compareGroup { onCompare(compareGroup) } },
             onLongPress: onLongPress,
             onDelete: onDelete,
@@ -406,6 +400,7 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
     let image: UIImage?
     let isLivePhoto: Bool
     let compareCount: Int?
+    let cardAspectRatio: CGFloat
     let onCompare: () -> Void
     let onLongPress: () -> Void
     let onDelete: () -> Void
@@ -425,5 +420,24 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
         card.onKeep = onKeep
         card.onDismiss = onDismiss
         card.onTranslationChange = onTranslationChange
+    }
+
+    /// A plain `UIViewRepresentable` reports no size preference of its own,
+    /// so the ancestor `.aspectRatio(cardAspectRatio, contentMode: .fit)`
+    /// (DeckCard.body above) can't reason about this view's flexibility and
+    /// just hands it the full proposed width from the outer `ZStack` —
+    /// which is how the top card ended up rendering wider than both its own
+    /// 4:5 box and the correctly-boxed peek card behind it (ff5bcca only
+    /// reordered the modifiers; it never gave the representable a size
+    /// preference to negotiate with). Deriving a fitted size straight from
+    /// the proposal using the same `cardAspectRatio` the peek card is
+    /// boxed to is what makes both cards agree on one box.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: PicnicSwipeCard, context: Context) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height, width > 0, height > 0 else { return nil }
+        if width / height > cardAspectRatio {
+            return CGSize(width: height * cardAspectRatio, height: height)
+        } else {
+            return CGSize(width: width, height: width / cardAspectRatio)
+        }
     }
 }

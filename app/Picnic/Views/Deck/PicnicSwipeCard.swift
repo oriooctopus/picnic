@@ -45,6 +45,25 @@ final class PicnicSwipeCard: SwipeCard {
     /// the drag began. See beginSwiping.
     private var rotationDirectionY: CGFloat = 1
 
+    /// True only for the duration of the spring-back animation kicked off by
+    /// `didCancelSwipe`. `dragView.transform` becomes `.identity` on the
+    /// MODEL layer synchronously the instant `UIView.animate` below is
+    /// called — UIKit applies the model value immediately and animates only
+    /// the presentation layer — so `layoutSubviews`'s
+    /// `dragView.transform.isIdentity` check alone reads "settled" from the
+    /// very first frame of the spring, not just at the end. A relayout that
+    /// happens to run during that window (routine here: the
+    /// `onTranslationChange?(.zero)` call below publishes into
+    /// `DeckDragState`, which `DeckCard`/`DeckTintBackground` observe,
+    /// triggering a SwiftUI relayout pass) then hits the
+    /// `dragView.frame = bounds` branch mid-flight and snaps the
+    /// PRESENTATION layer straight to its final position, killing the
+    /// in-flight spring outright — this, not animation timing, was the
+    /// actual cause of the reported "card snaps back too quickly". This
+    /// flag is the missing "an animation is still actually running" signal
+    /// that guard needed.
+    private var isResettingDrag = false
+
     // Live-photo badge and Compare pill are real subviews of this card (not
     // SwiftUI overlays synced by hand) so they inherit Shuffle's transform
     // for free — no separate offset/rotation math to keep in sync with the
@@ -123,6 +142,17 @@ final class PicnicSwipeCard: SwipeCard {
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress))
         longPress.minimumPressDuration = 0.35
         addGestureRecognizer(longPress)
+
+        // Secondary tuning on top of the `isResettingDrag` fix above (which
+        // was the actual cause of the reported snap): Shuffle's defaults
+        // (damping 0.5, duration 0.6s) are springy enough to overshoot and
+        // bounce back, which reads as harsher than the reference app's
+        // settle even once the animation is allowed to play out uninterrupted.
+        // Raising damping to 0.82 removes almost all overshoot, and
+        // stretching the duration to 0.7s gives the motion room to actually
+        // ease rather than complete a fast bounce.
+        animationOptions.resetSpringDamping = 0.82
+        animationOptions.totalResetDuration = 0.7
     }
 
     override func layoutSubviews() {
@@ -135,7 +165,7 @@ final class PicnicSwipeCard: SwipeCard {
         // can't stomp the in-flight position the same way it used to on
         // `self`. `self`'s size never changes mid-drag, so nothing is lost
         // by skipping.
-        if dragView.transform.isIdentity {
+        if dragView.transform.isIdentity && !isResettingDrag {
             dragView.frame = bounds
         }
         imageView.frame = dragView.bounds
@@ -249,13 +279,15 @@ final class PicnicSwipeCard: SwipeCard {
         // never leaves `.identity` in the first place. The real spring-back
         // has to happen on `dragView`, which is what actually holds the
         // drag's position and rotation.
+        isResettingDrag = true
         UIView.animate(
             withDuration: animationOptions.totalResetDuration,
             delay: 0,
             usingSpringWithDamping: animationOptions.resetSpringDamping,
             initialSpringVelocity: 0,
             options: [.curveLinear, .allowUserInteraction],
-            animations: { self.dragView.transform = .identity }
+            animations: { self.dragView.transform = .identity },
+            completion: { [weak self] _ in self?.isResettingDrag = false }
         )
         onTranslationChange?(.zero)
     }

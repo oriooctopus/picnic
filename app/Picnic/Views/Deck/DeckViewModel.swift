@@ -124,8 +124,19 @@ final class DeckViewModel: ObservableObject {
 
     private func advance() {
         if currentIndex < visibleAssets.count - 1 {
-            currentIndex += 1
-            onAdvance?()
+            // withAnimation only wraps the resulting SwiftUI view diff — the
+            // currentIndex mutation and onAdvance() itself still run
+            // synchronously, in this same call, on this same run-loop turn.
+            // That's what keeps this compatible with onAdvance's own
+            // contract (see its doc comment): the new photo is assigned
+            // before any animated frame renders, so the promoted card can
+            // never show the outgoing photo. This only lets DeckView's
+            // `.transition` on the newly-mounted card (see DeckCard's call
+            // site) ease in instead of cutting.
+            withAnimation(.easeOut(duration: 0.28)) {
+                currentIndex += 1
+                onAdvance?()
+            }
         }
     }
 
