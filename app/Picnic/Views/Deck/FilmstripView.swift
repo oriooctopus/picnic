@@ -23,6 +23,7 @@ struct FilmstripView: View {
                             onTap: { onSelect(index) }
                         )
                         .id(index)
+                        .accessibilityIdentifier("filmstrip.thumb.\(index)")
                     }
                 }
                 .padding(.horizontal, 12)
@@ -73,7 +74,6 @@ private struct FilmstripThumbnail: View {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
             }
             if isPendingDelete {
                 RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.35))
@@ -84,6 +84,14 @@ private struct FilmstripThumbnail: View {
         // unlike the old 40pt/48pt jump, nothing enlarges on selection here,
         // only the stroke below marks which one is current.
         .frame(width: 24, height: 36)
+        // Clip AFTER the frame, on the ZStack itself — not on the Image
+        // while it's still unconstrained. An aspect-fill landscape source
+        // lays out wider than this 24pt frame; clipping the Image alone
+        // clips its own oversized bounds, not the 24x36 box, so the
+        // overflow bled into neighbouring thumbnails in the filmstrip.
+        // Clipping the already-framed ZStack trims whatever overflows it,
+        // for any source aspect ratio.
+        .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
             // .strokeBorder draws entirely inside the shape's bounds (unlike
             // .stroke, which centres the line ON the edge and bleeds half its

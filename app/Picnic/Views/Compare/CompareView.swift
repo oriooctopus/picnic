@@ -155,6 +155,12 @@ private struct CompareThumbnailView: View {
                 Image(uiImage: image).resizable().aspectRatio(contentMode: .fill)
             }
         }
+        // Self-clip so this view never depends on the caller applying
+        // .frame before .clipShape to contain an aspect-fill landscape
+        // source — same overflow-into-neighbours failure mode as
+        // FilmstripThumbnail, just guarded here instead of relying on
+        // call-site modifier order.
+        .clipped()
         .task {
             image = await ThumbnailLoader.thumbnail(for: asset, targetSize: CGSize(width: 88, height: 120))
         }

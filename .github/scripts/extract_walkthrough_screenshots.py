@@ -41,6 +41,7 @@ REQUIRED = [
     "18-deck-large-month", "19-deck-exit-nothing-pending",
     "20-compare-swipe-down-exit", "21-hide-sorted-on",
     "22-deck-drag-framerate", "23-deck-drag-framerate-large",
+    "24-deck-filmstrip-mixed-aspect",
 ]
 
 # Best-effort: one per test method, captured in tearDown. See module

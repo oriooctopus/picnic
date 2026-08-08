@@ -187,6 +187,26 @@ final class WalkthroughUITests: XCTestCase {
         return deckCard
     }
 
+    /// From the My Life grid, taps the 2025-07 month to enter Deck view.
+    /// Unlike May (burst cluster A, all portrait), July's seed mixes an
+    /// extreme-landscape photo (900x500) in with a square and a portrait —
+    /// exactly the aspect-ratio mix the filmstrip-overlap bug needs to
+    /// reproduce, so this is the navigation path for that regression test
+    /// rather than reusing openMayDeck.
+    @discardableResult
+    private func openJulyDeck() -> XCUIElement {
+        openMyLifeGrid()
+        let julyMonth = app.descendants(matching: .any)["monthCard.2025-07"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(julyMonth, initialTimeout: 30),
+                      "Seeded month 2025-07 (mixed aspect ratios) should appear in the grid")
+        julyMonth.tap()
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 20), "Deck first card should appear")
+        XCTAssertTrue(app.staticTexts["July 2025"].waitForExistence(timeout: 5),
+                      "Deck header should show July 2025 — a different month means the grid tap resolved to the wrong card")
+        return deckCard
+    }
+
     /// From Deck view on the burst-cluster card, taps the Compare pill and
     /// waits for the Compare view to appear.
     private func openCompare() {
@@ -567,6 +587,49 @@ final class WalkthroughUITests: XCTestCase {
         dump.name = "perf-stats"
         dump.lifetime = .keepAlways
         add(dump)
+    }
+
+    /// Regression test for the filmstrip-overlap bug: FilmstripThumbnail
+    /// used to clip the Image while it was still unconstrained by the
+    /// 24x36 frame, so an aspect-fill landscape source rendered wider than
+    /// its cell and bled into its neighbours. July's seed mixes a
+    /// 900x500 landscape photo in with a square and a portrait, so its
+    /// filmstrip actually exercises that path (May, used by most other
+    /// tests, is all-portrait and never would have caught this).
+    ///
+    /// Every filmstrip cell now carries "filmstrip.thumb.<index>" so this
+    /// can read each cell's real on-screen frame via the accessibility
+    /// tree — proving the fix at the layout level, not just "the
+    /// screenshot looks fine": on the pre-fix code the landscape cell's
+    /// frame.width is wider than its portrait/square neighbours (the
+    /// unconstrained Image pushes the ZStack wider); post-fix every cell's
+    /// frame.width is the same ~24pt regardless of source aspect ratio.
+    /// This proves uniform width, which is what "clipped to its own cell"
+    /// requires; it does not independently prove zero pixel-level overlap
+    /// between cells — the CI screenshot (captured below) plus the
+    /// Python/PIL pixel measurement done at ship-verification time is what
+    /// checks that.
+    func test17DeckFilmstripMixedAspectRatios() throws {
+        openJulyDeck()
+
+        let thumb0 = app.descendants(matching: .any)["filmstrip.thumb.0"].firstMatch
+        let thumb1 = app.descendants(matching: .any)["filmstrip.thumb.1"].firstMatch
+        let thumb2 = app.descendants(matching: .any)["filmstrip.thumb.2"].firstMatch
+        XCTAssertTrue(thumb0.waitForExistence(timeout: 10), "First filmstrip thumbnail (landscape source) should appear")
+        XCTAssertTrue(thumb1.waitForExistence(timeout: 5), "Second filmstrip thumbnail (square source) should appear")
+        XCTAssertTrue(thumb2.waitForExistence(timeout: 5), "Third filmstrip thumbnail (portrait source) should appear")
+        capture("24-deck-filmstrip-mixed-aspect")
+
+        let widths = [thumb0.frame.width, thumb1.frame.width, thumb2.frame.width]
+        let widthDump = XCTAttachment(string: "filmstrip thumb widths: \(widths)")
+        widthDump.name = "filmstrip-thumb-widths"
+        widthDump.lifetime = .keepAlways
+        add(widthDump)
+
+        for (index, width) in widths.enumerated() {
+            XCTAssertEqual(width, widths[0], accuracy: 1.0,
+                           "Filmstrip thumb \(index) width (\(width)) should match thumb 0's width (\(widths[0])) — a wider cell means its aspect-fill source overflowed the 24pt frame instead of being clipped to it")
+        }
     }
 
     /// Opens a month's deck, starts the frame monitor, performs several
