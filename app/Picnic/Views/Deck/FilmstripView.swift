@@ -101,6 +101,13 @@ private struct FilmstripThumbnail: View {
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(isCurrent ? Color.white : .clear, lineWidth: 2)
         )
+        // Without this, SwiftUI's automatic accessibility synthesis attaches
+        // the .accessibilityIdentifier applied at the call site to an
+        // auto-generated element inside this view's tree (the Image), whose
+        // layout frame is its pre-clip, aspect-filled size — not this ZStack's
+        // clipped 24x36 frame. Making the ZStack a single opaque accessibility
+        // element means XCUITest reads its own (post-clip) frame instead.
+        .accessibilityElement(children: .ignore)
         .onTapGesture { onTap() }
         .task {
             if image == nil {
