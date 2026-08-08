@@ -85,12 +85,20 @@ final class SortStore: ObservableObject {
         if state != .unsorted { recordActivity() }
     }
 
+    /// Reads `stateCache`, the same in-memory map `state(for:)` uses — not a
+    /// SwiftData fetch. This is called from MonthCardView's body (three times
+    /// per render: `isSorted`, the count label, and the accessibility label),
+    /// so for a month with hundreds of assets a live `#Predicate` fetch with a
+    /// captured ID set here was a synchronous disk round-trip on the main
+    /// thread every time the grid redrew — including the redraw the tap that
+    /// opens the deck triggers, which is what stalled deck-open on a large
+    /// month.
     func addressedCount(for assets: [PHAsset]) -> Int {
-        let ids = Set(assets.map(\.localIdentifier))
-        let descriptor = FetchDescriptor<AssetSortRecord>(
-            predicate: #Predicate { ids.contains($0.assetLocalID) && $0.stateRaw != "unsorted" }
-        )
-        return (try? context.fetchCount(descriptor)) ?? 0
+        assets.reduce(into: 0) { count, asset in
+            if let state = stateCache[asset.localIdentifier], state != .unsorted {
+                count += 1
+            }
+        }
     }
 
     // MARK: Per-month manual override
