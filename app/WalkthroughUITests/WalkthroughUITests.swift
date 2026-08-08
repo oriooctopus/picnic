@@ -318,30 +318,31 @@ final class WalkthroughUITests: XCTestCase {
         openCompare()
         let confirmButton = acceptFirstComparePhoto()
 
-        // MARK: Confirm group resolution -> system delete confirmation dialog
+        // MARK: Confirm group resolution -> Compare defers to the deck's
+        // pending-delete cue instead of deleting immediately, so no PhotoKit
+        // system dialog appears here anymore (that only fires later, from
+        // the deck's own X commit). Confirming should just resolve/dismiss
+        // Compare and grow the deck's pending-delete badge by the rejected
+        // members of the group.
         confirmButton.tap()
-        guard let systemAlert = firstSystemAlert(timeout: 10) else {
-            XCTFail("PhotoKit's system delete-confirmation dialog should appear (checked both app.alerts and springboard.alerts)")
-            return
-        }
-        capture("09-compare-confirm-dialog")
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 10), "Confirming in Compare should return to the deck")
+        XCTAssertFalse(app.staticTexts["Compare"].exists, "Compare header should be gone after confirming")
 
-        // Cancel (not Delete) so the seeded library survives for any test
-        // run after this one in the same job.
-        if systemAlert.buttons["Cancel"].exists {
-            systemAlert.buttons["Cancel"].tap()
-        } else {
-            systemAlert.buttons.element(boundBy: 0).tap()
-        }
-        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertNil(firstSystemAlert(timeout: 3),
+                     "PhotoKit's delete dialog should NOT appear from Compare confirm anymore — deletion is deferred to the deck's X button")
 
-        // Cancelling the system dialog surfaces CompareViewModel's own error
-        // alert (the PhotoKit delete failed) — dismiss it too.
-        let resolveErrorAlert = app.alerts["Couldn't resolve group"]
-        if resolveErrorAlert.waitForExistence(timeout: 3) {
-            resolveErrorAlert.buttons["OK"].tap()
-            Thread.sleep(forTimeInterval: 0.5)
-        }
+        let pendingBadge = app.staticTexts["deck.pendingCount"]
+        XCTAssertTrue(pendingBadge.waitForExistence(timeout: 5),
+                      "Rejected group members should land in the deck's pending-delete cue after Compare confirm")
+        capture("09-compare-confirm-pending")
+
+        // No PhotoKit delete has happened (Compare only queued a cue), so
+        // unlike the old version of this test there is nothing to Cancel —
+        // the seeded library is untouched on disk. Deliberately NOT tapping
+        // deck.commit here: that would actually delete the seeded assets,
+        // which the old test's Cancel-the-dialog step was specifically
+        // written to avoid.
     }
 
     func test07Utilities() throws {

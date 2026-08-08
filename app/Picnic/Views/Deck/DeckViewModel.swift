@@ -103,6 +103,19 @@ final class DeckViewModel: ObservableObject {
         advance()
     }
 
+    /// Compare's confirm: mark an arbitrary batch of assets pending-delete,
+    /// same cue semantics as `markForDelete()` (CUE ONLY, no PhotoKit call
+    /// here) but for assets Compare picked, not `currentAsset` — so this
+    /// deliberately skips the undo stack and `advance()`, neither of which
+    /// make sense for a batch that doesn't come from swiping the current
+    /// card.
+    func markPendingDelete(_ assets: [PHAsset]) {
+        for asset in assets {
+            pendingDeleteIDs.insert(asset.localIdentifier)
+            sortStore.setState(.markedForDelete, for: asset, monthKey: month.key)
+        }
+    }
+
     /// Swipe right: keep. No PhotoKit action needed — nothing is deleted.
     func markKept() {
         guard let asset = currentAsset else { return }

@@ -173,7 +173,7 @@ struct DeckView: View {
                     monthKey: viewModel.month.key,
                     sortStore: appState.sortStore,
                     photoLibrary: appState.photoLibrary,
-                    mirrorQueue: appState.mirrorQueue
+                    onResolve: { viewModel.markPendingDelete($0) }
                 ))
             case .livePhoto(let livePhoto):
                 LivePhotoPlayerView(livePhoto: livePhoto) { presentation = nil }
@@ -244,9 +244,9 @@ struct DeckView: View {
         HStack {
             Button { viewModel.shuffle() } label: {
                 Image(systemName: "shuffle")
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.system(size: 23, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 40, height: 40)
+                    .frame(width: 52, height: 52)
                     .background(Circle().fill(Color(white: 0.15)))
             }
             .accessibilityIdentifier("deck.shuffle")
@@ -276,9 +276,9 @@ struct DeckView: View {
                     Task { await exitDeck() }
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(.system(size: 23, weight: .semibold))
                         .foregroundStyle(.white)
-                        .frame(width: 40, height: 40)
+                        .frame(width: 52, height: 52)
                         .background(Circle().fill(Color(white: 0.15)))
                 }
                 .disabled(viewModel.isCommitting)
@@ -290,7 +290,7 @@ struct DeckView: View {
                         .foregroundStyle(.white)
                         .padding(4)
                         .background(Circle().fill(.red))
-                        .offset(x: 6, y: -6)
+                        .offset(x: 9, y: -9)
                         .accessibilityIdentifier("deck.pendingCount")
                 }
             }

@@ -7,7 +7,9 @@ final class CompareViewModel: ObservableObject {
     private let monthKey: String
     private let sortStore: SortStore
     private let photoLibrary: PhotoLibraryService
-    private let mirrorQueue: MirrorQueueStore
+    /// Hands rejected assets to the deck's own pending-delete cue instead of
+    /// deleting them here — see confirmResolution()'s doc comment.
+    private let onResolve: ([PHAsset]) -> Void
 
     @Published var fileSizes: [String: Int64] = [:]
     @Published var acceptedAssetID: String?
@@ -30,13 +32,13 @@ final class CompareViewModel: ObservableObject {
         monthKey: String,
         sortStore: SortStore,
         photoLibrary: PhotoLibraryService,
-        mirrorQueue: MirrorQueueStore
+        onResolve: @escaping ([PHAsset]) -> Void
     ) {
         self.group = group
         self.monthKey = monthKey
         self.sortStore = sortStore
         self.photoLibrary = photoLibrary
-        self.mirrorQueue = mirrorQueue
+        self.onResolve = onResolve
     }
 
     func loadFileSizes() async {
@@ -73,9 +75,10 @@ final class CompareViewModel: ObservableObject {
     /// Total-group resolution, triggered only by the explicit checkmark
     /// confirm: accepting one keeps it and deletes every other member;
     /// rejecting any one deletes the entire group. No member is ever left
-    /// dangling. This is the one exception in the app where a delete happens
-    /// outside the deck's X commit — it is still gated on an explicit user
-    /// confirm, and PhotoKit still shows its own system confirmation dialog.
+    /// dangling. This is NOT an exception to the deck's "only the X commit
+    /// deletes" rule anymore — rejected members go into the deck's own
+    /// pending-delete cue via `onResolve`, exactly like a swipe-left, and are
+    /// only actually deleted later when the user presses the deck's X.
     func confirmResolution() async {
         guard canConfirm else { return }
         isResolving = true
@@ -91,23 +94,11 @@ final class CompareViewModel: ObservableObject {
             kept = nil
         }
 
-        do {
-            let filenames = Dictionary(
-                uniqueKeysWithValues: toDelete.map { ($0.localIdentifier, photoLibrary.originalFilename(for: $0)) }
-            )
-            try await photoLibrary.deleteAssets(toDelete)
-            mirrorQueue.enqueue(assets: toDelete, filenames: filenames)
-            for asset in toDelete {
-                sortStore.setState(.deleted, for: asset, monthKey: monthKey)
-            }
-            if let kept {
-                sortStore.setState(.kept, for: kept, monthKey: monthKey)
-            }
-            sortStore.markGroupResolved(group.id)
-            await mirrorQueue.drainQueue()
-            isResolved = true
-        } catch {
-            resolveError = "\(error)"
+        onResolve(toDelete)
+        if let kept {
+            sortStore.setState(.kept, for: kept, monthKey: monthKey)
         }
+        sortStore.markGroupResolved(group.id)
+        isResolved = true
     }
 }
