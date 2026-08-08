@@ -71,9 +71,24 @@ private struct FilmstripThumbnail: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color(white: 0.15))
             if let image {
+                // `.aspectRatio(contentMode: .fill)` deliberately reports an
+                // ideal LAYOUT size bigger than its proposed size when the
+                // source aspect ratio doesn't match (that's how "fill" then
+                // relies on an ancestor clip to work at all) — for the
+                // 900x500 landscape source that's 65.33x36, not 24x36. The
+                // outer ZStack's `.frame(24,36).clipShape(...)` already
+                // clips what's RENDERED, but accessibility's merged-element
+                // geometry (`.accessibilityElement(children: .ignore)`
+                // below) is the union of descendants' own reported layout
+                // frames, which isn't affected by an ancestor's clip. Giving
+                // the Image its own `.frame(24,36).clipped()` makes ITS
+                // reported frame 24x36 too, so the union — and therefore
+                // XCUITest's read of the cell — matches what's on screen.
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
+                    .frame(width: 24, height: 36)
+                    .clipped()
             }
             if isPendingDelete {
                 RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.35))

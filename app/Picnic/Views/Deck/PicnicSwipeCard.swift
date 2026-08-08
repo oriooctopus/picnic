@@ -116,6 +116,24 @@ final class PicnicSwipeCard: SwipeCard {
         return button
     }()
 
+    /// Proxy AX element representing the card as a whole (identifier
+    /// "deck.card"), used instead of `isAccessibilityElement = true` on
+    /// `self` so that `comparePill` can remain individually reachable — see
+    /// the comment in `setUp`.
+    private lazy var cardAccessibilityElement = UIAccessibilityElement(accessibilityContainer: self)
+
+    override var accessibilityElements: [Any]? {
+        get {
+            cardAccessibilityElement.accessibilityFrameInContainerSpace = bounds
+            var elements: [Any] = [cardAccessibilityElement]
+            if !comparePill.isHidden {
+                elements.append(comparePill)
+            }
+            return elements
+        }
+        set {}
+    }
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         setUp()
@@ -157,8 +175,18 @@ final class PicnicSwipeCard: SwipeCard {
         comparePill.accessibilityIdentifier = "deck.comparePill"
         comparePill.addTarget(self, action: #selector(handleCompareTap), for: .touchUpInside)
 
-        accessibilityIdentifier = "deck.card"
-        isAccessibilityElement = true
+        // NOT `isAccessibilityElement = true` on self: that makes the whole
+        // card one opaque AX element and UIKit stops descending into its
+        // subviews entirely, so `comparePill` (a UIButton subview) becomes
+        // unreachable to XCUITest even though it renders fine on screen —
+        // the same class of bug fixed for the filmstrip in 9588375, just the
+        // mirror-image cause (a container swallowing children instead of a
+        // synthesized element landing on the wrong child). Instead, act as
+        // an accessibility container (`accessibilityElements` below) that
+        // hands out a whole-card proxy element carrying "deck.card" — so
+        // swipe/drag tests still get a real element with a real frame — plus
+        // the pill itself when it's visible.
+        cardAccessibilityElement.accessibilityIdentifier = "deck.card"
         // No .up: the deck only recognizes archive (left), keep (right), and
         // the quiet drag-down dismiss, same three outcomes as before.
         swipeDirections = [.left, .right, .down]
