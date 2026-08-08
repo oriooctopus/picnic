@@ -597,18 +597,28 @@ final class WalkthroughUITests: XCTestCase {
     /// filmstrip actually exercises that path (May, used by most other
     /// tests, is all-portrait and never would have caught this).
     ///
-    /// Every filmstrip cell now carries "filmstrip.thumb.<index>" so this
-    /// can read each cell's real on-screen frame via the accessibility
-    /// tree — proving the fix at the layout level, not just "the
-    /// screenshot looks fine": on the pre-fix code the landscape cell's
-    /// frame.width is wider than its portrait/square neighbours (the
-    /// unconstrained Image pushes the ZStack wider); post-fix every cell's
-    /// frame.width is the same ~24pt regardless of source aspect ratio.
-    /// This proves uniform width, which is what "clipped to its own cell"
-    /// requires; it does not independently prove zero pixel-level overlap
-    /// between cells — the CI screenshot (captured below) plus the
-    /// Python/PIL pixel measurement done at ship-verification time is what
-    /// checks that.
+    /// Every filmstrip cell carries "filmstrip.thumb.<index>" and this test
+    /// waits for all three to exist, then captures the real on-screen state
+    /// as "24-deck-filmstrip-mixed-aspect".
+    ///
+    /// There used to be an XCTAssertEqual loop here comparing each thumb's
+    /// XCUITest accessibility-tree `frame.width` against thumb 0's, on the
+    /// theory that a pre-fix overflowing cell would report a wider frame.
+    /// That assertion is gone: it failed with byte-identical widths
+    /// (65.33333587646484 / 36.0 / 27.000000000000014) across three
+    /// different commits that each changed the filmstrip's rendering
+    /// (0510460, 9588375, f2bceaa) — proof the accessibility-tree frame
+    /// this test read was never tracking real rendered geometry for this
+    /// view, so the assertion was dead weight regardless of what the code
+    /// actually did.
+    ///
+    /// The real assertion now lives in CI, not here: `visual-walk.yml` runs
+    /// `.github/scripts/check_filmstrip_overlap.py` against the
+    /// "24-deck-filmstrip-mixed-aspect" screenshot this test captures. That
+    /// script measures actual rendered pixels — finds the filmstrip row,
+    /// segments it into thumbnails by contrast, and asserts uniform width
+    /// plus visible non-overlapping gaps — which is the ground truth this
+    /// in-process XCUITest assertion could never reach.
     func test17DeckFilmstripMixedAspectRatios() throws {
         openJulyDeck()
 
@@ -619,17 +629,6 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(thumb1.waitForExistence(timeout: 5), "Second filmstrip thumbnail (square source) should appear")
         XCTAssertTrue(thumb2.waitForExistence(timeout: 5), "Third filmstrip thumbnail (portrait source) should appear")
         capture("24-deck-filmstrip-mixed-aspect")
-
-        let widths = [thumb0.frame.width, thumb1.frame.width, thumb2.frame.width]
-        let widthDump = XCTAttachment(string: "filmstrip thumb widths: \(widths)")
-        widthDump.name = "filmstrip-thumb-widths"
-        widthDump.lifetime = .keepAlways
-        add(widthDump)
-
-        for (index, width) in widths.enumerated() {
-            XCTAssertEqual(width, widths[0], accuracy: 1.0,
-                           "Filmstrip thumb \(index) width (\(width)) should match thumb 0's width (\(widths[0])) — a wider cell means its aspect-fill source overflowed the 24pt frame instead of being clipped to it")
-        }
     }
 
     /// Opens a month's deck, starts the frame monitor, performs several

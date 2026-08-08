@@ -203,6 +203,20 @@ jobs:
           echo "Final screenshots directory:"
           ls -la screenshots
 
+      # Real assertion for test17DeckFilmstripMixedAspectRatios: XCUITest's
+      # accessibility-tree frame.width for these thumbnails stopped tracking
+      # real rendered geometry (see the doc comment on that test), so this
+      # measures actual pixels in the screenshot it captures instead.
+      - name: Check filmstrip thumbnails for overlap (pixel measurement)
+        if: always()
+        run: |
+          SHOT="screenshots/24-deck-filmstrip-mixed-aspect.png"
+          if [ ! -f "$SHOT" ]; then
+            echo "No $SHOT (likely an only_testing run that excluded test17DeckFilmstripMixedAspectRatios) — skipping."
+            exit 0
+          fi
+          python3 .github/scripts/check_filmstrip_overlap.py "$SHOT"
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
