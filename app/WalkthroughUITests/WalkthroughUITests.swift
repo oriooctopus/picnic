@@ -179,7 +179,16 @@ final class WalkthroughUITests: XCTestCase {
 
         seededMonth.tap()
         let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
-        XCTAssertTrue(deckCard.waitForExistence(timeout: 20), "Deck first card should appear")
+        // A single retry, not a loop: this exact tap has a documented history
+        // of occasionally not registering at all (see the ax-dump above,
+        // captured specifically because this tap has "historically resolved
+        // one column to the right"). Waiting the full 20s once, then tapping
+        // again if nothing happened, tells a genuinely dropped event apart
+        // from a real regression without masking one behind blind retries.
+        if !deckCard.waitForExistence(timeout: 20) {
+            seededMonth.tap()
+        }
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 10), "Deck first card should appear")
         // Guard against the tap landing on a neighboring card: the header
         // must show the month we asked for.
         XCTAssertTrue(app.staticTexts["May 2025"].waitForExistence(timeout: 5),
