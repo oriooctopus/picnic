@@ -207,6 +207,27 @@ final class WalkthroughUITests: XCTestCase {
         return deckCard
     }
 
+    /// From the My Life grid, taps the 2025-09 month to enter Deck view on
+    /// its first card (burst cluster B -> Compare pill visible). A separate
+    /// cluster from May's (cluster A): test06 now genuinely resolves cluster
+    /// A's Compare group (sortStore persists across relaunches within one
+    /// job — see confirmResolution()'s markGroupResolved), so any later test
+    /// that also needs an un-resolved Compare pill has to reach for a
+    /// cluster test06 never touched.
+    @discardableResult
+    private func openSeptemberDeck() -> XCUIElement {
+        openMyLifeGrid()
+        let septemberMonth = app.descendants(matching: .any)["monthCard.2025-09"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(septemberMonth, initialTimeout: 30),
+                      "Seeded month 2025-09 (burst cluster B) should appear in the grid")
+        septemberMonth.tap()
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 20), "Deck first card should appear")
+        XCTAssertTrue(app.staticTexts["September 2025"].waitForExistence(timeout: 5),
+                      "Deck header should show September 2025 — a different month means the grid tap resolved to the wrong card")
+        return deckCard
+    }
+
     /// From Deck view on the burst-cluster card, taps the Compare pill and
     /// waits for the Compare view to appear.
     private func openCompare() {
@@ -462,7 +483,11 @@ final class WalkthroughUITests: XCTestCase {
     /// Compare's swipe-down exit is scoped to its header, so the drag has to
     /// start there — a drag on the card is the photo carousel's own gesture.
     func test13CompareSwipeDownToExit() throws {
-        openMayDeck()
+        // Cluster B (September), not May: test06 has already permanently
+        // resolved May's Compare group by this point in the run (real
+        // product behavior — see openSeptemberDeck()'s doc comment), so
+        // reusing May here would find no Compare pill at all.
+        openSeptemberDeck()
         openCompare()
 
         let header = app.staticTexts["Compare"]
