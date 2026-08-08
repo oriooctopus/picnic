@@ -43,6 +43,17 @@ enum SeedLibrary {
     /// against flat colour is measuring nothing.
     private static let realisticPixelSize = CGSize(width: 3024, height: 4032)
 
+    /// Used only by the large-month seed. That seed exists to make the deck
+    /// big (300 assets) so per-photo work that scales with asset count shows
+    /// up — not to exercise full-resolution decode cost, which is what
+    /// `realisticPixelSize` is for elsewhere. Generating 300 assets at
+    /// 3024x4032 sequentially blew the CI time budget outright (the large
+    /// month never finished seeding, so test11 timed out waiting for it to
+    /// appear — not a UI stall). 300x400 keeps the same 3:4 aspect, still
+    /// looks like a distinct decodable photo, and is small enough that 300
+    /// of them seed well within budget.
+    private static let largeMonthPixelSize = CGSize(width: 300, height: 400)
+
     // MARK: Idempotency
 
     static func isAlreadySeeded() -> Bool {
@@ -150,7 +161,7 @@ enum SeedLibrary {
                 date: date(largeMonthYear, largeMonthMonth, day, hour, 0, 0),
                 index: i + 1,
                 color: palette[i % palette.count],
-                pixelSize: realisticPixelSize,
+                pixelSize: largeMonthPixelSize,
                 format: .jpeg,
                 isVideo: false
             )

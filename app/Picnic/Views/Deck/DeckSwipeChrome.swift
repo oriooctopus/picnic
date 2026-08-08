@@ -111,14 +111,26 @@ struct DeckPeekCard: View {
     }
 
     // Resting -> fully-revealed values. Scale and offset close the gap with
-    // the top card's own geometry entirely (0.96->1.0, -6->0) so that by the
+    // the top card's own geometry entirely (0.75->1.0, -75->0) so that by the
     // time a horizontal drag reaches the commit threshold this card reads as
     // "ready to become the top card". Dim only eases from 0.55 to 0.20 —
     // deliberately NOT to 0 — because the top card is still on screen for
     // the whole drag, and the card behind it needs to keep reading as
     // behind right up until the swipe actually commits.
-    private var scale: CGFloat { 0.96 + 0.04 * revealProgress }
-    private var yOffset: CGFloat { -6 + 6 * revealProgress }
+    //
+    // Resting scale/offset were measured, not guessed: reference screenshot
+    // /home/esme/inbox/2026-08-02-145316-IMG_1386.png (1170x2532px @3x, a
+    // 390pt-wide device) shows the dimmed peek card's top edge 48px (16pt)
+    // above the front card's top edge, and the peek narrower than the front
+    // card — 287pt wide vs. the front card's ~382pt (peek width ratio
+    // ~0.75). A single uniform `scale` handles both the narrowing and,
+    // combined with `yOffset`, the 16pt protrusion: at rest the box is
+    // scaled to 0.75 (matching the measured width ratio) and shifted up by
+    // 75pt so only its top ~16pt sliver clears the front card's top edge —
+    // the rest of the scaled-down box sits hidden behind/below the front
+    // card, exactly as in the reference.
+    private var scale: CGFloat { 0.75 + 0.25 * revealProgress }
+    private var yOffset: CGFloat { -75 + 75 * revealProgress }
     private var dimOpacity: Double { 0.55 - 0.35 * Double(revealProgress) }
 
     var body: some View {
