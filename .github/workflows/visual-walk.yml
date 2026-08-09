@@ -215,7 +215,7 @@ jobs:
             echo "No $SHOT (likely an only_testing run that excluded test17DeckFilmstripMixedAspectRatios) — skipping."
             exit 0
           fi
-          python3 -m pip install --quiet pillow
+          python3 -m pip install --quiet --break-system-packages pillow
           python3 .github/scripts/check_filmstrip_overlap.py "$SHOT"
 
       - name: Upload screenshots
