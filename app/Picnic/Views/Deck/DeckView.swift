@@ -298,13 +298,16 @@ struct DeckView: View {
         .padding(.horizontal, 20)
         .padding(.top, 12)
         .contentShape(Rectangle())
-        // Swipe-down-from-the-top exits the deck, same recipe as Compare's
-        // own header drag-to-dismiss (CompareView.header) — scoped to the
-        // top bar only so it can't compete with the card's own left/right
-        // swipe or the filmstrip's horizontal scroll below it. Routes
-        // through exitDeck(), not a bare dismiss(), so a swipe-down here
-        // still commits any pending deletes first, exactly like the X
-        // button and the card's own down-swipe already do.
+        // Swipe-down-from-the-top exits the deck, same recipe AND same
+        // unconditional bare dismiss() as Compare's own header
+        // drag-to-dismiss (CompareView.header) — deliberately NOT routed
+        // through exitDeck()'s commit-gated path. A quiet gesture-based
+        // escape shouldn't ambush the user with PhotoKit's real delete
+        // confirmation the way the X button legitimately does; anything
+        // still pending stays pending (it's persisted — see
+        // pendingDeleteIDs' relaunch fix) and waits for an explicit X tap.
+        // Scoped to the top bar only so it can't compete with the card's
+        // own left/right swipe or the filmstrip's horizontal scroll below.
         //
         // .highPriorityGesture, not .gesture: the title text underneath
         // carries its own .onLongPressGesture (perf HUD toggle), and a
@@ -317,7 +320,7 @@ struct DeckView: View {
             DragGesture(minimumDistance: 20)
                 .onEnded { value in
                     if value.translation.height > 60 && abs(value.translation.width) < 60 {
-                        Task { await exitDeck() }
+                        dismiss()
                     }
                 }
         )
