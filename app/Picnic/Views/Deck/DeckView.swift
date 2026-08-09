@@ -348,7 +348,8 @@ struct DeckView: View {
             FilmstripView(
                 assets: viewModel.visibleAssets,
                 currentIndex: viewModel.currentIndex,
-                pendingDeleteIDs: viewModel.pendingDeleteIDs
+                pendingDeleteIDs: viewModel.pendingDeleteIDs,
+                isKept: { viewModel.isKept($0) }
             ) { index in
                 viewModel.currentIndex = index
             }

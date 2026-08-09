@@ -5,6 +5,7 @@ struct FilmstripView: View {
     let assets: [PHAsset]
     let currentIndex: Int
     let pendingDeleteIDs: Set<String>
+    let isKept: (PHAsset) -> Bool
     let onSelect: (Int) -> Void
 
     var body: some View {
@@ -20,6 +21,7 @@ struct FilmstripView: View {
                             asset: asset,
                             isCurrent: index == currentIndex,
                             isPendingDelete: pendingDeleteIDs.contains(asset.localIdentifier),
+                            isKept: isKept(asset),
                             onTap: { onSelect(index) }
                         )
                         .id(index)
@@ -62,6 +64,7 @@ private struct FilmstripThumbnail: View {
     let asset: PHAsset
     let isCurrent: Bool
     let isPendingDelete: Bool
+    let isKept: Bool
     let onTap: () -> Void
 
     @State private var image: UIImage?
@@ -93,6 +96,9 @@ private struct FilmstripThumbnail: View {
             if isPendingDelete {
                 RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.35))
                 Image(systemName: "xmark").font(.caption.bold()).foregroundStyle(.white)
+            } else if isKept {
+                RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.35))
+                Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(.white)
             }
         }
         // Matches the reference app: every thumbnail is the same size —

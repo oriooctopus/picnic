@@ -117,6 +117,10 @@ final class DeckViewModel: ObservableObject {
     }
 
     /// Swipe right: keep. No PhotoKit action needed — nothing is deleted.
+    func isKept(_ asset: PHAsset) -> Bool {
+        sortStore.state(for: asset) == .kept
+    }
+
     func markKept() {
         guard let asset = currentAsset else { return }
         undoStack.append(UndoEntry(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset)))
