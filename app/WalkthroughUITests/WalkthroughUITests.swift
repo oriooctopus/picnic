@@ -666,6 +666,36 @@ final class WalkthroughUITests: XCTestCase {
         capture("24-deck-filmstrip-mixed-aspect")
     }
 
+    /// Regression for a real bug: pendingDeleteIDs (the deck's in-memory
+    /// swipe-left cue) was never reseeded from the persisted
+    /// .markedForDelete SortStore state on relaunch, so a swipe-left
+    /// survived the underlying database but silently vanished from the X
+    /// badge, the filmstrip indicator, and the actual X-commit flow the
+    /// moment the app was closed and reopened — while a swipe-right (kept)
+    /// correctly did survive, since sortStore.state(for:) is read live.
+    func test18DeckPendingDeletePersistsAcrossRelaunch() throws {
+        let deckCard = openMayDeck()
+
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        let pendingBadge = app.staticTexts["deck.pendingCount"]
+        XCTAssertTrue(pendingBadge.waitForExistence(timeout: 5), "Pending-delete badge should appear after a swipe-left")
+        XCTAssertEqual(pendingBadge.label, "1", "Badge should read 1 after exactly one swipe-left")
+        capture("25-deck-pending-before-relaunch")
+
+        relaunch(withExtraArguments: [])
+        openMayDeck()
+
+        let badgeAfterRelaunch = app.staticTexts["deck.pendingCount"]
+        XCTAssertTrue(badgeAfterRelaunch.waitForExistence(timeout: 5),
+                      "Pending-delete badge should still exist after relaunch — the swipe-left cue must survive, same as a swipe-right does")
+        XCTAssertEqual(badgeAfterRelaunch.label, "1", "Pending count should still read 1 after relaunch, not reset to 0")
+        capture("26-deck-pending-after-relaunch")
+    }
+
     /// Opens a month's deck, starts the frame monitor, performs several
     /// sustained drags, and returns the monitor's summary line.
     ///
