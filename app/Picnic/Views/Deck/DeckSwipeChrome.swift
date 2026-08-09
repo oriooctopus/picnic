@@ -41,8 +41,14 @@ struct DeckTintBackground: View {
         let p = state.progress
         ZStack {
             Color.black
+            // Measured off the reference app directly (pixel-sampled a
+            // full-swipe Archive screenshot down the screen edge): alpha
+            // rises close to linearly from ~0 at the top to ~0.21 at the
+            // bottom at full swipe. The old 0.55/0.12 stops were both far
+            // stronger than that, and the 0.12 floor meant even the top of
+            // the screen never really went back to black.
             LinearGradient(
-                colors: [tint.opacity(0.55 * abs(p)), tint.opacity(0.12 * abs(p))],
+                colors: [tint.opacity(0.21 * abs(p)), tint.opacity(0)],
                 startPoint: .bottom,
                 endPoint: .top
             )

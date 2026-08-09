@@ -38,6 +38,18 @@ final class DeckViewModel: ObservableObject {
         self.photoLibrary = photoLibrary
         self.mirrorQueue = mirrorQueue
         self.orderedAssets = month.assets
+        // Kept state survives relaunch because sortStore.state(for:) is read
+        // live everywhere. pendingDeleteIDs doesn't get that for free — it's
+        // a plain in-memory Set — so without this, X-marked photos lost both
+        // their filmstrip indicator AND their place in the X commit count
+        // the moment the app was closed and reopened, even though the
+        // underlying .markedForDelete state was sitting in SortStore the
+        // whole time.
+        self.pendingDeleteIDs = Set(
+            month.assets
+                .filter { sortStore.state(for: $0) == .markedForDelete }
+                .map(\.localIdentifier)
+        )
         // didSet doesn't fire for assignments inside init, so seed it here.
         recomputeVisibleAssets()
     }

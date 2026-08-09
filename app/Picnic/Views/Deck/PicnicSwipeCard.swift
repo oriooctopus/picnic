@@ -149,15 +149,17 @@ final class PicnicSwipeCard: SwipeCard {
 
         // .fit, not .fill: every card presents the whole photo at one fixed
         // portrait ratio (DeckView.cardAspectRatio), so a landscape/square
-        // source letterboxes instead of cropping. The black background is
-        // what shows through the letterbox/pillarbox space.
+        // source letterboxes instead of cropping. Deliberately no opaque
+        // fill behind the letterbox/pillarbox space — the peek card is
+        // already rendered directly behind this one (DeckView's ZStack), so
+        // a solid color here just hid it; clear lets it show through.
         imageView.contentMode = .scaleAspectFit
-        imageView.backgroundColor = .black
+        imageView.backgroundColor = .clear
         imageView.clipsToBounds = true
         imageView.layer.cornerRadius = 24
 
         videoLayerView.playerLayer.videoGravity = .resizeAspect
-        videoLayerView.backgroundColor = .black
+        videoLayerView.backgroundColor = .clear
         videoLayerView.layer.cornerRadius = 24
         videoLayerView.clipsToBounds = true
         videoLayerView.isHidden = true
