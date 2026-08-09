@@ -305,7 +305,15 @@ struct DeckView: View {
         // through exitDeck(), not a bare dismiss(), so a swipe-down here
         // still commits any pending deletes first, exactly like the X
         // button and the card's own down-swipe already do.
-        .gesture(
+        //
+        // .highPriorityGesture, not .gesture: the title text underneath
+        // carries its own .onLongPressGesture (perf HUD toggle), and a
+        // plain child gesture wins touch priority over an ancestor's by
+        // default in SwiftUI — a drag starting right on the title never
+        // reached this one at all. minimumDistance: 20 means a stationary
+        // tap/long-press still never trips this gesture's recognition, so
+        // raising its priority doesn't block the buttons or the long-press.
+        .highPriorityGesture(
             DragGesture(minimumDistance: 20)
                 .onEnded { value in
                     if value.translation.height > 60 && abs(value.translation.width) < 60 {

@@ -743,10 +743,17 @@ final class WalkthroughUITests: XCTestCase {
                    withVelocity: .default,
                    thenHoldForDuration: 0.1)
 
+        // Not app.staticTexts["My life"].waitForExistence: fullScreenCover
+        // keeps the presenting view mounted underneath, so that text can
+        // already exist in the tree before (and during) the dismiss — it
+        // isn't proof the deck actually closed. Waiting for deck.card to
+        // disappear is the real signal.
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        let cardGone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: deckCard)
+        XCTAssertEqual(XCTWaiter().wait(for: [cardGone], timeout: 10), .completed,
+                       "Deck card should be gone after swiping down from the top bar")
         XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 10),
-                      "Swiping down from the deck's top bar should return to the My Life grid")
-        XCTAssertFalse(app.descendants(matching: .any)["deck.card"].firstMatch.exists,
-                       "Deck card should be gone after the swipe-down")
+                      "Should be back at the My Life grid after the swipe-down")
         capture("27-deck-swipe-down-from-top-exit")
     }
 
