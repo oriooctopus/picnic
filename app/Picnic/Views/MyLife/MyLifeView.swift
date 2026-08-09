@@ -11,7 +11,6 @@ struct MyLifeView: View {
     @State private var scrollProxy: ScrollViewProxy?
     @State private var showScrollTop = false
     @State private var selectedMonth: MonthBucket?
-    @State private var hasScrolledToInitialBottom = false
 
     /// Clears the floating tab-bar pill (see RootTabView.bottomBar): its
     /// capsule sits ~14pt vertical padding + ~20pt icon + 12pt bottom
@@ -36,10 +35,12 @@ struct MyLifeView: View {
 
     private var groupedByYear: [YearGroup] {
         let grouped = Dictionary(grouping: appState.monthBuckets, by: \.year)
-        // Ascending: oldest year/month first, most recent at the bottom —
-        // matches the reference (2025 section above 2026, Jan→Dec within).
-        return grouped.keys.sorted(by: <).map { year in
-            YearGroup(year: year, months: grouped[year]!.sorted { $0.month < $1.month })
+        // Descending: most recent year/month first, oldest at the bottom.
+        // Deliberately the OPPOSITE of the reference app (which runs
+        // oldest-first) — an explicit, one-off product decision to diverge
+        // from parity here.
+        return grouped.keys.sorted(by: >).map { year in
+            YearGroup(year: year, months: grouped[year]!.sorted { $0.month > $1.month })
         }
     }
 
@@ -97,16 +98,6 @@ struct MyLifeView: View {
             .onAppear {
                 scrollProxy = proxy
                 appState.refreshMonths()
-                scrollToBottomIfNeeded(proxy)
-            }
-            .onChange(of: appState.monthBuckets.count) { _ in
-                scrollToBottomIfNeeded(proxy)
-            }
-            .onChange(of: appState.isSeeding) { _ in
-                // monthBuckets.count alone can't be trusted to fire this at
-                // the right time — see scrollToBottomIfNeeded for why
-                // isSeeding is the real signal.
-                scrollToBottomIfNeeded(proxy)
             }
         }
         .overlay(alignment: .bottom) {
@@ -134,24 +125,6 @@ struct MyLifeView: View {
             .onDisappear { appState.refreshMonths() }
         }
         .background(Color.black.ignoresSafeArea())
-    }
-
-    /// On first appear, and again once the async seed/photo-library fetch
-    /// populates `monthBuckets`, jump to the bottom (most recent month) —
-    /// matches the reference app, which lives at the bottom with the
-    /// floating ↑ button to jump back to the top. Unanimated, and only
-    /// fires once so it doesn't yank the user back down on later data
-    /// refreshes (e.g. returning from DeckView).
-    private func scrollToBottomIfNeeded(_ proxy: ScrollViewProxy) {
-        // While AppState is mid-seed (CI's debug seed path), PhotoKit can
-        // already report a few pre-existing, unrelated months (Simulator's
-        // built-in stock photos) before any real content lands. Waiting for
-        // isSeeding to go false — not just monthBuckets being non-empty —
-        // keeps this one-shot scroll from firing on that stale, premature
-        // list and never firing again once the real months arrive.
-        guard !hasScrolledToInitialBottom, !appState.monthBuckets.isEmpty, !appState.isSeeding else { return }
-        hasScrolledToInitialBottom = true
-        proxy.scrollTo("bottom", anchor: .bottom)
     }
 
     private var header: some View {

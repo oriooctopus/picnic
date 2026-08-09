@@ -43,6 +43,7 @@ REQUIRED = [
     "22-deck-drag-framerate", "23-deck-drag-framerate-large",
     "24-deck-filmstrip-mixed-aspect",
     "25-deck-pending-before-relaunch", "26-deck-pending-after-relaunch",
+    "27-deck-swipe-down-from-top-exit",
 ]
 
 # Best-effort: one per test method, captured in tearDown. See module
@@ -65,6 +66,7 @@ OPTIONAL = [
     "99-final-test14HideSortedActuallyFilters",
     "99-final-test15DeckDragFrameRate",
     "99-final-test18DeckPendingDeletePersistsAcrossRelaunch",
+    "99-final-test19DeckSwipeDownFromTopExits",
 ]
 
 EXPECTED = REQUIRED + OPTIONAL

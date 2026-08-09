@@ -521,15 +521,20 @@ final class WalkthroughUITests: XCTestCase {
         let position = app.descendants(matching: .any)["deck.position"].firstMatch
         XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
         let before = totalCount(fromPosition: position.label)
-        XCTAssertGreaterThan(before, 1, "Need more than one photo for the filter to be observable")
+        XCTAssertGreaterThan(before, 2, "Need at least 3 photos: one to keep, one to land on, one to prove wasn't skipped")
 
-        // Swipe right = keep = sorted.
+        // Swipe right = keep = sorted. This also auto-advances to card 2
+        // (hideSorted is still off here, so the kept card stays in the list
+        // and markKept()'s own advance() moves us past it) — landing us on
+        // an UNSORTED card that has a kept one sitting before it, which is
+        // exactly the arrangement that reproduces the bug below.
         deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
             .press(forDuration: 0.1,
                    thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
                    withVelocity: .default,
                    thenHoldForDuration: 0.1)
         Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertEqual(numerator(fromPosition: position.label), 2, "Swiping right once should land on card 2")
 
         app.buttons["deck.filter"].tap()
         let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
@@ -542,6 +547,15 @@ final class WalkthroughUITests: XCTestCase {
         let after = totalCount(fromPosition: position.label)
         XCTAssertLessThan(after, before,
                           "Hiding sorted pics should drop the deck's total (was \(before), now \(after)) — the kept photo is still listed")
+
+        // Regression: a raw numeric currentIndex re-read into the now
+        // shorter (kept photo removed) array landed on numerator 2 — the
+        // NEXT card past the one actually on screen, silently skipping an
+        // unsorted photo. The fix re-anchors on the photo's identity, so
+        // this must read 1: still the same photo we were already looking
+        // at, just renumbered now that the kept one ahead of it is gone.
+        XCTAssertEqual(numerator(fromPosition: position.label), 1,
+                       "Toggling hideSorted should stay on the same (unsorted) photo, not skip past it to the next one")
     }
 
     /// "3 OF 42" -> 42. Returns -1 when the label doesn't parse, so a failed
@@ -549,6 +563,13 @@ final class WalkthroughUITests: XCTestCase {
     private func totalCount(fromPosition label: String) -> Int {
         guard let tail = label.components(separatedBy: " OF ").last,
               let value = Int(tail.trimmingCharacters(in: .whitespaces)) else { return -1 }
+        return value
+    }
+
+    /// "3 OF 42" -> 3.
+    private func numerator(fromPosition label: String) -> Int {
+        guard let head = label.components(separatedBy: " OF ").first,
+              let value = Int(head.trimmingCharacters(in: .whitespaces)) else { return -1 }
         return value
     }
 
@@ -703,6 +724,30 @@ final class WalkthroughUITests: XCTestCase {
                       "Pending-delete badge should still exist after relaunch — the swipe-left cue must survive, same as a swipe-right does")
         XCTAssertEqual(badgeAfterRelaunch.label, "\(baseline + 1)", "Pending count should still read baseline+1 after relaunch, not drop back to baseline")
         capture("26-deck-pending-after-relaunch")
+    }
+
+    /// Swiping down from the deck's own top bar (title/buttons row, above
+    /// the card) should exit back to the My Life grid, same recipe as
+    /// Compare's header drag-to-exit (test13). Previously there was no
+    /// gesture on this region at all — only a downward drag ON THE CARD
+    /// itself dismissed, which is a different part of the screen than what
+    /// "swipe down from the top" describes.
+    func test19DeckSwipeDownFromTopExits() throws {
+        openMayDeck()
+
+        let title = app.descendants(matching: .any)["deck.title"].firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 10), "Deck title should appear in the top bar")
+        title.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+
+        XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 10),
+                      "Swiping down from the deck's top bar should return to the My Life grid")
+        XCTAssertFalse(app.descendants(matching: .any)["deck.card"].firstMatch.exists,
+                       "Deck card should be gone after the swipe-down")
+        capture("27-deck-swipe-down-from-top-exit")
     }
 
     /// Opens a month's deck, starts the frame monitor, performs several

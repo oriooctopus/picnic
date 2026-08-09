@@ -297,6 +297,22 @@ struct DeckView: View {
         }
         .padding(.horizontal, 20)
         .padding(.top, 12)
+        .contentShape(Rectangle())
+        // Swipe-down-from-the-top exits the deck, same recipe as Compare's
+        // own header drag-to-dismiss (CompareView.header) — scoped to the
+        // top bar only so it can't compete with the card's own left/right
+        // swipe or the filmstrip's horizontal scroll below it. Routes
+        // through exitDeck(), not a bare dismiss(), so a swipe-down here
+        // still commits any pending deletes first, exactly like the X
+        // button and the card's own down-swipe already do.
+        .gesture(
+            DragGesture(minimumDistance: 20)
+                .onEnded { value in
+                    if value.translation.height > 60 && abs(value.translation.width) < 60 {
+                        Task { await exitDeck() }
+                    }
+                }
+        )
     }
 
     private func presentLivePhotoIfNeeded(_ asset: PHAsset) {

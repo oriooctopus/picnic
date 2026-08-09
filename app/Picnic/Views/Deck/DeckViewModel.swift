@@ -14,7 +14,15 @@ final class DeckViewModel: ObservableObject {
     private let mirrorQueue: MirrorQueueStore
 
     @Published var orderedAssets: [PHAsset] { didSet { recomputeVisibleAssets() } }
-    @Published var hideSorted = false { didSet { recomputeVisibleAssets() } }
+    @Published var hideSorted = false {
+        didSet {
+            // Read before recompute: visibleAssets/currentIndex still
+            // reflect the pre-toggle list at this point in didSet.
+            let previousAssetID = currentAsset?.localIdentifier
+            recomputeVisibleAssets()
+            reanchorCurrentIndex(toFollow: previousAssetID)
+        }
+    }
     @Published var currentIndex = 0
     /// Swipe-left cues — a CUE ONLY. Nothing is deleted until commitDeletions()
     /// runs, which is only reachable from the explicit X-button tap.
@@ -84,6 +92,33 @@ final class DeckViewModel: ObservableObject {
     var currentAsset: PHAsset? {
         guard visibleAssets.indices.contains(currentIndex) else { return nil }
         return visibleAssets[currentIndex]
+    }
+
+    /// Keeps the deck showing the same photo across a hideSorted toggle when
+    /// that photo is still visible, and lands on the next remaining one
+    /// (by original month order, not raw array index) when it isn't —
+    /// e.g. turning hideSorted on while sitting on a kept photo. Reusing the
+    /// old numeric currentIndex directly into the now-shorter array was the
+    /// bug: any kept photo sitting BEFORE the current one shifted every
+    /// later index down by one, which silently skipped past still-unsorted
+    /// photos instead of landing on the very next one.
+    private func reanchorCurrentIndex(toFollow assetID: String?) {
+        guard let assetID else {
+            currentIndex = min(currentIndex, max(0, visibleAssets.count - 1))
+            return
+        }
+        if let newIndex = visibleAssets.firstIndex(where: { $0.localIdentifier == assetID }) {
+            currentIndex = newIndex
+            return
+        }
+        guard let orderedIndex = orderedAssets.firstIndex(where: { $0.localIdentifier == assetID }) else {
+            currentIndex = min(currentIndex, max(0, visibleAssets.count - 1))
+            return
+        }
+        let orderedIndexByID = Dictionary(uniqueKeysWithValues: orderedAssets.enumerated().map { ($1.localIdentifier, $0) })
+        currentIndex = visibleAssets.firstIndex { asset in
+            (orderedIndexByID[asset.localIdentifier] ?? Int.max) >= orderedIndex
+        } ?? max(0, visibleAssets.count - 1)
     }
 
     func isFavorite(_ asset: PHAsset) -> Bool {
