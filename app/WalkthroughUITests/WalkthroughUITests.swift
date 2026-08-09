@@ -676,14 +676,23 @@ final class WalkthroughUITests: XCTestCase {
     func test18DeckPendingDeletePersistsAcrossRelaunch() throws {
         let deckCard = openMayDeck()
 
+        // Baseline, not an assumed 0: other tests earlier in this same run
+        // (test06's Compare confirm, for one) legitimately leave some of
+        // May's assets .markedForDelete via the deferred-delete cue, and
+        // that state is real, persisted, and correctly shared across test
+        // methods within one app launch — same class of cross-test state
+        // as fixed in 916c327. Asserting a relative +1 isolates this test's
+        // own swipe from whatever the suite already accumulated.
+        let pendingBadge = app.staticTexts["deck.pendingCount"]
+        let baseline = pendingBadge.exists ? (Int(pendingBadge.label) ?? 0) : 0
+
         deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
             .press(forDuration: 0.1,
                    thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
                    withVelocity: .default,
                    thenHoldForDuration: 0.1)
-        let pendingBadge = app.staticTexts["deck.pendingCount"]
         XCTAssertTrue(pendingBadge.waitForExistence(timeout: 5), "Pending-delete badge should appear after a swipe-left")
-        XCTAssertEqual(pendingBadge.label, "1", "Badge should read 1 after exactly one swipe-left")
+        XCTAssertEqual(pendingBadge.label, "\(baseline + 1)", "Badge should read baseline+1 after exactly one more swipe-left")
         capture("25-deck-pending-before-relaunch")
 
         relaunch(withExtraArguments: [])
@@ -692,7 +701,7 @@ final class WalkthroughUITests: XCTestCase {
         let badgeAfterRelaunch = app.staticTexts["deck.pendingCount"]
         XCTAssertTrue(badgeAfterRelaunch.waitForExistence(timeout: 5),
                       "Pending-delete badge should still exist after relaunch — the swipe-left cue must survive, same as a swipe-right does")
-        XCTAssertEqual(badgeAfterRelaunch.label, "1", "Pending count should still read 1 after relaunch, not reset to 0")
+        XCTAssertEqual(badgeAfterRelaunch.label, "\(baseline + 1)", "Pending count should still read baseline+1 after relaunch, not drop back to baseline")
         capture("26-deck-pending-after-relaunch")
     }
 
