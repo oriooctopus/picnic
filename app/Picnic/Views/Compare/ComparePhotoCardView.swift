@@ -34,9 +34,24 @@ struct ComparePhotoCardView: View {
                     Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                        .clipShape(RoundedRectangle(cornerRadius: 24))
                 }
             }
+            // .frame BEFORE .clipShape, on the ZStack itself: an unframed
+            // .aspectRatio(.fill) Image reports its own oversized ideal
+            // layout size (its intrinsic pixel dimensions) whenever the
+            // source's aspect ratio doesn't match the box, not just its
+            // drawn/clipped size — same defect class as the deck filmstrip
+            // and letterbox bugs. With no frame at all here, that inflated
+            // size propagated straight up through this VStack, pushing the
+            // caption row, the reject/accept/favorite row, and the whole
+            // bottomBar in CompareView off the bottom of the screen for
+            // any source photo tall/wide enough to trigger it — "some of
+            // the compares" have buttons that are missing, not hidden.
+            // maxWidth/maxHeight: .infinity caps this view at whatever
+            // space TabView actually proposed instead of the image's own
+            // ideal size winning that negotiation.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 24))
             .overlay(
                 RoundedRectangle(cornerRadius: 24)
                     .stroke(isAccepted ? Color.green : (isRejected ? Color.red : .clear), lineWidth: 3)
@@ -74,7 +89,7 @@ struct ComparePhotoCardView: View {
             .font(.system(size: 20))
         }
         .task {
-            image = await ThumbnailLoader.fullImage(for: asset, targetSize: CGSize(width: 1000, height: 1300))
+            image = await ThumbnailLoader.fullImage(for: asset, targetSize: ThumbnailLoader.screenPixelSize)
         }
     }
 }

@@ -199,7 +199,7 @@ struct DeckView: View {
             // Poster frame first (cheap, shows immediately), then swap the
             // shared player onto this asset's item once PhotoKit hands one
             // back.
-            currentImage = await ThumbnailLoader.thumbnail(for: asset, targetSize: CGSize(width: 1200, height: 1600))
+            currentImage = await ThumbnailLoader.thumbnail(for: asset, targetSize: ThumbnailLoader.screenPixelSize)
             if let item = await VideoLoader.playerItem(for: asset) {
                 videoController.load(item: item)
             } else {
@@ -209,7 +209,7 @@ struct DeckView: View {
             // Not a video card: make sure nothing keeps playing/decoding
             // behind a plain photo.
             videoController.clear()
-            currentImage = await ThumbnailLoader.fullImage(for: asset, targetSize: CGSize(width: 1200, height: 1600))
+            currentImage = await ThumbnailLoader.fullImage(for: asset, targetSize: ThumbnailLoader.screenPixelSize)
         }
 
         // The card behind is dimmed and partly covered, so it is fetched at a

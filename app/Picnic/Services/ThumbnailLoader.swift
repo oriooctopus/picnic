@@ -7,6 +7,17 @@ import AVFoundation
 /// `.opportunistic` calls its result handler twice (low-res, then high-res),
 /// which would resume a checked continuation more than once and crash.
 enum ThumbnailLoader {
+    /// The device's real physical pixel dimensions (not points) — the
+    /// correct upper-bound targetSize for any card that renders close to
+    /// full-screen. The deck card and Compare's photo card were both
+    /// requesting fixed sizes (1200x1600 / 1000x1300) chosen before the
+    /// cards were made bigger to fill more of the screen; neither constant
+    /// was revisited afterward, so PhotoKit was handing back an image
+    /// smaller than the box it got stretched into — a real, measurable
+    /// upsample, not a rendering artifact. Deriving this from the screen
+    /// itself means it can't go stale the next time a card's size changes.
+    static var screenPixelSize: CGSize { UIScreen.main.nativeBounds.size }
+
     static func thumbnail(for asset: PHAsset?, targetSize: CGSize) async -> UIImage? {
         guard let asset else { return nil }
         return await withCheckedContinuation { continuation in

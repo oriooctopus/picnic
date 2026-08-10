@@ -757,6 +757,37 @@ final class WalkthroughUITests: XCTestCase {
         capture("27-deck-swipe-down-from-top-exit")
     }
 
+    /// Regression for a real bug: ComparePhotoCardView's photo box had no
+    /// .frame at all around its .aspectRatio(.fill) image, so a source
+    /// whose aspect ratio didn't match the box let the image report its own
+    /// oversized ideal layout size — pushing the caption row, the
+    /// reject/accept/favorite row, and the whole bottomBar (X, confirm) off
+    /// the bottom of the screen. September's cluster B is landscape
+    /// (800x600) specifically to reproduce the mismatch; May's cluster A
+    /// (600x800, close to the card's own natural portrait shape) never
+    /// triggered it, which is why this shipped unnoticed.
+    func test20CompareButtonsReachableWithMismatchedAspect() throws {
+        openSeptemberDeck()
+        openCompare()
+
+        let reject = app.buttons["compare.reject"].firstMatch
+        let accept = app.buttons["compare.accept"].firstMatch
+        let favorite = app.buttons["compare.favorite"].firstMatch
+        let dismiss = app.buttons["compare.dismiss"].firstMatch
+        XCTAssertTrue(reject.waitForExistence(timeout: 10), "Reject button should exist")
+        capture("28-compare-mismatched-aspect")
+
+        // isHittable, not just exists: an element pushed off-screen by an
+        // inflated ideal layout size can still report exists == true (it's
+        // in the tree) while being untappable — exists alone would have let
+        // this bug pass silently, same as it did before this test existed.
+        XCTAssertTrue(reject.isHittable, "Reject button exists but isn't reachable — likely pushed off-screen")
+        XCTAssertTrue(accept.isHittable, "Accept button exists but isn't reachable — likely pushed off-screen")
+        XCTAssertTrue(favorite.isHittable, "Favorite button exists but isn't reachable — likely pushed off-screen")
+        XCTAssertTrue(dismiss.exists, "Dismiss (X) button in the bottom bar should exist")
+        XCTAssertTrue(dismiss.isHittable, "Dismiss button exists but isn't reachable — likely pushed off-screen")
+    }
+
     /// Opens a month's deck, starts the frame monitor, performs several
     /// sustained drags, and returns the monitor's summary line.
     ///

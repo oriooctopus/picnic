@@ -100,27 +100,35 @@ struct CompareView: View {
             .opacity(viewModel.canConfirm ? 1 : 0.35)
             .accessibilityIdentifier("compare.dismiss")
 
-            Spacer()
+            Spacer(minLength: 8)
 
-            HStack(spacing: 8) {
-                ForEach(Array(viewModel.group.assets.enumerated()), id: \.element.localIdentifier) { index, asset in
-                    VStack(spacing: 4) {
-                        CompareThumbnailView(asset: asset)
-                            .frame(width: 44, height: 60)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(index == pageIndex ? Color.white : .clear, lineWidth: 2)
-                            )
-                            .onTapGesture { withAnimation { pageIndex = index } }
-                        Circle()
-                            .fill(asset.localIdentifier == viewModel.acceptedAssetID ? Color.green : .clear)
-                            .frame(width: 6, height: 6)
+            // Horizontally scrollable, not a plain HStack: a burst group can
+            // run to 7+ photos, and a fixed-width row that long (7 * 44pt +
+            // spacing) overflows a phone-width screen — without a
+            // ScrollView to absorb that overflow, the X and confirm buttons
+            // on either side get squeezed off-screen for exactly the groups
+            // this feature exists to handle.
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(Array(viewModel.group.assets.enumerated()), id: \.element.localIdentifier) { index, asset in
+                        VStack(spacing: 4) {
+                            CompareThumbnailView(asset: asset)
+                                .frame(width: 44, height: 60)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(index == pageIndex ? Color.white : .clear, lineWidth: 2)
+                                )
+                                .onTapGesture { withAnimation { pageIndex = index } }
+                            Circle()
+                                .fill(asset.localIdentifier == viewModel.acceptedAssetID ? Color.green : .clear)
+                                .frame(width: 6, height: 6)
+                        }
                     }
                 }
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
             Button {
                 Task { await viewModel.confirmResolution() }
