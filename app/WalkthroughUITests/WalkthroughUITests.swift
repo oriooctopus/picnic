@@ -972,8 +972,17 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(hidden, before - 2,
                        "hideSorted on should hide both the kept and the X'd photo (was \(before), now \(hidden))")
 
-        // Toggle back off: both marked photos should reappear.
+        // Toggle back off: both marked photos should reappear. An extra
+        // settle beat plus a single retry (same precedent as
+        // openMayDeck's seededMonth.tap() retry): re-tapping deck.filter
+        // in the same instant tapOutside's dismiss animation is still
+        // resolving showHidePopover back to false was seen in CI to
+        // occasionally race the popover binding and never reopen it.
+        Thread.sleep(forTimeInterval: 0.5)
         app.buttons["deck.filter"].tap()
+        if !sortedPicsToggle.waitForExistence(timeout: 3) {
+            app.buttons["deck.filter"].tap()
+        }
         XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should reopen with the same toggle")
         sortedPicsToggle.tap()
         Thread.sleep(forTimeInterval: 0.5)
