@@ -14,8 +14,14 @@ final class DeckViewModel: ObservableObject {
     private let mirrorQueue: MirrorQueueStore
 
     @Published var orderedAssets: [PHAsset] { didSet { recomputeVisibleAssets() } }
-    @Published var hideSorted = false {
+    /// Persisted directly via UserDefaults rather than @AppStorage: this
+    /// class is a plain ObservableObject (not a View), and @AppStorage's
+    /// dynamic-property machinery only works when hosted inside SwiftUI's
+    /// View update cycle.
+    static let hideSortedDefaultsKey = "deck.hideSorted"
+    @Published var hideSorted = UserDefaults.standard.bool(forKey: DeckViewModel.hideSortedDefaultsKey) {
         didSet {
+            UserDefaults.standard.set(hideSorted, forKey: DeckViewModel.hideSortedDefaultsKey)
             // Read before recompute: visibleAssets/currentIndex still
             // reflect the pre-toggle list at this point in didSet.
             let previousAssetID = currentAsset?.localIdentifier
