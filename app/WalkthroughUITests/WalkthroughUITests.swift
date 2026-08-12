@@ -788,6 +788,185 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(dismiss.isHittable, "Dismiss button exists but isn't reachable — likely pushed off-screen")
     }
 
+    /// Regression for bug report #2: a swipe LEFT (X-cue, pendingDeleteIDs)
+    /// used to be force-shown by recomputeVisibleAssets() regardless of
+    /// hideSorted, so an X'd photo never left the filmstrip/deck the way a
+    /// swiped-right (kept) one did. Mirrors test14's swipe-right structure
+    /// but swipes left, which is the direction Oliver actually reported.
+    func test21DeckLiveLeftSwipeHiddenUnderHideSorted() throws {
+        let deckCard = openMayDeck()
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+        let before = totalCount(fromPosition: position.label)
+        XCTAssertGreaterThan(before, 1, "Need at least 2 photos: one to X, one to land on")
+
+        // Swipe left = X-cue = pending-delete. hideSorted is still off here,
+        // so this should behave exactly like it always has: mark, advance.
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        XCTAssertTrue(app.staticTexts["deck.pendingCount"].waitForExistence(timeout: 5),
+                      "Pending-delete badge should appear after the swipe-left")
+
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should offer the 'Sorted pics' toggle")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        tapOutside()
+
+        let after = totalCount(fromPosition: position.label)
+        XCTAssertLessThan(after, before,
+                          "Hiding sorted pics should drop the deck's total (was \(before), now \(after)) — the X'd photo is still listed")
+    }
+
+    /// Regression for bug report #1: a photo swiped left (X'd) in a PRIOR
+    /// session, never committed via the X button, was force-shown by
+    /// recomputeVisibleAssets() on every later launch no matter what
+    /// hideSorted was set to. This test uses the same real-disk persistence
+    /// test18 relies on (SortStore is a non-in-memory SwiftData store, and
+    /// hideSorted's UserDefaults key persists too) — mark a photo pending
+    /// -delete and turn hideSorted on, relaunch (simulating "a prior
+    /// session"), and confirm the photo is still hidden rather than
+    /// reappearing now that init() has reseeded pendingDeleteIDs from disk.
+    func test22DeckPriorSessionMarkedForDeleteStaysHiddenAcrossRelaunch() throws {
+        let deckCard = openMayDeck()
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        XCTAssertTrue(app.staticTexts["deck.pendingCount"].waitForExistence(timeout: 5),
+                      "Pending-delete badge should appear after the swipe-left")
+
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should offer the 'Sorted pics' toggle")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        tapOutside()
+
+        let beforeRelaunch = totalCount(fromPosition: position.label)
+
+        // "Relaunch" here stands in for closing and reopening the app in a
+        // later session: SortStore's .markedForDelete row and the
+        // deck.hideSorted UserDefaults key both survive it on real disk.
+        relaunch(withExtraArguments: [])
+        openMayDeck()
+
+        let afterRelaunchPosition = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(afterRelaunchPosition.waitForExistence(timeout: 10), "Position label should reappear after relaunch")
+        let afterRelaunch = totalCount(fromPosition: afterRelaunchPosition.label)
+        XCTAssertEqual(afterRelaunch, beforeRelaunch,
+                       "The prior-session X'd photo reappeared after relaunch (was \(beforeRelaunch), now \(afterRelaunch)) even though hideSorted is on")
+    }
+
+    /// Regression for the same index-shift bug markKept() already had to
+    /// guard against (see reanchorCurrentIndex's doc comment and
+    /// test14HideSortedActuallyFilters), now on the undo path: undoing a
+    /// mark that hideSorted had hidden grows visibleAssets back by one, so a
+    /// blind `currentIndex - 1` can land on an arbitrary neighboring photo
+    /// instead of the one that was just restored. Asserts the deck returns
+    /// to the same total count AND the same on-screen position, not just one
+    /// or the other.
+    func test23DeckUndoAfterHideSortedRestoresPhotoInPlace() throws {
+        let deckCard = openMayDeck()
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+
+        // Turn hideSorted on before marking anything, so the mark below is
+        // filtered out the instant it happens rather than only after a
+        // separate toggle step.
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should offer the 'Sorted pics' toggle")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        tapOutside()
+
+        let baseline = totalCount(fromPosition: position.label)
+        let baselineNumerator = numerator(fromPosition: position.label)
+
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 0.5)
+
+        let afterSwipe = totalCount(fromPosition: position.label)
+        XCTAssertEqual(afterSwipe, baseline - 1,
+                       "Swiping left with hideSorted on should immediately drop the photo out of the deck")
+
+        app.buttons["deck.undo"].tap()
+        Thread.sleep(forTimeInterval: 0.5)
+
+        let afterUndo = totalCount(fromPosition: position.label)
+        let afterUndoNumerator = numerator(fromPosition: position.label)
+        XCTAssertEqual(afterUndo, baseline, "Undo should bring the total back to \(baseline), got \(afterUndo)")
+        XCTAssertEqual(afterUndoNumerator, baselineNumerator,
+                       "Undo should land back on the same on-screen position (\(baselineNumerator)), not an arbitrary neighbor — got \(afterUndoNumerator)")
+    }
+
+    /// Extends test14's pattern to cover pending-delete photos, not just kept
+    /// ones: toggling hideSorted OFF should restore BOTH a kept photo and an
+    /// X'd photo to the filmstrip/deck, returning the total to exactly what
+    /// it was before either mark.
+    func test24DeckToggleHideSortedOffRestoresPendingDeleteToo() throws {
+        let deckCard = openMayDeck()
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+        let before = totalCount(fromPosition: position.label)
+        XCTAssertGreaterThan(before, 2, "Need at least 3 photos: one to keep, one to X, one to land on")
+
+        // Swipe right = keep.
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 1.0)
+
+        // Swipe left = X, on the card that's now current.
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 1.0)
+
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should offer the 'Sorted pics' toggle")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        tapOutside()
+
+        let hidden = totalCount(fromPosition: position.label)
+        XCTAssertEqual(hidden, before - 2,
+                       "hideSorted on should hide both the kept and the X'd photo (was \(before), now \(hidden))")
+
+        // Toggle back off: both marked photos should reappear.
+        app.buttons["deck.filter"].tap()
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should reopen with the same toggle")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        tapOutside()
+
+        let restored = totalCount(fromPosition: position.label)
+        XCTAssertEqual(restored, before,
+                       "Toggling hideSorted off should restore the full count (expected \(before), got \(restored))")
+    }
+
     /// Opens a month's deck, starts the frame monitor, performs several
     /// sustained drags, and returns the monitor's summary line.
     ///

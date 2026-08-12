@@ -82,6 +82,12 @@ final class DeckViewModel: ObservableObject {
 
     private func recomputeVisibleAssets() {
         visibleAssets = orderedAssets.filter { asset in
+            // hideSorted hides BOTH kept and pending-delete/X'd photos — from
+            // the user's perspective both are "sorted", so both should drop
+            // out of the deck/filmstrip. When hideSorted is off, a
+            // pending-delete photo is force-shown unconditionally so it stays
+            // reviewable/undoable up until the X-button commits it.
+            if hideSorted, pendingDeleteIDs.contains(asset.localIdentifier) { return false }
             if pendingDeleteIDs.contains(asset.localIdentifier) { return true }
             if hideSorted, sortStore.state(for: asset) == .kept { return false }
             return true
@@ -151,9 +157,18 @@ final class DeckViewModel: ObservableObject {
     func markForDelete() {
         guard let asset = currentAsset else { return }
         undoStack.append(UndoEntry(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset)))
+        // pendingDeleteIDs' didSet already triggers recomputeVisibleAssets(),
+        // and — now that hideSorted also filters pending-delete assets out —
+        // that recompute can shift this asset's slot at currentIndex the same
+        // way markKept()'s does (see its comment). Blindly calling advance()
+        // here would double-skip: the next photo already slid into
+        // currentIndex, and advancing again jumps past it.
         pendingDeleteIDs.insert(asset.localIdentifier)
         sortStore.setState(.markedForDelete, for: asset, monthKey: month.key)
-        advance()
+        if visibleAssets.indices.contains(currentIndex),
+           visibleAssets[currentIndex].localIdentifier == asset.localIdentifier {
+            advance()
+        }
     }
 
     /// Compare's confirm: mark an arbitrary batch of assets pending-delete,
@@ -219,7 +234,12 @@ final class DeckViewModel: ObservableObject {
             // when hideSorted is on; SortStore changes don't fire the didSet.
             recomputeVisibleAssets()
         }
-        currentIndex = max(0, currentIndex - 1)
+        // Un-sorting an asset can grow visibleAssets back (the restored photo
+        // reappearing under hideSorted), which shifts every later index up —
+        // a blind currentIndex - 1 would land on an arbitrary neighbor
+        // instead of the photo that was just undone. Reanchor by identity,
+        // same as the hideSorted-toggle path above.
+        reanchorCurrentIndex(toFollow: last.assetID)
     }
 
     /// The single X commit: one PhotoKit batch delete (system confirm dialog
