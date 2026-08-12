@@ -794,6 +794,12 @@ final class WalkthroughUITests: XCTestCase {
     /// swiped-right (kept) one did. Mirrors test14's swipe-right structure
     /// but swipes left, which is the direction Oliver actually reported.
     func test21DeckLiveLeftSwipeHiddenUnderHideSorted() throws {
+        // hideSorted's UserDefaults-backed state survives both relaunches and
+        // every earlier test method in this run (see the didSet comment on
+        // DeckViewModel.hideSorted), so without this reset a bare toggle tap
+        // here could just as easily turn hideSorted OFF as ON depending on
+        // what test14/18 left it as.
+        relaunch(withExtraArguments: ["--reset-hide-sorted"])
         let deckCard = openMayDeck()
 
         let position = app.descendants(matching: .any)["deck.position"].firstMatch
@@ -833,6 +839,9 @@ final class WalkthroughUITests: XCTestCase {
     /// session"), and confirm the photo is still hidden rather than
     /// reappearing now that init() has reseeded pendingDeleteIDs from disk.
     func test22DeckPriorSessionMarkedForDeleteStaysHiddenAcrossRelaunch() throws {
+        // See test21's comment: force a known hideSorted starting state
+        // before this test's own toggle tap, rather than assuming one.
+        relaunch(withExtraArguments: ["--reset-hide-sorted"])
         let deckCard = openMayDeck()
 
         let position = app.descendants(matching: .any)["deck.position"].firstMatch
@@ -877,6 +886,9 @@ final class WalkthroughUITests: XCTestCase {
     /// to the same total count AND the same on-screen position, not just one
     /// or the other.
     func test23DeckUndoAfterHideSortedRestoresPhotoInPlace() throws {
+        // See test21's comment: force a known hideSorted starting state
+        // before this test's own toggle tap, rather than assuming one.
+        relaunch(withExtraArguments: ["--reset-hide-sorted"])
         let deckCard = openMayDeck()
 
         let position = app.descendants(matching: .any)["deck.position"].firstMatch
@@ -921,6 +933,11 @@ final class WalkthroughUITests: XCTestCase {
     /// X'd photo to the filmstrip/deck, returning the total to exactly what
     /// it was before either mark.
     func test24DeckToggleHideSortedOffRestoresPendingDeleteToo() throws {
+        // See test21's comment: force a known hideSorted starting state so
+        // the two exact-count assertions below (before - 2, then back to
+        // before) aren't thrown off by marks or toggle state any earlier
+        // test method left behind.
+        relaunch(withExtraArguments: ["--reset-hide-sorted"])
         let deckCard = openMayDeck()
 
         let position = app.descendants(matching: .any)["deck.position"].firstMatch

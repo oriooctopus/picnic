@@ -35,6 +35,17 @@ final class AppState: ObservableObject {
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
         isSeeding = args.contains("--seed-library") || args.contains("--seed-large-month")
+        // Debug-only, UI-test-only: DeckViewModel.hideSorted is backed by a
+        // UserDefaults key that survives both app relaunches and — since the
+        // simulator's defaults plist isn't wiped between test methods — every
+        // earlier test in the same CI run. Tests that need a known starting
+        // state (rather than reading and branching on whatever the previous
+        // test method left behind) launch with this argument to clear it
+        // before anything reads it. Must run before any DeckViewModel is
+        // constructed, hence here in init() rather than in bootstrap().
+        if args.contains("--reset-hide-sorted") {
+            UserDefaults.standard.removeObject(forKey: DeckViewModel.hideSortedDefaultsKey)
+        }
         #else
         isSeeding = false
         #endif
