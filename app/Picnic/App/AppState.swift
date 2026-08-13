@@ -46,6 +46,29 @@ final class AppState: ObservableObject {
         if args.contains("--reset-hide-sorted") {
             UserDefaults.standard.removeObject(forKey: DeckViewModel.hideSortedDefaultsKey)
         }
+        // Debug-only, UI-test-only: unlike hideSorted's single UserDefaults
+        // key, actual sort progress (kept/markedForDelete marks, per-month
+        // "manually sorted" flags, and resolved compare-group choices) lives
+        // in SwiftData and persists across relaunch() within a test run —
+        // same as the simulator not wiping UserDefaults, the SwiftData store
+        // isn't reset between test methods either. Tests whose assertions
+        // require starting from a genuinely clean sort state (e.g. counting
+        // unsorted photos) were breaking when an earlier test method in the
+        // same CI run legitimately left marks behind. Must run before
+        // SortStore/AppState construction finishes and before any view reads
+        // through modelContext, hence here in init().
+        if args.contains("--reset-sort-state") {
+            for record in (try? modelContext.fetch(FetchDescriptor<AssetSortRecord>())) ?? [] {
+                modelContext.delete(record)
+            }
+            for meta in (try? modelContext.fetch(FetchDescriptor<MonthSortMeta>())) ?? [] {
+                modelContext.delete(meta)
+            }
+            for resolution in (try? modelContext.fetch(FetchDescriptor<CompareGroupResolution>())) ?? [] {
+                modelContext.delete(resolution)
+            }
+            try? modelContext.save()
+        }
         #else
         isSeeding = false
         #endif

@@ -1196,7 +1196,13 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(lastIndex, 0)
         let lastThumb = app.descendants(matching: .any)["filmstrip.thumb.\(lastIndex)"].firstMatch
         XCTAssertTrue(lastThumb.waitForExistence(timeout: 5))
-        lastThumb.tap()
+        // Coordinate tap rather than .tap(): the card can report as not
+        // hittable while perfectly visible (a floating overlay overlapping
+        // its reported frame is enough) — same issue as elsewhere in this
+        // file, and the accessibility-tree frame here (24.0 x 43.3) doesn't
+        // even match the thumbnail's real rendered frame (24x36), which is
+        // exactly why we never assert on accessibility element frames.
+        lastThumb.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         Thread.sleep(forTimeInterval: 0.5)
         XCTAssertEqual(numerator(fromPosition: position.label), lastIndex + 1,
                        "Tapping the last thumb should navigate the deck onto it")
@@ -1226,7 +1232,12 @@ final class WalkthroughUITests: XCTestCase {
     /// way check_filmstrip_overlap.py is) that measures whether the
     /// filmstrip cells contain actual image content, not flat gray.
     func test30FilmstripThumbnailsRetainImageAfterSwipeUnderHideSorted() throws {
-        relaunch(withExtraArguments: ["--reset-hide-sorted"])
+        // Needs a genuinely clean sort state, not just hideSorted reset:
+        // this test asserts on the count of unsorted photos, which earlier
+        // test methods in the same CI run legitimately change by marking
+        // May's assets kept/deleted (SwiftData persists across relaunch()
+        // within a run). See the --reset-sort-state comment in AppState.swift.
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
         let deckCard = openMayDeck()
 
         app.buttons["deck.filter"].tap()
