@@ -44,6 +44,7 @@ REQUIRED = [
     "24-deck-filmstrip-mixed-aspect",
     "25-deck-pending-before-relaunch", "26-deck-pending-after-relaunch",
     "27-deck-swipe-down-from-top-exit", "28-compare-mismatched-aspect",
+    "29-filmstrip-thumbs-after-hidesorted-swipe",
 ]
 
 # Best-effort: one per test method, captured in tearDown. See module

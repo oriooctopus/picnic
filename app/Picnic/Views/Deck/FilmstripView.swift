@@ -24,7 +24,22 @@ struct FilmstripView: View {
                             isKept: isKept(asset),
                             onTap: { onSelect(index) }
                         )
-                        .id(index)
+                        // NOT .id(index): SwiftUI already keys each cell's
+                        // *identity* on localIdentifier via the ForEach
+                        // above (that's what lets FilmstripThumbnail own a
+                        // stable @State image — see its doc comment below).
+                        // .id(index) used to override that identity back to
+                        // raw array position, so removing any item (e.g. a
+                        // hideSorted-triggered filter) shifted every later
+                        // cell's index, and SwiftUI read that as "this is a
+                        // brand new view" for every shifted cell — tearing
+                        // it down and rebuilding it with `image` reset to
+                        // nil. That's what read as blank gray thumbnails
+                        // until each cell's `.task` re-fetched. Scroll-to-
+                        // current below now looks up the id by asset
+                        // identifier instead, so nothing needs the index
+                        // as an id anymore.
+                        .id(asset.localIdentifier)
                         .accessibilityIdentifier("filmstrip.thumb.\(index)")
                     }
                 }
@@ -45,11 +60,17 @@ struct FilmstripView: View {
                 // scroll position (current thumbnail flush left, half cut
                 // off by the frame) until currentIndex first changes — the
                 // .onChange below never fires on initial load since nothing
-                // has changed yet.
-                proxy.scrollTo(currentIndex, anchor: .center)
+                // has changed yet. Scrolls by asset identifier, matching the
+                // .id() each cell now carries above — currentIndex is only
+                // used to look up which asset that is.
+                if assets.indices.contains(currentIndex) {
+                    proxy.scrollTo(assets[currentIndex].localIdentifier, anchor: .center)
+                }
             }
             .onChange(of: currentIndex) { _, newValue in
-                withAnimation { proxy.scrollTo(newValue, anchor: .center) }
+                guard assets.indices.contains(newValue) else { return }
+                let targetID = assets[newValue].localIdentifier
+                withAnimation { proxy.scrollTo(targetID, anchor: .center) }
             }
         }
     }

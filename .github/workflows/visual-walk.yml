@@ -218,6 +218,21 @@ jobs:
           python3 -m pip install --quiet --break-system-packages pillow
           python3 .github/scripts/check_filmstrip_overlap.py "$SHOT"
 
+      # Real assertion for test30FilmstripThumbnailsRetainImageAfterSwipeUnderHideSorted
+      # (D1's actual regression — see check_filmstrip_content.py's doc
+      # comment): an element existing in the accessibility tree doesn't mean
+      # it's rendering anything, so this measures the real pixels instead.
+      - name: Check filmstrip thumbnails retain image content after a hideSorted swipe (pixel measurement)
+        if: always()
+        run: |
+          SHOT="screenshots/29-filmstrip-thumbs-after-hidesorted-swipe.png"
+          if [ ! -f "$SHOT" ]; then
+            echo "No $SHOT (likely an only_testing run that excluded test30FilmstripThumbnailsRetainImageAfterSwipeUnderHideSorted) — skipping."
+            exit 0
+          fi
+          python3 -m pip install --quiet --break-system-packages pillow
+          python3 .github/scripts/check_filmstrip_content.py "$SHOT"
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4

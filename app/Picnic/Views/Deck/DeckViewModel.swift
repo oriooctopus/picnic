@@ -13,7 +13,7 @@ final class DeckViewModel: ObservableObject {
     private let photoLibrary: PhotoLibraryService
     private let mirrorQueue: MirrorQueueStore
 
-    @Published var orderedAssets: [PHAsset] { didSet { recomputeVisibleAssets() } }
+    @Published var orderedAssets: [PHAsset] { didSet { refresh(follow: nil) } }
     /// Persisted directly via UserDefaults rather than @AppStorage: this
     /// class is a plain ObservableObject (not a View), and @AppStorage's
     /// dynamic-property machinery only works when hosted inside SwiftUI's
@@ -22,17 +22,24 @@ final class DeckViewModel: ObservableObject {
     @Published var hideSorted = UserDefaults.standard.bool(forKey: DeckViewModel.hideSortedDefaultsKey) {
         didSet {
             UserDefaults.standard.set(hideSorted, forKey: DeckViewModel.hideSortedDefaultsKey)
-            // Read before recompute: visibleAssets/currentIndex still
-            // reflect the pre-toggle list at this point in didSet.
-            let previousAssetID = currentAsset?.localIdentifier
-            recomputeVisibleAssets()
-            reanchorCurrentIndex(toFollow: previousAssetID)
+            // Read before refresh: visibleAssets/currentIndex still reflect
+            // the pre-toggle list at this point in didSet — refresh() is
+            // what overwrites them, so the read has to happen first.
+            refresh(follow: currentAsset?.localIdentifier)
         }
     }
     @Published var currentIndex = 0
     /// Swipe-left cues — a CUE ONLY. Nothing is deleted until commitDeletions()
     /// runs, which is only reachable from the explicit X-button tap.
-    @Published var pendingDeleteIDs: Set<String> = [] { didSet { recomputeVisibleAssets() } }
+    /// `private(set)`, not independently mutated: every write used to be a
+    /// direct `.insert`/`.remove`/`.removeAll` at each call site, which is
+    /// how this drifted out of sync with SortStore (the actual persisted
+    /// source — see `marks` and `refresh(follow:)` below, which is now the
+    /// only place this Set is written). Still a stored Set, not a computed
+    /// property: DeckView's body reads `.count` on every render, and a
+    /// per-render rebuild over hundreds of assets is exactly the cost
+    /// `visibleAssets` below already exists to avoid.
+    @Published private(set) var pendingDeleteIDs: Set<String> = []
     @Published var undoStack: [UndoEntry] = []
     @Published var favoritedOverrides: [String: Bool] = [:]
     @Published var isCommitting = false
@@ -52,20 +59,13 @@ final class DeckViewModel: ObservableObject {
         self.photoLibrary = photoLibrary
         self.mirrorQueue = mirrorQueue
         self.orderedAssets = month.assets
-        // Kept state survives relaunch because sortStore.state(for:) is read
-        // live everywhere. pendingDeleteIDs doesn't get that for free — it's
-        // a plain in-memory Set — so without this, X-marked photos lost both
-        // their filmstrip indicator AND their place in the X commit count
-        // the moment the app was closed and reopened, even though the
-        // underlying .markedForDelete state was sitting in SortStore the
-        // whole time.
-        self.pendingDeleteIDs = Set(
-            month.assets
-                .filter { sortStore.state(for: $0) == .markedForDelete }
-                .map(\.localIdentifier)
-        )
         // didSet doesn't fire for assignments inside init, so seed it here.
-        recomputeVisibleAssets()
+        // This is also what makes pendingDeleteIDs (and every other mark)
+        // survive relaunch for free: refresh() derives them from
+        // sortStore.state(for:), which is backed by SwiftData, not from any
+        // separately-seeded in-memory state that could fall out of sync
+        // with it the way pendingDeleteIDs used to before this redesign.
+        refresh(follow: nil)
     }
 
     /// Stored, not computed. The deck's view body reads this several times per
@@ -80,18 +80,44 @@ final class DeckViewModel: ObservableObject {
     /// card change.
     @Published private(set) var groupByAssetID: [String: CompareGroup] = [:]
 
-    private func recomputeVisibleAssets() {
-        visibleAssets = orderedAssets.filter { asset in
-            // hideSorted hides BOTH kept and pending-delete/X'd photos — from
-            // the user's perspective both are "sorted", so both should drop
-            // out of the deck/filmstrip. When hideSorted is off, a
-            // pending-delete photo is force-shown unconditionally so it stays
-            // reviewable/undoable up until the X-button commits it.
-            if hideSorted, pendingDeleteIDs.contains(asset.localIdentifier) { return false }
-            if pendingDeleteIDs.contains(asset.localIdentifier) { return true }
-            if hideSorted, sortStore.state(for: asset) == .kept { return false }
-            return true
-        }
+    /// One derived snapshot of every asset's SortStore state, rebuilt in the
+    /// same place as everything downstream of it (see `refresh(follow:)`).
+    /// Before this redesign, "is this marked" had two independent sources —
+    /// this dictionary's job was split between the `pendingDeleteIDs` Set
+    /// (X badge) and live `sortStore.state(for:)` reads (checkmark badge and
+    /// filter), which could disagree whenever a call site updated one but
+    /// not the other. `sortStore.state(for:)` already returns `.unsorted`
+    /// for an asset with no record, so every key here always resolves to a
+    /// real state — no separate "absent means unsorted" branch is needed at
+    /// any read site.
+    @Published private(set) var marks: [String: SortState] = [:]
+
+    /// The single choke point for every mutation that can change what's
+    /// sorted, what's visible, or which photo the deck is pointing at.
+    /// Replaces the scattered `recomputeVisibleAssets()` calls that used to
+    /// sit next to each mutation — missing one of those (or, as in the old
+    /// `undo()`, calling one against marks that hadn't been written to
+    /// SortStore yet) is exactly how stale-filmstrip and empty-deck bugs
+    /// shipped. Every mutating method below calls this exactly once, after
+    /// writing to SortStore. `follow` is the identifier of the asset the
+    /// deck should try to keep showing (nil just clamps currentIndex back
+    /// into range instead) — see `reanchorCurrentIndex(toFollow:)`.
+    private func refresh(follow assetID: String?) {
+        marks = Dictionary(uniqueKeysWithValues: orderedAssets.map {
+            ($0.localIdentifier, sortStore.state(for: $0))
+        })
+        pendingDeleteIDs = Set(marks.filter { $0.value == .markedForDelete }.keys)
+
+        // hideSorted is an "anything marked" filter, not a "hide kept"
+        // filter: from the user's perspective any non-.unsorted photo is
+        // sorted, so ANY mark — kept or X'd — drops it out of the deck and
+        // filmstrip when the toggle is on. With the toggle off, marked
+        // photos stay visible (with their badge) so they're still
+        // reviewable/undoable up until an explicit commit.
+        visibleAssets = hideSorted
+            ? orderedAssets.filter { (marks[$0.localIdentifier] ?? .unsorted) == .unsorted }
+            : orderedAssets
+
         var lookup: [String: CompareGroup] = [:]
         for group in GroupingService.groups(in: visibleAssets) {
             for member in group.assets {
@@ -99,6 +125,8 @@ final class DeckViewModel: ObservableObject {
             }
         }
         groupByAssetID = lookup
+
+        reanchorCurrentIndex(toFollow: assetID)
     }
 
     var currentAsset: PHAsset? {
@@ -157,14 +185,22 @@ final class DeckViewModel: ObservableObject {
     func markForDelete() {
         guard let asset = currentAsset else { return }
         undoStack.append(UndoEntry(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset)))
-        // pendingDeleteIDs' didSet already triggers recomputeVisibleAssets(),
-        // and — now that hideSorted also filters pending-delete assets out —
-        // that recompute can shift this asset's slot at currentIndex the same
-        // way markKept()'s does (see its comment). Blindly calling advance()
-        // here would double-skip: the next photo already slid into
-        // currentIndex, and advancing again jumps past it.
-        pendingDeleteIDs.insert(asset.localIdentifier)
         sortStore.setState(.markedForDelete, for: asset, monthKey: month.key)
+        // follow: nil, not this asset's ID: when hideSorted filters it out,
+        // reanchorCurrentIndex's nil branch just clamps currentIndex into
+        // the (now shorter) range instead of trying to keep showing an
+        // asset that's meant to disappear. That clamp is also what fixes
+        // the empty-deck bug (D2): if this was the LAST visible asset,
+        // currentIndex would otherwise sit one past the end and
+        // `currentAsset` would go nil, flipping the deck to its "All
+        // sorted" empty state while unsorted photos remain.
+        refresh(follow: nil)
+        // With hideSorted off (or this photo not the one hidden), the next
+        // photo hasn't slid into this slot yet, so it's still safe — and
+        // necessary — to advance explicitly. When hideSorted DID remove
+        // this asset, the next photo already occupies currentIndex (or the
+        // refresh above just clamped onto it), so this check correctly
+        // skips a redundant advance that would otherwise double-skip.
         if visibleAssets.indices.contains(currentIndex),
            visibleAssets[currentIndex].localIdentifier == asset.localIdentifier {
             advance()
@@ -178,26 +214,32 @@ final class DeckViewModel: ObservableObject {
     /// make sense for a batch that doesn't come from swiping the current
     /// card.
     func markPendingDelete(_ assets: [PHAsset]) {
+        // Captured before the marks (and therefore visibleAssets) change:
+        // if the batch includes assets sitting before currentIndex, letting
+        // those disappear under hideSorted shifts every later index down —
+        // reanchoring by this identity is what keeps the deck showing the
+        // same photo instead of silently jumping to a neighbor.
+        let previousAssetID = currentAsset?.localIdentifier
         for asset in assets {
-            pendingDeleteIDs.insert(asset.localIdentifier)
             sortStore.setState(.markedForDelete, for: asset, monthKey: month.key)
         }
+        refresh(follow: previousAssetID)
     }
 
     /// Swipe right: keep. No PhotoKit action needed — nothing is deleted.
     func isKept(_ asset: PHAsset) -> Bool {
-        sortStore.state(for: asset) == .kept
+        marks[asset.localIdentifier] == .kept
     }
 
     func markKept() {
         guard let asset = currentAsset else { return }
         undoStack.append(UndoEntry(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset)))
         sortStore.setState(.kept, for: asset, monthKey: month.key)
-        // The sort state lives in SortStore, not in one of the @Published
-        // inputs, so nothing above triggers the didSet recompute — without
-        // this, marking a photo kept while "Hide sorted pics" is on left it
-        // sitting in the deck.
-        recomputeVisibleAssets()
+        // See markForDelete()'s comment: follow: nil clamps currentIndex
+        // into range, which both keeps a hideSorted-filtered photo's next
+        // neighbor in place AND fixes the empty-deck bug (D2) when this was
+        // the last visible photo.
+        refresh(follow: nil)
         // When hideSorted filtered this photo out, the slot at currentIndex is
         // already occupied by the next photo, so advancing again would skip
         // one.
@@ -227,19 +269,23 @@ final class DeckViewModel: ObservableObject {
 
     func undo() {
         guard let last = undoStack.popLast() else { return }
-        pendingDeleteIDs.remove(last.assetID)
+        // Write to SortStore, THEN refresh exactly once. This used to
+        // remove(_:) from pendingDeleteIDs first (firing its own didSet
+        // recompute against a marks state that hadn't been written to
+        // SortStore yet — i.e. against stale data) and only then write
+        // SortStore and recompute a second time. pendingDeleteIDs is now
+        // purely derived inside refresh(), so there's nothing to mutate
+        // ahead of the SortStore write, and exactly one refresh runs, against
+        // already-consistent state.
         if let asset = orderedAssets.first(where: { $0.localIdentifier == last.assetID }) {
             sortStore.setState(last.previousState, for: asset, monthKey: month.key)
-            // Restoring a .kept photo to .unsorted brings it back into view
-            // when hideSorted is on; SortStore changes don't fire the didSet.
-            recomputeVisibleAssets()
         }
         // Un-sorting an asset can grow visibleAssets back (the restored photo
         // reappearing under hideSorted), which shifts every later index up —
         // a blind currentIndex - 1 would land on an arbitrary neighbor
         // instead of the photo that was just undone. Reanchor by identity,
         // same as the hideSorted-toggle path above.
-        reanchorCurrentIndex(toFollow: last.assetID)
+        refresh(follow: last.assetID)
     }
 
     /// The single X commit: one PhotoKit batch delete (system confirm dialog
@@ -258,8 +304,12 @@ final class DeckViewModel: ObservableObject {
             for asset in toDelete {
                 sortStore.setState(.deleted, for: asset, monthKey: month.key)
             }
-            pendingDeleteIDs.removeAll()
             undoStack.removeAll()
+            // pendingDeleteIDs no longer needs an explicit removeAll(): every
+            // asset just written above now reads back as .deleted, not
+            // .markedForDelete, so refresh() derives an already-empty (of
+            // these assets) pendingDeleteIDs on its own.
+            refresh(follow: currentAsset?.localIdentifier)
             await mirrorQueue.drainQueue()
         } catch {
             // If the user declines the system confirm dialog (or the delete

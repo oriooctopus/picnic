@@ -1085,6 +1085,173 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(sortedPicsToggle.value as? String, "on", "Toggle should still read on after relaunch, without any swipe/mark having happened in this test")
     }
 
+    /// Counts the "filmstrip.thumb.N" elements actually present in the tree
+    /// (N = 0, 1, 2, ... contiguously from 0), the ground truth for what's
+    /// really in the bar — as opposed to trusting deck.position's own count,
+    /// which is exactly the thing the redesign's filter logic computes and
+    /// therefore can't also be used to verify it.
+    private func filmstripThumbCount() -> Int {
+        var n = 0
+        while app.descendants(matching: .any)["filmstrip.thumb.\(n)"].firstMatch.exists {
+            n += 1
+        }
+        return n
+    }
+
+    /// Regression for D1 (the redesign's main symptom): none of the existing
+    /// hideSorted tests ever counted the filmstrip's actual contents, only
+    /// the "N OF M" label — so a filmstrip that silently diverged from that
+    /// label (or went blank) would have shipped unnoticed, which is what
+    /// happened. Asserts the two independently, both before and after
+    /// toggling hideSorted, so a regression in either one is caught even if
+    /// the other still happens to agree.
+    func test27FilmstripThumbCountMatchesPositionLabel() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted"])
+        openMayDeck()
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+        let beforeTotal = totalCount(fromPosition: position.label)
+        XCTAssertEqual(filmstripThumbCount(), beforeTotal,
+                       "Filmstrip thumb count should match the position label's total before any toggle")
+
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5))
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        tapOutside()
+
+        let afterTotal = totalCount(fromPosition: position.label)
+        XCTAssertEqual(filmstripThumbCount(), afterTotal,
+                       "Filmstrip thumb count should still match the position label's total after toggling hideSorted on")
+    }
+
+    /// Regression for the spec's "either direction hides under hideSorted"
+    /// rule: swipes both left (X) and right (keep) each drop the thumb
+    /// count by exactly one once hideSorted is on.
+    func test28SwipeEitherDirectionHidesThumbUnderHideSorted() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted"])
+        let deckCard = openMayDeck()
+
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5))
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        tapOutside()
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(totalCount(fromPosition: position.label), 2,
+                             "Need at least 3 unsorted photos to swipe both directions and still have one left")
+
+        let beforeLeft = filmstripThumbCount()
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertEqual(filmstripThumbCount(), beforeLeft - 1, "Swiping left under hideSorted should drop the thumb count by exactly one")
+        XCTAssertEqual(totalCount(fromPosition: position.label), beforeLeft - 1, "Position label total should agree with the thumb count after the left swipe")
+
+        let beforeRight = filmstripThumbCount()
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertEqual(filmstripThumbCount(), beforeRight - 1, "Swiping right under hideSorted should drop the thumb count by exactly one")
+        XCTAssertEqual(totalCount(fromPosition: position.label), beforeRight - 1, "Position label total should agree with the thumb count after the right swipe")
+    }
+
+    /// Regression for D2: swiping the LAST visible photo under hideSorted
+    /// used to leave currentIndex one past the end of the (now shorter)
+    /// visibleAssets array, so currentAsset went nil and the deck flipped to
+    /// its "All sorted" empty state even though unsorted photos remained
+    /// (they just weren't at the tail of the array). refresh(follow: nil)'s
+    /// clamp in markForDelete()/markKept() is the fix under test here.
+    func test29SwipingLastVisiblePhotoUnderHideSortedDoesNotEmptyDeck() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted"])
+        let deckCard = openMayDeck()
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10))
+        let total = totalCount(fromPosition: position.label)
+        XCTAssertGreaterThan(total, 1, "Need at least 2 photos: one to leave unsorted, one to navigate to and swipe last")
+
+        // Turn hideSorted on first (no swipes yet), then navigate to the
+        // last thumb in the bar and swipe THAT one — the one actually
+        // sitting at the tail of visibleAssets, which is what D2 requires.
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5))
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        tapOutside()
+
+        let lastIndex = filmstripThumbCount() - 1
+        XCTAssertGreaterThanOrEqual(lastIndex, 0)
+        let lastThumb = app.descendants(matching: .any)["filmstrip.thumb.\(lastIndex)"].firstMatch
+        XCTAssertTrue(lastThumb.waitForExistence(timeout: 5))
+        lastThumb.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(numerator(fromPosition: position.label), lastIndex + 1,
+                       "Tapping the last thumb should navigate the deck onto it")
+
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 1.0)
+
+        let deckCardAfter = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCardAfter.exists, "Deck should still show a card after swiping the last visible photo, not flip to the empty state")
+        let numeratorAfter = numerator(fromPosition: position.label)
+        let totalAfter = totalCount(fromPosition: position.label)
+        XCTAssertGreaterThanOrEqual(numeratorAfter, 1, "Position numerator should be a valid 1-based index, not 0/negative from an out-of-range currentIndex")
+        XCTAssertLessThanOrEqual(numeratorAfter, max(totalAfter, 1), "Position numerator should be within range of the remaining total")
+    }
+
+    /// Regression for D1's real symptom, which the accessibility-tree-only
+    /// assertions in test27/28 can't catch: a blanked thumbnail (its
+    /// `@State image` reset to nil by the .id(index) bug) still EXISTS as an
+    /// element, it's just rendering an empty gray rect. Per this repo's
+    /// convention (see check_filmstrip_overlap.py), that needs a real pixel
+    /// check — captures a screenshot right after a swipe under hideSorted
+    /// and hands it to a python checker (wired into visual-walk.yml the same
+    /// way check_filmstrip_overlap.py is) that measures whether the
+    /// filmstrip cells contain actual image content, not flat gray.
+    func test30FilmstripThumbnailsRetainImageAfterSwipeUnderHideSorted() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted"])
+        let deckCard = openMayDeck()
+
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5))
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        tapOutside()
+
+        // A second and third card need to exist so at least one shifts
+        // index when the first is removed — that shift is exactly what
+        // the .id(index) bug depended on to blank a thumbnail.
+        let thumb1 = app.descendants(matching: .any)["filmstrip.thumb.1"].firstMatch
+        XCTAssertTrue(thumb1.waitForExistence(timeout: 10), "Need at least 2 unsorted photos for the shift this test exercises")
+
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 1.0)
+
+        capture("29-filmstrip-thumbs-after-hidesorted-swipe", delay: 0.5)
+    }
+
     /// Opens a month's deck, starts the frame monitor, performs several
     /// sustained drags, and returns the monitor's summary line.
     ///
