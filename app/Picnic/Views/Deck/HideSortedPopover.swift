@@ -19,6 +19,13 @@ struct HideSortedPopover: View {
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("deck.hideSortedToggle")
+            // Checked/unchecked is only encoded visually (SF Symbol swap
+            // above) — nothing exposed it as a readable state, so a UI test
+            // could tap this toggle but never confirm afterwards which way
+            // it landed. Explicit accessibilityValue gives XCUITest a
+            // stable "on"/"off" string to assert on instead of trying to
+            // infer state from the symbol name.
+            .accessibilityValue(hideSorted ? "on" : "off")
 
             Divider()
 

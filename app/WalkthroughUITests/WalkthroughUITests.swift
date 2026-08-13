@@ -993,6 +993,98 @@ final class WalkthroughUITests: XCTestCase {
                        "Toggling hideSorted off should restore the full count (expected \(before), got \(restored))")
     }
 
+    /// Coverage gap found in review: test18 proves a swipe-LEFT (X-cue)
+    /// survives a relaunch, and its own doc comment asserts — but never
+    /// tests — that "a swipe-right (kept) correctly did survive, since
+    /// sortStore.state(for:) is read live". This closes that gap directly:
+    /// keep a photo, turn hideSorted on (the same technique test14/test22
+    /// use to make sort state observable as a count drop), relaunch with NO
+    /// reset flag so both the .kept SortStore row AND the hideSorted
+    /// UserDefaults value have to survive together, then confirm the count
+    /// is still low. Mirrors test22's structure but for the keep path
+    /// instead of the pending-delete path.
+    func test25DeckSwipeRightKeepPersistsAcrossRelaunch() throws {
+        // See test21's comment: force a known hideSorted starting state so
+        // the toggle tap below reliably turns it ON rather than flipping
+        // whatever an earlier test method left it as.
+        relaunch(withExtraArguments: ["--reset-hide-sorted"])
+        let deckCard = openMayDeck()
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+        let before = totalCount(fromPosition: position.label)
+        XCTAssertGreaterThan(before, 1, "Need at least 2 photos: one to keep, one to land on")
+
+        // Swipe right = keep = sorted (same drag pattern as test14).
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 1.0)
+
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should offer the 'Sorted pics' toggle")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        tapOutside()
+
+        let beforeRelaunch = totalCount(fromPosition: position.label)
+        XCTAssertLessThan(beforeRelaunch, before,
+                          "Hiding sorted pics should drop the deck's total (was \(before), now \(beforeRelaunch)) — the kept photo should be filtered out")
+
+        // Plain relaunch — deliberately no --reset-hide-sorted. That's the
+        // actual point of this test: both the .kept sort state AND the
+        // hideSorted-on toggle have to survive TOGETHER for the count to
+        // still read low after reopening, proving the claim in test18's
+        // comment rather than just asserting it in prose.
+        relaunch(withExtraArguments: [])
+        openMayDeck()
+
+        let afterRelaunchPosition = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(afterRelaunchPosition.waitForExistence(timeout: 10), "Position label should reappear after relaunch")
+        let afterRelaunch = totalCount(fromPosition: afterRelaunchPosition.label)
+        XCTAssertEqual(afterRelaunch, beforeRelaunch,
+                       "The kept photo reappeared after relaunch (was \(beforeRelaunch), now \(afterRelaunch)) — either .kept sort state or the hideSorted toggle failed to survive")
+    }
+
+    /// Coverage gap found in review: test22 relaunches with hideSorted
+    /// already on and never re-taps it, so a pass there is only indirect
+    /// evidence the UserDefaults value survived (the deck could stay
+    /// filtered for the wrong reason and this would never notice). This
+    /// test reopens the popover itself after a relaunch and reads the
+    /// toggle's own accessibilityValue ("on"/"off", added to
+    /// HideSortedPopover alongside this test since nothing exposed that
+    /// state readably before) — and deliberately performs no swipe/mark at
+    /// all, to isolate the toggle's own persistence from any sort-state
+    /// persistence (that's test25's and test22's job).
+    func test26DeckHideSortedToggleStateSurvivesRelaunch() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted"])
+        openMayDeck()
+
+        app.buttons["deck.filter"].tap()
+        var sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should offer the 'Sorted pics' toggle")
+        XCTAssertEqual(sortedPicsToggle.value as? String, "off", "Toggle should start off after --reset-hide-sorted")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(sortedPicsToggle.value as? String, "on", "Toggle should read on immediately after tapping it")
+        tapOutside()
+
+        // Relaunch stands in for closing and reopening the app in a later
+        // session — no reset flag this time, so whatever the toggle reads
+        // now comes purely from the UserDefaults key surviving, with no
+        // swipe/mark anywhere in this test to confound it.
+        relaunch(withExtraArguments: [])
+        openMayDeck()
+
+        app.buttons["deck.filter"].tap()
+        sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should reopen with the same toggle after relaunch")
+        XCTAssertEqual(sortedPicsToggle.value as? String, "on", "Toggle should still read on after relaunch, without any swipe/mark having happened in this test")
+    }
+
     /// Opens a month's deck, starts the frame monitor, performs several
     /// sustained drags, and returns the monitor's summary line.
     ///
