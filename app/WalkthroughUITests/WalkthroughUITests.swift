@@ -1174,7 +1174,13 @@ final class WalkthroughUITests: XCTestCase {
     /// (they just weren't at the tail of the array). refresh(follow: nil)'s
     /// clamp in markForDelete()/markKept() is the fix under test here.
     func test29SwipingLastVisiblePhotoUnderHideSortedDoesNotEmptyDeck() throws {
-        relaunch(withExtraArguments: ["--reset-hide-sorted"])
+        // --reset-sort-state as well as --reset-hide-sorted: without it,
+        // marks left on May by earlier test methods in the same CI run
+        // survive (SwiftData persists across relaunch()), and once
+        // hideSorted is enabled below they can leave a SINGLE photo visible.
+        // Swiping that one photo then empties the deck legitimately, and
+        // this test failed asserting against correct behaviour.
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
         let deckCard = openMayDeck()
 
         let position = app.descendants(matching: .any)["deck.position"].firstMatch
@@ -1192,8 +1198,15 @@ final class WalkthroughUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.5)
         tapOutside()
 
-        let lastIndex = filmstripThumbCount() - 1
-        XCTAssertGreaterThanOrEqual(lastIndex, 0)
+        // Guard AFTER the toggle, not before it. The earlier `total > 1`
+        // check reads the pre-filter list, which says nothing about how many
+        // photos remain once hideSorted drops every marked one — and it's
+        // the post-filter count that has to be >= 2 for "swipe the last one
+        // and expect a card to remain" to be a meaningful assertion at all.
+        let visibleCount = filmstripThumbCount()
+        XCTAssertGreaterThanOrEqual(visibleCount, 2,
+                                    "Need at least 2 photos still visible under hideSorted, or emptying the deck is correct behaviour rather than the D2 bug")
+        let lastIndex = visibleCount - 1
         let lastThumb = app.descendants(matching: .any)["filmstrip.thumb.\(lastIndex)"].firstMatch
         XCTAssertTrue(lastThumb.waitForExistence(timeout: 5))
         // Coordinate tap rather than .tap(): the card can report as not
