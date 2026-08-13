@@ -30,8 +30,14 @@ final class AppState: ObservableObject {
 
     init() {
         modelContext = ModelContext(PersistenceController.container)
-        sortStore = SortStore(context: modelContext)
-        mirrorQueue = MirrorQueueStore(context: modelContext)
+        // LOAD-BEARING ORDERING: sortStore/mirrorQueue are constructed AFTER
+        // the debug reset block below, not here. SortStore.init eagerly reads
+        // every AssetSortRecord into its in-memory `stateCache`, and
+        // `state(for:)` serves exclusively from that cache — so constructing
+        // it first made --reset-sort-state delete the SwiftData rows while
+        // the app went on reporting the deleted marks from memory for the
+        // rest of the launch. The reset looked like a no-op and two tests
+        // (test29/test30) failed on a "clean" store that wasn't clean.
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
         isSeeding = args.contains("--seed-library") || args.contains("--seed-large-month")
@@ -54,9 +60,9 @@ final class AppState: ObservableObject {
         // isn't reset between test methods either. Tests whose assertions
         // require starting from a genuinely clean sort state (e.g. counting
         // unsorted photos) were breaking when an earlier test method in the
-        // same CI run legitimately left marks behind. Must run before
-        // SortStore/AppState construction finishes and before any view reads
-        // through modelContext, hence here in init().
+        // same CI run legitimately left marks behind. Must run BEFORE
+        // SortStore is constructed — see the ordering comment above; running
+        // it afterwards silently does nothing observable.
         if args.contains("--reset-sort-state") {
             for record in (try? modelContext.fetch(FetchDescriptor<AssetSortRecord>())) ?? [] {
                 modelContext.delete(record)
@@ -72,6 +78,10 @@ final class AppState: ObservableObject {
         #else
         isSeeding = false
         #endif
+        // Constructed here, after the reset block above — see the
+        // LOAD-BEARING ORDERING comment at the top of init().
+        sortStore = SortStore(context: modelContext)
+        mirrorQueue = MirrorQueueStore(context: modelContext)
     }
 
     func bootstrap() async {
