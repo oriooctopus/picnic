@@ -1191,11 +1191,27 @@ final class WalkthroughUITests: XCTestCase {
         // Turn hideSorted on first (no swipes yet), then navigate to the
         // last thumb in the bar and swipe THAT one — the one actually
         // sitting at the tail of visibleAssets, which is what D2 requires.
+        //
+        // Assert the toggle actually flipped rather than assuming the tap
+        // registered. It silently did NOT in run 31719396283: the whole test
+        // then ran with hideSorted still OFF, so nothing was ever filtered
+        // and every later assertion measured the wrong mode — the final
+        // screenshot showed "2 OF 5" with an X'd photo still in the strip,
+        // which is correct hideSorted-OFF behaviour, not the D2 bug this
+        // test exists to catch. A mis-tap has to fail HERE, loudly, rather
+        // than surface as a confusing failure three assertions downstream.
+        // Retries once on a missed tap, same as test24's popover handling.
         app.buttons["deck.filter"].tap()
         let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
         XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5))
         sortedPicsToggle.tap()
         Thread.sleep(forTimeInterval: 0.5)
+        if sortedPicsToggle.exists, sortedPicsToggle.value as? String != "on" {
+            sortedPicsToggle.tap()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        XCTAssertEqual(sortedPicsToggle.value as? String, "on",
+                       "Hide-sorted toggle did not turn on — every assertion below this would measure the wrong mode")
         tapOutside()
 
         // Guard AFTER the toggle, not before it. The earlier `total > 1`
