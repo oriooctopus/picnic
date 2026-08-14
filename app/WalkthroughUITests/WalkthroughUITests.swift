@@ -1131,7 +1131,14 @@ final class WalkthroughUITests: XCTestCase {
     /// rule: swipes both left (X) and right (keep) each drop the thumb
     /// count by exactly one once hideSorted is on.
     func test28SwipeEitherDirectionHidesThumbUnderHideSorted() throws {
-        relaunch(withExtraArguments: ["--reset-hide-sorted"])
+        // --reset-sort-state, not just --reset-hide-sorted: this asserts an
+        // ABSOLUTE minimum (3+ unsorted photos), and May only has 5, so any
+        // earlier test method in the same run that marks May's assets can
+        // starve it. test05/test06 resolve May's burst cluster A, which cues
+        // 4 of the 5 — leaving 1 and failing this precondition. It passed
+        // before only because no run had happened to schedule those Compare
+        // tests ahead of it.
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
         let deckCard = openMayDeck()
 
         app.buttons["deck.filter"].tap()
