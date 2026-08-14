@@ -1320,6 +1320,106 @@ final class WalkthroughUITests: XCTestCase {
         capture("29-filmstrip-thumbs-after-hidesorted-swipe", delay: 0.5)
     }
 
+    /// Reproduces the owner's real-device report on the CURRENT build
+    /// (bf81536, confirmed installed via IPA download timestamp): with
+    /// "Hide Sorted Pics" ON, swiping a photo does NOT make it disappear
+    /// from the bottom filmstrip bar. Every existing hideSorted/filmstrip
+    /// test (test27/28/30) runs against the May 2025 seed — only 5 photos,
+    /// so every LazyHStack cell is realized and removal-diffing behaves
+    /// nothing like it does once most cells are unrealized. This uses
+    /// --seed-large-month (300 assets, see SeedLibrary.largeMonthCount) as
+    /// the closest available stand-in for his real month, which holds
+    /// hundreds.
+    ///
+    /// filmstripThumbCount() is unusable here — per its own doc comment it
+    /// counts "filmstrip.thumb.<index>" elements until one is missing, and
+    /// lazy realization at 300 assets caps that well below the true count.
+    /// The position label's total, by contrast, comes straight from
+    /// `visibleAssets.count` in the view model (DeckViewModel.refresh), not
+    /// from anything the filmstrip itself renders, so it stays reliable at
+    /// any scale — used below as ground truth for "how many unsorted photos
+    /// remain."
+    ///
+    /// A strict per-swipe assertion (not just one before/after the whole
+    /// run) is deliberate: a bug that only appears after the first removal,
+    /// or once the LazyHStack's realized window first shifts, would be
+    /// invisible to a single aggregate check.
+    ///
+    /// The position-label total is driven by the view model, not by the
+    /// filmstrip's own rendering, so it can stay correct even if the
+    /// filmstrip VIEW itself fails to visually update (exactly the bug
+    /// being chased here — see D1's precedent in check_filmstrip_content.py,
+    /// where an element existed in the accessibility tree yet rendered
+    /// nothing). check_filmstrip_visually_updated.py closes that gap in CI
+    /// by diffing the actual filmstrip pixels between the
+    /// "30-filmstrip-before-scale-swipes" and "31-filmstrip-after-scale-swipes"
+    /// screenshots this test captures — proving the strip's rendered content
+    /// really changed, not just the count the label reports.
+    func test31FilmstripDropsCountUnderHideSortedAtScale() throws {
+        relaunch(withExtraArguments: ["--seed-large-month", "--reset-hide-sorted", "--reset-sort-state"])
+        XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 30), "My life header should appear")
+        let largeMonth = app.descendants(matching: .any)["monthCard.2026-06"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(largeMonth, initialTimeout: 120),
+                      "The large seeded month (2026-06) should appear in the grid")
+        largeMonth.tap()
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 60), "Deck should open on the large month")
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+        XCTAssertEqual(totalCount(fromPosition: position.label), Self.largeMonthCount,
+                       "Opened deck should hold every seeded asset — got '\(position.label)'")
+
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should offer the 'Sorted pics' toggle")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        // A silently-missed toggle tap already wasted four CI runs earlier
+        // this session (see test29's doc comment) — retry once, then assert
+        // the toggle really reads "on" before trusting any assertion below,
+        // which would otherwise measure the wrong mode without ever failing
+        // loudly at the point the mistake actually happened.
+        if sortedPicsToggle.exists, sortedPicsToggle.value as? String != "on" {
+            sortedPicsToggle.tap()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        XCTAssertEqual(sortedPicsToggle.value as? String, "on",
+                       "Hide-sorted toggle did not turn on — every assertion below would measure the wrong mode")
+        tapOutside()
+
+        var total = totalCount(fromPosition: position.label)
+        XCTAssertEqual(total, Self.largeMonthCount,
+                       "Nothing has been marked yet, so turning hideSorted on shouldn't have dropped any photos")
+
+        capture("30-filmstrip-before-scale-swipes", delay: 0.5)
+
+        // Alternate directions like test28, but 5 swipes deep instead of 2 —
+        // a bug that only appears once the LazyHStack's realized window has
+        // shifted more than once would be invisible to a shallower run.
+        for i in 0..<5 {
+            let goingLeft = i % 2 == 0
+            // Explicit CGFloat: a bare `let` bound to a ternary of float
+            // literals infers Double, which CGVector's CGFloat parameters
+            // don't accept implicitly.
+            let fromX: CGFloat = goingLeft ? 0.8 : 0.2
+            let toX: CGFloat = goingLeft ? 0.05 : 0.95
+            deckCard.coordinate(withNormalizedOffset: CGVector(dx: fromX, dy: 0.5))
+                .press(forDuration: 0.1,
+                       thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: toX, dy: 0.5)),
+                       withVelocity: .default,
+                       thenHoldForDuration: 0.1)
+            Thread.sleep(forTimeInterval: 1.0)
+
+            let newTotal = totalCount(fromPosition: position.label)
+            XCTAssertEqual(newTotal, total - 1,
+                           "Swipe #\(i + 1) (\(goingLeft ? "left" : "right")) should drop the visible total by exactly one (was \(total), now '\(position.label)')")
+            total = newTotal
+        }
+
+        capture("31-filmstrip-after-scale-swipes", delay: 0.5)
+    }
+
     /// Opens a month's deck, starts the frame monitor, performs several
     /// sustained drags, and returns the monitor's summary line.
     ///

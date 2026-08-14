@@ -233,6 +233,25 @@ jobs:
           python3 -m pip install --quiet --break-system-packages pillow
           python3 .github/scripts/check_filmstrip_content.py "$SHOT"
 
+      # Real assertion for test31FilmstripDropsCountUnderHideSortedAtScale:
+      # the position-label total is view-model-driven and would stay correct
+      # even if the filmstrip VIEW itself failed to visually update (the
+      # owner's actual real-device report). This diffs the real pixels of
+      # the filmstrip band between the before/after screenshots that test
+      # captures, so a frozen-looking strip fails here even though the
+      # in-process count assertions all passed.
+      - name: Check filmstrip visually updates after swipes at scale (pixel diff)
+        if: always()
+        run: |
+          BEFORE="screenshots/30-filmstrip-before-scale-swipes.png"
+          AFTER="screenshots/31-filmstrip-after-scale-swipes.png"
+          if [ ! -f "$BEFORE" ] || [ ! -f "$AFTER" ]; then
+            echo "Missing $BEFORE or $AFTER (likely an only_testing run that excluded test31FilmstripDropsCountUnderHideSortedAtScale) — skipping."
+            exit 0
+          fi
+          python3 -m pip install --quiet --break-system-packages pillow
+          python3 .github/scripts/check_filmstrip_visually_updated.py "$BEFORE" "$AFTER"
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
