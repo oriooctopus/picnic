@@ -1545,6 +1545,131 @@ final class WalkthroughUITests: XCTestCase {
                        "Predicted (order-dependent) outcome: reject-then-accept wipes the reject, so only the 2 non-accepted group members are cued for delete (baseline \(baseline), observed \(afterConfirm))")
     }
 
+    /// Regression test for the bug this session fixes: Compare's confirm
+    /// used to cue every rejected photo for delete (and mark any accepted
+    /// photo kept) with NO undo entry recorded at all — `markPendingDelete`'s
+    /// old doc comment said so explicitly ("deliberately skips the undo
+    /// stack"). Rejecting even one photo resolves the WHOLE group for delete
+    /// (SPEC.md semantics #2), so with 4 photos cued in one confirm tap,
+    /// Compare's confirm was both the LEAST reversible action in the app and
+    /// the ONE action with zero undo support. This proves a single undo tap
+    /// now reverses the whole batch (every cued photo restored, not just
+    /// one), clears their filmstrip X badges (not just the numeric pending
+    /// count), and un-resolves the group so Compare offers it again.
+    func test34UndoReversesWholeCompareConfirmInOneTap() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
+        openMayDeck()
+        let baseline = pendingCount()
+
+        // MARK: Reject one photo -> the whole 4-photo burst cluster A is
+        // cued for delete (no accept happened, so confirmResolution's "no
+        // acceptedAssetID" branch cues every group member, none kept).
+        openCompare()
+        let reject = app.buttons["compare.reject"].firstMatch
+        XCTAssertTrue(reject.waitForExistence(timeout: 5), "Reject button should exist")
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        let confirmButton = app.buttons["compare.confirm"]
+        XCTAssertTrue(confirmButton.isEnabled, "Confirm should be enabled once a photo is rejected")
+        confirmButton.tap()
+
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 10), "Confirming should return to the deck")
+        let afterConfirm = pendingCount()
+        XCTAssertGreaterThan(afterConfirm, baseline,
+                             "Confirming Compare should cue group members for delete, raising pendingCount above baseline \(baseline)")
+
+        // Badge check, not just the count: thumb.0 is cluster A's first
+        // member, unconditionally cued by this reject-only resolution. Its
+        // accessibilityValue (not its frame — this repo's filmstrip AX
+        // frames don't track real geometry, see check_filmstrip_overlap.py)
+        // is what FilmstripThumbnail reports its badge state through.
+        let thumb0 = app.descendants(matching: .any)["filmstrip.thumb.0"].firstMatch
+        XCTAssertTrue(thumb0.waitForExistence(timeout: 5), "Cluster A's first photo should still be in the strip (hideSorted is off)")
+        XCTAssertEqual(thumb0.value as? String, "pending",
+                       "Cluster A's first photo should show the pending (red X) badge right after Compare confirm")
+        capture("36-undo-compare-confirm-pending", delay: 0.3)
+
+        // MARK: One undo tap -> the WHOLE resolution reverses.
+        let undoButton = app.buttons["deck.undo"]
+        XCTAssertTrue(undoButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(undoButton.isEnabled,
+                      "Undo should be enabled right after a Compare confirm — this is exactly the bug: Compare confirm used to push no undo entry at all, so this button stayed permanently disabled whenever it was the only pending action")
+        undoButton.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+
+        let afterUndo = pendingCount()
+        XCTAssertEqual(afterUndo, baseline,
+                       "One undo tap should reverse the ENTIRE Compare confirm batch, returning pendingCount to baseline \(baseline), got \(afterUndo)")
+        XCTAssertEqual(thumb0.value as? String, "unsorted",
+                       "Cluster A's first photo's X badge should be gone after undo, not just the numeric count")
+        capture("37-undo-compare-confirm-restored", delay: 0.3)
+
+        // MARK: Compare re-offers the group after undo — un-resolving is
+        // part of a correct undo, otherwise the user can restore the photos
+        // but can never re-run the comparison that cued them.
+        let comparePillAfterUndo = app.buttons["deck.comparePill"]
+        XCTAssertTrue(comparePillAfterUndo.waitForExistence(timeout: 10),
+                      "Compare pill should reappear on the burst-cluster card after undoing its confirm — the group must be un-resolved, not just the photos restored")
+    }
+
+    /// Coverage hole found this session: every earlier Compare-confirm test
+    /// (test06/32/33/34) only ever asserted the numeric `deck.pendingCount`
+    /// badge, never the filmstrip's own per-photo badges. Checks both
+    /// hideSorted states after the SAME confirm: with it OFF, cued photos
+    /// stay in the strip and must show the pending (X) badge; with it ON,
+    /// the "any marked" filter (see DeckViewModel.refresh's doc comment)
+    /// must drop them from the strip ENTIRELY — not just hide their badge,
+    /// remove the cell.
+    func test35FilmstripBadgesAfterCompareConfirmBothToggleStates() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
+        openMayDeck()
+
+        // MARK: Reject -> whole cluster A (thumb.0-3) cued; May's 5th photo
+        // (5/18, standalone — not part of the burst) lands at thumb.4,
+        // untouched by this confirm.
+        openCompare()
+        let reject = app.buttons["compare.reject"].firstMatch
+        XCTAssertTrue(reject.waitForExistence(timeout: 5), "Reject button should exist")
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        let confirmButton = app.buttons["compare.confirm"]
+        XCTAssertTrue(confirmButton.isEnabled, "Confirm should be enabled once a photo is rejected")
+        confirmButton.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["deck.card"].firstMatch.waitForExistence(timeout: 10),
+                      "Confirming should return to the deck")
+
+        // MARK: hideSorted OFF (the --reset-hide-sorted default) -> cued
+        // photos stay VISIBLE in the strip, each showing the pending badge.
+        for index in 0...3 {
+            let thumb = app.descendants(matching: .any)["filmstrip.thumb.\(index)"].firstMatch
+            XCTAssertTrue(thumb.waitForExistence(timeout: 5), "Cluster A member \(index) should be visible in the strip with hideSorted off")
+            XCTAssertEqual(thumb.value as? String, "pending", "Cluster A member \(index) should show the pending badge with hideSorted off")
+        }
+        let thumb4 = app.descendants(matching: .any)["filmstrip.thumb.4"].firstMatch
+        XCTAssertTrue(thumb4.waitForExistence(timeout: 5), "May's 5th (non-cluster) photo should also be visible")
+        XCTAssertEqual(thumb4.value as? String, "unsorted", "May's 5th photo was never touched by this Compare confirm")
+        capture("38-filmstrip-badges-hidesorted-off", delay: 0.3)
+
+        // MARK: hideSorted ON -> visibleAssets (what the strip is built
+        // over — see DeckView.positionAndFilmstrip) drops every cued/kept
+        // photo, so cluster A disappears from the strip entirely and only
+        // the untouched 5th photo remains, now at thumb.0.
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should offer the 'Sorted pics' toggle")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        tapOutside()
+
+        let thumb0AfterFilter = app.descendants(matching: .any)["filmstrip.thumb.0"].firstMatch
+        XCTAssertTrue(thumb0AfterFilter.waitForExistence(timeout: 5), "The one still-unsorted photo should remain in the strip")
+        XCTAssertEqual(thumb0AfterFilter.value as? String, "unsorted", "The remaining strip entry should be May's untouched 5th photo, not a cued one")
+        let thumb1AfterFilter = app.descendants(matching: .any)["filmstrip.thumb.1"].firstMatch
+        XCTAssertFalse(thumb1AfterFilter.exists, "Every cued cluster A member should be ABSENT from the strip with hideSorted on — not just badge-less, gone entirely")
+        capture("39-filmstrip-badges-hidesorted-on", delay: 0.3)
+    }
+
     /// Opens a month's deck, starts the frame monitor, performs several
     /// sustained drags, and returns the monitor's summary line.
     ///

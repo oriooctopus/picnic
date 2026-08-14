@@ -130,4 +130,22 @@ final class SortStore: ObservableObject {
         try? context.save()
         resolvedGroupCache.insert(groupKey)
     }
+
+    /// Inverse of `markGroupResolved` — for undoing a Compare confirm, so the
+    /// group goes back to offering its "Compare" pill instead of staying
+    /// permanently resolved. Deletes the persisted row AND drops the key
+    /// from `resolvedGroupCache`: `isGroupResolved` below reads exclusively
+    /// from the cache (see its own doc comment on why), so a version of this
+    /// that only deleted the SwiftData row would leave the cache stale and
+    /// undo would silently do nothing — the exact class of cache/read-path
+    /// split that bit `AppState.init`'s SortStore construction ordering
+    /// earlier this project.
+    func unresolveGroup(_ groupKey: String) {
+        let descriptor = FetchDescriptor<CompareGroupResolution>(predicate: #Predicate { $0.groupKey == groupKey })
+        for resolution in (try? context.fetch(descriptor)) ?? [] {
+            context.delete(resolution)
+        }
+        try? context.save()
+        resolvedGroupCache.remove(groupKey)
+    }
 }

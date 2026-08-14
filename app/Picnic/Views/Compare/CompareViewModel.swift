@@ -4,12 +4,17 @@ import Photos
 @MainActor
 final class CompareViewModel: ObservableObject {
     let group: CompareGroup
-    private let monthKey: String
-    private let sortStore: SortStore
     private let photoLibrary: PhotoLibraryService
-    /// Hands rejected assets to the deck's own pending-delete cue instead of
-    /// deleting them here — see confirmResolution()'s doc comment.
-    private let onResolve: ([PHAsset]) -> Void
+    /// Hands the WHOLE resolution — rejected assets, the accepted keeper (if
+    /// any), and the group's own id — to the deck's single mutation choke
+    /// point (`DeckViewModel.resolveCompareGroup`) instead of writing
+    /// SortState here. This view model used to call `sortStore.setState`
+    /// for the accepted photo directly, which made that half of a Compare
+    /// confirm invisible to the deck's undo stack — see
+    /// resolveCompareGroup's doc comment for why that mattered. There is now
+    /// no `SortStore` reference in this file at all: every persisted write a
+    /// Compare confirm causes goes through this one closure.
+    private let onResolve: (_ toDelete: [PHAsset], _ kept: PHAsset?, _ groupID: String) -> Void
 
     @Published var fileSizes: [String: Int64] = [:]
     @Published var acceptedAssetID: String?
@@ -29,14 +34,10 @@ final class CompareViewModel: ObservableObject {
 
     init(
         group: CompareGroup,
-        monthKey: String,
-        sortStore: SortStore,
         photoLibrary: PhotoLibraryService,
-        onResolve: @escaping ([PHAsset]) -> Void
+        onResolve: @escaping (_ toDelete: [PHAsset], _ kept: PHAsset?, _ groupID: String) -> Void
     ) {
         self.group = group
-        self.monthKey = monthKey
-        self.sortStore = sortStore
         self.photoLibrary = photoLibrary
         self.onResolve = onResolve
     }
@@ -79,6 +80,10 @@ final class CompareViewModel: ObservableObject {
     /// deletes" rule anymore — rejected members go into the deck's own
     /// pending-delete cue via `onResolve`, exactly like a swipe-left, and are
     /// only actually deleted later when the user presses the deck's X.
+    /// `onResolve` alone carries every write this resolution causes (cued
+    /// deletes, the kept photo, and marking the group resolved) — see the
+    /// `onResolve` doc comment above for why this view model no longer
+    /// touches SortStore itself.
     func confirmResolution() async {
         guard canConfirm else { return }
         isResolving = true
@@ -94,11 +99,7 @@ final class CompareViewModel: ObservableObject {
             kept = nil
         }
 
-        onResolve(toDelete)
-        if let kept {
-            sortStore.setState(.kept, for: kept, monthKey: monthKey)
-        }
-        sortStore.markGroupResolved(group.id)
+        onResolve(toDelete, kept, group.id)
         isResolved = true
     }
 }

@@ -1,9 +1,27 @@
 import SwiftUI
 import Photos
 
+/// One reversible batch of SortState writes, plus (optionally) the Compare
+/// group those writes resolved. A plain swipe (markForDelete/markKept)
+/// always pushes a one-element `changes` array, so its own undo behavior is
+/// unchanged from before this became a batch type. Compare's confirm is the
+/// reason this is a batch at all: it can cue 4+ photos for delete (plus mark
+/// one kept) in a single confirm tap, and the old shape — one assetID, one
+/// previousState — could only ever describe ONE of those writes. That's why
+/// a Compare confirm used to record no undo entry whatsoever (see
+/// `markPendingDelete`'s old doc comment, since replaced by
+/// `resolveCompareGroup` below): there was no way to push "reverse these 5
+/// writes as a unit" onto a stack shaped for exactly 1. `compareGroupID` is
+/// nil for a swipe (nothing to un-resolve) and carries the group's id when
+/// the batch came from Compare, so `undo()` knows to also call
+/// `SortStore.unresolveGroup` and let Compare offer that group again.
 struct UndoEntry {
-    let assetID: String
-    let previousState: SortState
+    struct Change {
+        let assetID: String
+        let previousState: SortState
+    }
+    let changes: [Change]
+    let compareGroupID: String?
 }
 
 @MainActor
@@ -195,7 +213,10 @@ final class DeckViewModel: ObservableObject {
     /// semantics #1) — the X commit button performs the real PhotoKit delete.
     func markForDelete() {
         guard let asset = currentAsset else { return }
-        undoStack.append(UndoEntry(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset)))
+        undoStack.append(UndoEntry(
+            changes: [.init(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset))],
+            compareGroupID: nil
+        ))
         sortStore.setState(.markedForDelete, for: asset, monthKey: month.key)
         // follow: nil, not this asset's ID: when hideSorted filters it out,
         // reanchorCurrentIndex's nil branch just clamps currentIndex into
@@ -218,22 +239,42 @@ final class DeckViewModel: ObservableObject {
         }
     }
 
-    /// Compare's confirm: mark an arbitrary batch of assets pending-delete,
-    /// same cue semantics as `markForDelete()` (CUE ONLY, no PhotoKit call
-    /// here) but for assets Compare picked, not `currentAsset` — so this
-    /// deliberately skips the undo stack and `advance()`, neither of which
-    /// make sense for a batch that doesn't come from swiping the current
-    /// card.
-    func markPendingDelete(_ assets: [PHAsset]) {
+    /// Compare's confirm: the deck's single choke point for everything one
+    /// Compare resolution writes — every rejected member cued for delete,
+    /// the accepted member (if any) marked kept, and the group itself marked
+    /// resolved — captured into exactly ONE undo batch. Previously
+    /// (`markPendingDelete`, this method's old name/shape) this only handled
+    /// the cued assets and deliberately skipped the undo stack entirely,
+    /// while CompareViewModel wrote the kept photo's SortState directly —
+    /// two separate mutation paths, neither undoable, for what the user
+    /// experiences as a single action. That made Compare's confirm the
+    /// least reversible action in the app (it can cue 4+ photos at once) and
+    /// also the one action with NO undo at all. Routing both writes through
+    /// here — the same choke point the swipe paths above already use — is
+    /// what lets `undo()` reverse a whole resolution in one tap, and what
+    /// keeps every SortState write behind this single source of truth (the
+    /// same rule `refresh(follow:)`'s doc comment establishes).
+    func resolveCompareGroup(toDelete: [PHAsset], keeping kept: PHAsset?, groupID: String) {
         // Captured before the marks (and therefore visibleAssets) change:
         // if the batch includes assets sitting before currentIndex, letting
         // those disappear under hideSorted shifts every later index down —
         // reanchoring by this identity is what keeps the deck showing the
         // same photo instead of silently jumping to a neighbor.
         let previousAssetID = currentAsset?.localIdentifier
-        for asset in assets {
+        var changes: [UndoEntry.Change] = []
+        for asset in toDelete {
+            // Previous state read BEFORE the write, same as every other
+            // undo-recording call site — reading it after would just record
+            // "was already markedForDelete" for everything.
+            changes.append(.init(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset)))
             sortStore.setState(.markedForDelete, for: asset, monthKey: month.key)
         }
+        if let kept {
+            changes.append(.init(assetID: kept.localIdentifier, previousState: sortStore.state(for: kept)))
+            sortStore.setState(.kept, for: kept, monthKey: month.key)
+        }
+        undoStack.append(UndoEntry(changes: changes, compareGroupID: groupID))
+        sortStore.markGroupResolved(groupID)
         refresh(follow: previousAssetID)
     }
 
@@ -244,7 +285,10 @@ final class DeckViewModel: ObservableObject {
 
     func markKept() {
         guard let asset = currentAsset else { return }
-        undoStack.append(UndoEntry(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset)))
+        undoStack.append(UndoEntry(
+            changes: [.init(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset))],
+            compareGroupID: nil
+        ))
         sortStore.setState(.kept, for: asset, monthKey: month.key)
         // See markForDelete()'s comment: follow: nil clamps currentIndex
         // into range, which both keeps a hideSorted-filtered photo's next
@@ -280,23 +324,40 @@ final class DeckViewModel: ObservableObject {
 
     func undo() {
         guard let last = undoStack.popLast() else { return }
-        // Write to SortStore, THEN refresh exactly once. This used to
-        // remove(_:) from pendingDeleteIDs first (firing its own didSet
-        // recompute against a marks state that hadn't been written to
-        // SortStore yet — i.e. against stale data) and only then write
-        // SortStore and recompute a second time. pendingDeleteIDs is now
-        // purely derived inside refresh(), so there's nothing to mutate
-        // ahead of the SortStore write, and exactly one refresh runs, against
-        // already-consistent state.
-        if let asset = orderedAssets.first(where: { $0.localIdentifier == last.assetID }) {
-            sortStore.setState(last.previousState, for: asset, monthKey: month.key)
+        // Write every change in the batch to SortStore, THEN refresh exactly
+        // once — not once per change. This used to remove(_:) from
+        // pendingDeleteIDs first (firing its own didSet recompute against a
+        // marks state that hadn't been written to SortStore yet — i.e.
+        // against stale data) and only then write SortStore and recompute a
+        // second time. pendingDeleteIDs is now purely derived inside
+        // refresh(), so there's nothing to mutate ahead of the SortStore
+        // writes, and exactly one refresh runs, against already-consistent
+        // state, regardless of whether the batch has 1 change or several.
+        for change in last.changes {
+            if let asset = orderedAssets.first(where: { $0.localIdentifier == change.assetID }) {
+                sortStore.setState(change.previousState, for: asset, monthKey: month.key)
+            }
+        }
+        // A Compare-confirm batch also resolved the group (markGroupResolved
+        // in resolveCompareGroup above) — reversing every asset's SortState
+        // without also un-resolving the group would half-undo the action:
+        // the photos come back, but the deck's own isGroupResolved() read
+        // (see DeckView's compareGroup computation) would still hide the
+        // Compare pill forever, leaving no way to re-run the comparison.
+        // Runs before refresh() below so SortStore's resolvedGroupCache is
+        // already updated by the time refresh()'s @Published writes trigger
+        // DeckView's next body evaluation (that's where isGroupResolved()
+        // is actually read).
+        if let groupID = last.compareGroupID {
+            sortStore.unresolveGroup(groupID)
         }
         // Un-sorting an asset can grow visibleAssets back (the restored photo
         // reappearing under hideSorted), which shifts every later index up —
         // a blind currentIndex - 1 would land on an arbitrary neighbor
-        // instead of the photo that was just undone. Reanchor by identity,
-        // same as the hideSorted-toggle path above.
-        refresh(follow: last.assetID)
+        // instead of the photo that was just undone. Reanchor by the first
+        // change's identity, same idea as the hideSorted-toggle path above
+        // (any member of the batch would do; the first is as good as any).
+        refresh(follow: last.changes.first?.assetID)
     }
 
     /// The single X commit: one PhotoKit batch delete (system confirm dialog

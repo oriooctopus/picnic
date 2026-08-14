@@ -170,10 +170,10 @@ struct DeckView: View {
             case .compare(let group):
                 CompareView(viewModel: CompareViewModel(
                     group: group,
-                    monthKey: viewModel.month.key,
-                    sortStore: appState.sortStore,
                     photoLibrary: appState.photoLibrary,
-                    onResolve: { viewModel.markPendingDelete($0) }
+                    onResolve: { toDelete, kept, groupID in
+                        viewModel.resolveCompareGroup(toDelete: toDelete, keeping: kept, groupID: groupID)
+                    }
                 ))
             case .livePhoto(let livePhoto):
                 LivePhotoPlayerView(livePhoto: livePhoto) { presentation = nil }

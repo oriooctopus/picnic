@@ -150,6 +150,16 @@ private struct FilmstripThumbnail: View {
         // clipped 24x36 frame. Making the ZStack a single opaque accessibility
         // element means XCUITest reads its own (post-clip) frame instead.
         .accessibilityElement(children: .ignore)
+        // Exposes badge state for UI tests without touching geometry: this
+        // repo's own precedent (check_filmstrip_overlap.py's doc comment)
+        // is that XCUITest's reported AX *frames* stop tracking real
+        // rendered geometry, so a test can never trust "is the red X badge
+        // actually drawn" from a frame read. accessibilityValue carries no
+        // geometry at all — it's a plain string the cell reports on demand —
+        // so it's safe to assert on for "is this cell pending/kept/plain"
+        // the same way `pendingBadge.label` already is for the numeric
+        // count above it.
+        .accessibilityValue(isPendingDelete ? "pending" : (isKept ? "kept" : "unsorted"))
         .onTapGesture { onTap() }
         .task {
             if image == nil {
