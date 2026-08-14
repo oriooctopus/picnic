@@ -12,15 +12,6 @@ struct DeckView: View {
     /// thrown clear — the reference reveals the real next picture, not a grey
     /// placeholder.
     @State private var nextImage: UIImage?
-    /// Which asset `nextImage` was fetched for. Exists purely so
-    /// `loadCurrentImage()` can tell "the photo I'm about to show already
-    /// sits in `nextImage`" apart from "nothing has been prefetched for this
-    /// photo yet" — see that function's promotion step for why this is the
-    /// real fix for the hideSorted/filmstrip-tap flicker (onAdvance's
-    /// existing promotion only ever fires from advance(), which markForDelete/
-    /// markKept skip whenever hideSorted has already removed the swiped
-    /// asset — see DeckViewModel.markForDelete's guard comment).
-    @State private var nextImageAssetID: String?
     @State private var showHidePopover = false
     /// Plain @State on purpose: it holds the object without subscribing to it,
     /// so a drag repaints the tint and labels but never this view's body (and
@@ -172,7 +163,6 @@ struct DeckView: View {
             viewModel.onAdvance = {
                 currentImage = nextImage
                 nextImage = nil
-                nextImageAssetID = nil
             }
         }
         .fullScreenCover(item: $presentation) { item in
@@ -199,67 +189,12 @@ struct DeckView: View {
         }
     }
 
-    /// DEVICE-ONLY BUG (never reproduces in the simulator, at any month size —
-    /// see ThumbnailLoader.fullImage's `fromICloud` doc comment): this is the
-    /// only place `currentImage`/`nextImage` get assigned outside
-    /// `onAdvance`, and `onAdvance` only fires from `DeckViewModel.advance()`
-    /// — which `markForDelete`/`markKept` skip whenever hideSorted has
-    /// already filtered the swiped asset out (see their guard comments). So
-    /// under hideSorted, `currentAsset` changes identity with NO synchronous
-    /// image promotion at all, and this function's own first `await` is the
-    /// only thing standing between the swipe and a correct photo — on a
-    /// simulator's local library that await resolves in the same run-loop
-    /// tick and the gap is invisible; on a real phone with Optimize Storage
-    /// on it's a genuine network round trip, during which the card keeps
-    /// showing `currentImage`'s OLD value: the just-swiped photo, frozen on
-    /// screen while the "N OF M" counter has already moved on. Two
-    /// independent fixes live in this one function:
-    ///
-    /// A1 — promote an already-prefetched `nextImage` synchronously, before
-    /// the first `await` below, whenever it was fetched for the asset we're
-    /// about to show. This is exactly what happens whenever hideSorted drops
-    /// the swiped photo (the new `currentAsset` is the same one `nextImage`
-    /// was prefetched for two lines below) or when the filmstrip is tapped
-    /// one photo forward — both cases this closes identically. `advance()`'s
-    /// own promotion (DeckView.onAppear's `onAdvance` closure) is untouched
-    /// and keeps handling every other advance.
-    ///
-    /// A2 — `ThumbnailLoader.fullImage` wraps `PHImageManager.requestImage`
-    /// in `withCheckedContinuation` with no cancellation handling, so a
-    /// `.task(id:)` restart (this function's own caller) does NOT stop an
-    /// in-flight fetch — the continuation still resumes, and the code below
-    /// still runs, even though a newer invocation of this same function may
-    /// already be running (or have already finished) for a different asset.
-    /// Left ungated, whichever of two overlapping iCloud fetches happens to
-    /// return LAST wins, regardless of which asset it was actually for —
-    /// swipe A→B→C quickly enough and the card showing C can end up
-    /// permanently displaying A. `loadingID`/`startIndex` are captured before
-    /// the first `await` specifically so every assignment below can be
-    /// gated against the LIVE `viewModel.currentAsset` rather than the
-    /// (necessarily still-equal-to-itself) local `asset` — and `nextIndex`
-    /// is derived from the captured `startIndex`, not a fresh read of
-    /// `viewModel.currentIndex`, so a stale invocation can't prefetch for a
-    /// position that has since moved.
     private func loadCurrentImage() async {
         guard let asset = viewModel.currentAsset else {
-            currentImage = nil; nextImage = nil; nextImageAssetID = nil
+            currentImage = nil; nextImage = nil
             videoController.clear()
             return
         }
-
-        // A1: see this function's doc comment. Must run before any `await`
-        // — the whole point is closing the gap between currentAsset changing
-        // and the first suspension point below, not just shortening it.
-        if nextImageAssetID == asset.localIdentifier, let prefetched = nextImage {
-            currentImage = prefetched
-            nextImage = nil
-            nextImageAssetID = nil
-        }
-
-        // A2: captured now, used for every gate below.
-        let loadingID = asset.localIdentifier
-        let startIndex = viewModel.currentIndex
-
         if asset.mediaType == .video {
             // Poster frame first (cheap, shows immediately), then swap the
             // shared player onto this asset's item once PhotoKit hands one
@@ -274,31 +209,17 @@ struct DeckView: View {
             // Not a video card: make sure nothing keeps playing/decoding
             // behind a plain photo.
             videoController.clear()
-            let fetched = await ThumbnailLoader.fullImage(for: asset, targetSize: ThumbnailLoader.screenPixelSize)
-            // A2 gate: only trust this fetch if it's still for the asset
-            // actually on screen — see the doc comment above.
-            if viewModel.currentAsset?.localIdentifier == loadingID {
-                currentImage = fetched
-            }
+            currentImage = await ThumbnailLoader.fullImage(for: asset, targetSize: ThumbnailLoader.screenPixelSize)
         }
 
         // The card behind is dimmed and partly covered, so it is fetched at a
         // fraction of the size — enough to read, cheap enough not to compete
-        // with the card actually being dragged. Derived from `startIndex`
-        // (captured above `await`), not a fresh `viewModel.currentIndex`
-        // read — see A2 in the doc comment.
-        let nextIndex = startIndex + 1
-        guard viewModel.visibleAssets.indices.contains(nextIndex) else {
-            if viewModel.currentAsset?.localIdentifier == loadingID { nextImage = nil; nextImageAssetID = nil }
-            return
-        }
-        let nextAsset = viewModel.visibleAssets[nextIndex]
-        let fetchedNext = await ThumbnailLoader.fullImage(for: nextAsset, targetSize: CGSize(width: 600, height: 800))
-        // A2 gate, same reasoning as the currentImage assignment above.
-        if viewModel.currentAsset?.localIdentifier == loadingID {
-            nextImage = fetchedNext
-            nextImageAssetID = nextAsset.localIdentifier
-        }
+        // with the card actually being dragged.
+        let nextIndex = viewModel.currentIndex + 1
+        guard viewModel.visibleAssets.indices.contains(nextIndex) else { nextImage = nil; return }
+        nextImage = await ThumbnailLoader.fullImage(
+            for: viewModel.visibleAssets[nextIndex], targetSize: CGSize(width: 600, height: 800)
+        )
     }
 
     /// Top-right X (and the quiet drag-to-dismiss below): dismiss immediately
