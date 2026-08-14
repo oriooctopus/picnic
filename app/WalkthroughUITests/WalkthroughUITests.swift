@@ -1420,6 +1420,124 @@ final class WalkthroughUITests: XCTestCase {
         capture("31-filmstrip-after-scale-swipes", delay: 0.5)
     }
 
+    /// Reads the deck's pending-delete badge, treating its absence as 0 — the
+    /// badge view is only rendered `if viewModel.pendingDeleteIDs.count > 0`
+    /// (DeckView.swift), so "not present" and "present showing 0" are the
+    /// same state and a bare `.label` read would crash on the former.
+    private func pendingCount() -> Int {
+        let badge = app.staticTexts["deck.pendingCount"]
+        guard badge.exists else { return 0 }
+        return Int(badge.label) ?? 0
+    }
+
+    /// Diagnostic test for a claim about CompareViewModel's accept/reject
+    /// semantics (CompareViewModel.swift accept(_:)/reject(_:)/
+    /// confirmResolution()): accepting sets `acceptedAssetID` and clears
+    /// `rejectedAssetIDs`; rejecting inserts into `rejectedAssetIDs` and
+    /// clears `acceptedAssetID` — the two are mutually exclusive, whole-group
+    /// verdicts, not independent per-photo marks. confirmResolution() then
+    /// branches on `acceptedAssetID`: non-nil keeps that one photo and cues
+    /// every other group member for delete; nil (including "was accepted,
+    /// then a later reject wiped it") cues the ENTIRE group, including the
+    /// photo that was accepted first.
+    ///
+    /// This test accepts photo 1, then rejects photo 2, then confirms — on
+    /// the claim above, the accept is wiped by the reject, so all 4 members
+    /// of May's burst cluster A should end up cued for delete and NONE kept.
+    /// Written to assert the predicted (order-dependent) outcome: a pass
+    /// confirms the claim, a failure means the real semantics differ and the
+    /// actual pendingCount delta is the useful signal to report.
+    func test32CompareAcceptThenRejectDeletesWholeGroup() throws {
+        // Clean sort/hideSorted state: without this, an earlier test method
+        // in the same CI run could leave May's cluster A already resolved
+        // (test06 does exactly that) or the pendingCount baseline nonzero,
+        // making the +4 delta below unverifiable.
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
+        openMayDeck()
+        let baseline = pendingCount()
+
+        openCompare()
+        acceptFirstComparePhoto()
+
+        // Deterministic page-jump via the bottom thumbnail strip (see
+        // CompareView.swift's compare.thumb.N identifier) rather than a
+        // coordinate swipe on the TabView(.page) card — a swipe's landing
+        // page depends on gesture-threshold timing, and whether the
+        // not-yet-current page is even realized in the AX tree during the
+        // transition is undefined; tapping compare.thumb.1 sets pageIndex
+        // synchronously and unambiguously to the group's second photo.
+        let secondThumb = app.descendants(matching: .any)["compare.thumb.1"].firstMatch
+        XCTAssertTrue(secondThumb.waitForExistence(timeout: 5), "Second group member's thumbnail should exist in the bottom strip")
+        secondThumb.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+
+        let reject = app.buttons["compare.reject"].firstMatch
+        XCTAssertTrue(reject.waitForExistence(timeout: 5), "Reject button should exist on the second card")
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        capture("32-compare-accept-then-reject", delay: 0.3)
+
+        let confirmButton = app.buttons["compare.confirm"]
+        XCTAssertTrue(confirmButton.isEnabled, "Confirm should be enabled — canConfirm is true whenever rejectedAssetIDs is non-empty")
+        confirmButton.tap()
+
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 10), "Confirming should return to the deck")
+        XCTAssertFalse(app.staticTexts["Compare"].exists, "Compare header should be gone after confirming")
+
+        let afterConfirm = pendingCount()
+        capture("33-deck-after-accept-then-reject", delay: 0.3)
+        XCTAssertEqual(afterConfirm, baseline + 4,
+                       "Predicted (order-dependent) outcome: accept-then-reject wipes the accept, so all 4 group members are cued for delete (baseline \(baseline), observed \(afterConfirm))")
+    }
+
+    /// Companion to test32, same claim, opposite tap order, on a DIFFERENT
+    /// burst group (September's 3-photo cluster B) — confirmResolution()
+    /// marks a group resolved, so re-testing May's cluster A here would find
+    /// it already gone.
+    ///
+    /// Rejects photo 1, then accepts photo 2, then confirms — on the claim
+    /// above, the reject is wiped by the accept, so photo 2 should be kept
+    /// and the other 2 members (not photo 2) cued for delete. Compared with
+    /// test32, this is what actually proves or disproves tap-order-dependence:
+    /// same two actions (one accept, one reject) in the opposite order should
+    /// produce a different outcome if and only if the claim is correct.
+    func test33CompareRejectThenAcceptKeepsAccepted() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
+        openSeptemberDeck()
+        let baseline = pendingCount()
+
+        openCompare()
+        let reject = app.buttons["compare.reject"].firstMatch
+        XCTAssertTrue(reject.waitForExistence(timeout: 5), "Reject button should exist on the first card")
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+
+        let secondThumb = app.descendants(matching: .any)["compare.thumb.1"].firstMatch
+        XCTAssertTrue(secondThumb.waitForExistence(timeout: 5), "Second group member's thumbnail should exist in the bottom strip")
+        secondThumb.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+
+        let accept = app.buttons["compare.accept"].firstMatch
+        XCTAssertTrue(accept.waitForExistence(timeout: 5), "Accept button should exist on the second card")
+        accept.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        capture("34-compare-reject-then-accept", delay: 0.3)
+
+        let confirmButton = app.buttons["compare.confirm"]
+        XCTAssertTrue(confirmButton.isEnabled, "Confirm should be enabled — canConfirm is true whenever acceptedAssetID is set")
+        confirmButton.tap()
+
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 10), "Confirming should return to the deck")
+        XCTAssertFalse(app.staticTexts["Compare"].exists, "Compare header should be gone after confirming")
+
+        let afterConfirm = pendingCount()
+        capture("35-deck-after-reject-then-accept", delay: 0.3)
+        XCTAssertEqual(afterConfirm, baseline + 2,
+                       "Predicted (order-dependent) outcome: reject-then-accept wipes the reject, so only the 2 non-accepted group members are cued for delete (baseline \(baseline), observed \(afterConfirm))")
+    }
+
     /// Opens a month's deck, starts the frame monitor, performs several
     /// sustained drags, and returns the monitor's summary line.
     ///

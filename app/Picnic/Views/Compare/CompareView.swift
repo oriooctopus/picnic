@@ -124,6 +124,14 @@ struct CompareView: View {
                                 .fill(asset.localIdentifier == viewModel.acceptedAssetID ? Color.green : .clear)
                                 .frame(width: 6, height: 6)
                         }
+                        // Deterministic page-jump target for UI tests: swipe-based
+                        // paging on the TabView(.page) card can't reliably target
+                        // "page N" (adjacent pages may or may not be realized in
+                        // the AX tree during a transition), but this thumbnail's
+                        // own onTapGesture above sets pageIndex directly and
+                        // synchronously — tapping it is a deterministic way to
+                        // land on a specific group member's card.
+                        .accessibilityIdentifier("compare.thumb.\(index)")
                     }
                 }
             }
