@@ -101,6 +101,14 @@ final class WalkthroughUITests: XCTestCase {
     /// content to dismiss it — SwiftUI context menus and popovers on iOS
     /// dismiss on an outside tap.
     private func tapOutside() {
+        // TEMP PROBE: dump the ax tree while a popover may still be open, to
+        // confirm the real name/presence of UIKit's system-inserted popover
+        // dismiss-region element on this iOS version before committing to a
+        // `PopoverDismissRegion` lookup. Remove once confirmed.
+        let axDumpProbe = XCTAttachment(string: app.debugDescription)
+        axDumpProbe.name = "ax-dump-tapOutside-probe"
+        axDumpProbe.lifetime = .keepAlways
+        add(axDumpProbe)
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.04)).tap()
         Thread.sleep(forTimeInterval: 1.0)
     }
