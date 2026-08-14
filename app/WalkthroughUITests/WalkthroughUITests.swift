@@ -97,20 +97,41 @@ final class WalkthroughUITests: XCTestCase {
         }
     }
 
-    /// Tap a coordinate away from any popover/context-menu/action-sheet
-    /// content to dismiss it — SwiftUI context menus and popovers on iOS
-    /// dismiss on an outside tap.
+    /// Tap away from a popover to dismiss it. Prefers UIKit's
+    /// system-inserted dismiss-region element — a full-screen `Other` with
+    /// identifier `PopoverDismissRegion` (confirmed via an ax-tree dump
+    /// attached to CI run 31821936026, captured while the hide-sorted
+    /// popover was open: `Other, {{0,0},{390,844}}, identifier:
+    /// 'PopoverDismissRegion', label: 'dismiss popup'`) — over a blind
+    /// coordinate tap, which at a fixed `dy: 0.04` offset does not reliably
+    /// land inside that region (it's roughly the status bar) and was
+    /// letting the popover survive past screenshot baselines. Falls back to
+    /// the coordinate tap only when the region is absent, which is a
+    /// legitimate no-op for the several callers that invoke this
+    /// defensively with nothing presented.
+    ///
+    /// Then VERIFIES the dismissal instead of assuming it: waits for
+    /// `deck.hideSortedToggle` — the only popover this helper is ever used
+    /// to dismiss (every call site opens it via `deck.filter`) — to stop
+    /// existing, and fails loudly if it doesn't. A helper that silently
+    /// half-works is what let the filmstrip pixel-diff baseline get
+    /// captured with the popover still on screen in the first place.
+    /// "Never existed" (defensive callers) counts as success, not failure.
     private func tapOutside() {
-        // TEMP PROBE: dump the ax tree while a popover may still be open, to
-        // confirm the real name/presence of UIKit's system-inserted popover
-        // dismiss-region element on this iOS version before committing to a
-        // `PopoverDismissRegion` lookup. Remove once confirmed.
-        let axDumpProbe = XCTAttachment(string: app.debugDescription)
-        axDumpProbe.name = "ax-dump-tapOutside-probe"
-        axDumpProbe.lifetime = .keepAlways
-        add(axDumpProbe)
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.04)).tap()
+        let dismissRegion = app.otherElements["PopoverDismissRegion"]
+        if dismissRegion.waitForExistence(timeout: 2) {
+            dismissRegion.tap()
+        } else {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.04)).tap()
+        }
         Thread.sleep(forTimeInterval: 1.0)
+
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        if sortedPicsToggle.exists {
+            let toggleGone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: sortedPicsToggle)
+            XCTAssertEqual(XCTWaiter().wait(for: [toggleGone], timeout: 5), .completed,
+                           "tapOutside() failed to dismiss the hide-sorted popover")
+        }
     }
 
     /// Waits for `element` to exist; if it doesn't show up within the
