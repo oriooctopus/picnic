@@ -118,8 +118,19 @@ final class DeckViewModel: ObservableObject {
             ? orderedAssets.filter { (marks[$0.localIdentifier] ?? .unsorted) == .unsorted }
             : orderedAssets
 
+        // Grouped over orderedAssets, NOT visibleAssets: a burst is defined by
+        // when the photos were taken, not by how far through sorting you are.
+        // Building this from the filtered list meant that with hideSorted on,
+        // a burst of 4 where 2 were already sorted presented as a 2-photo
+        // group — or stopped offering Compare at all, since a group needs
+        // more than one member — so the comparison silently lost the very
+        // photos you were comparing against. Compare deliberately shows every
+        // member including filtered ones (CompareView renders
+        // `viewModel.group.assets` directly), and this is what makes that
+        // whole. hideSorted still governs what the DECK steps through; it
+        // just no longer redefines what a group is.
         var lookup: [String: CompareGroup] = [:]
-        for group in GroupingService.groups(in: visibleAssets) {
+        for group in GroupingService.groups(in: orderedAssets) {
             for member in group.assets {
                 lookup[member.localIdentifier] = group
             }
