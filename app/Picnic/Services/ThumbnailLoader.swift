@@ -7,6 +7,29 @@ import AVFoundation
 /// `.opportunistic` calls its result handler twice (low-res, then high-res),
 /// which would resume a checked continuation more than once and crash.
 enum ThumbnailLoader {
+    #if DEBUG
+    /// UI-test-only fault injection for the hideSorted-flicker bug (see
+    /// DeckView.loadCurrentImage's doc comment): a simulator's PhotoKit
+    /// library answers `requestImage` from local storage in the same
+    /// run-loop tick, so no CI run could ever land in the async gap that bug
+    /// lives in. `--slow-image-loads` stands in for a real device's iCloud
+    /// round trip (the same `fromICloud` case `fullImage` below already
+    /// measures) by delaying every full-image fetch. Read once into a
+    /// `static let` rather than re-checked per call: `ProcessInfo.arguments`
+    /// is fixed for the process's whole lifetime, so per-call re-scanning
+    /// would just be repeated work with no behavioral difference — and
+    /// `#if DEBUG` keeps this entirely out of the Release build the owner
+    /// installs, so it can never fire outside a test run.
+    static let slowImageLoadsEnabled = ProcessInfo.processInfo.arguments.contains("--slow-image-loads")
+    /// How long `--slow-image-loads` delays each full-image fetch. Long
+    /// enough that a UI test's "immediately after the swipe" screenshot
+    /// (taken well under a second later) reliably lands before this elapses,
+    /// short enough that a test suite exercising it twice per test (current
+    /// + prefetch, sequential awaits — see DeckView.loadCurrentImage)
+    /// doesn't balloon CI time.
+    static let slowImageLoadDelay: UInt64 = 2_500_000_000
+    #endif
+
     /// The device's real physical pixel dimensions (not points) — the
     /// correct upper-bound targetSize for any card that renders close to
     /// full-screen. The deck card and Compare's photo card were both
@@ -37,6 +60,11 @@ enum ThumbnailLoader {
     }
 
     static func fullImage(for asset: PHAsset, targetSize: CGSize) async -> UIImage? {
+        #if DEBUG
+        if slowImageLoadsEnabled {
+            try? await Task.sleep(nanoseconds: slowImageLoadDelay)
+        }
+        #endif
         let started = CACurrentMediaTime()
         return await withCheckedContinuation { continuation in
             let options = PHImageRequestOptions()

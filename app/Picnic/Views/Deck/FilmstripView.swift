@@ -8,6 +8,13 @@ struct FilmstripView: View {
     let isKept: (PHAsset) -> Bool
     let onSelect: (Int) -> Void
 
+    /// nil when `currentIndex` is out of range (e.g. the deck just emptied).
+    /// See the `.onChange(of: currentAssetID)` below for why this is keyed
+    /// on identity rather than the raw index.
+    private var currentAssetID: String? {
+        assets.indices.contains(currentIndex) ? assets[currentIndex].localIdentifier : nil
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
@@ -67,10 +74,25 @@ struct FilmstripView: View {
                     proxy.scrollTo(assets[currentIndex].localIdentifier, anchor: .center)
                 }
             }
-            .onChange(of: currentIndex) { _, newValue in
-                guard assets.indices.contains(newValue) else { return }
-                let targetID = assets[newValue].localIdentifier
-                withAnimation { proxy.scrollTo(targetID, anchor: .center) }
+            // Keyed on the current asset's IDENTITY, not its numeric index.
+            // DEVICE-ONLY BUG (see DeckView.loadCurrentImage's doc comment
+            // for the sibling half of this same report): under hideSorted,
+            // the swiped asset is removed from `assets` and the NEXT asset
+            // slides into the same numeric slot, so `currentIndex` itself
+            // often never changes value across an entire sorting session —
+            // this `.onChange(of: currentIndex)` then never fires at all,
+            // and `proxy.scrollTo` never runs again after the very first
+            // `.onAppear` scroll. Meanwhile every cell after the removed one
+            // shifts one slot left (still keyed by asset id — see the
+            // ForEach's own doc comment above) while the scroll offset stays
+            // put, so the current-cell border visibly walks toward the
+            // leading edge, one cell per swipe, for the rest of the session.
+            // `currentAssetID` changes on every swipe regardless of whether
+            // the numeric index moved, so this fires every time and keeps
+            // re-centering — the same recipe `.onAppear` below already uses.
+            .onChange(of: currentAssetID) { _, newValue in
+                guard let newValue else { return }
+                withAnimation { proxy.scrollTo(newValue, anchor: .center) }
             }
         }
     }

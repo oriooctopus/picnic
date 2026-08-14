@@ -252,6 +252,26 @@ jobs:
           python3 -m pip install --quiet --break-system-packages pillow
           python3 .github/scripts/check_filmstrip_visually_updated.py "$BEFORE" "$AFTER"
 
+      # Real assertion for test36DeckCardUpdatesImmediatelyUnderHideSortedWithSlowLoad
+      # (the owner's real-device report, reproduced directly against the big
+      # card rather than the filmstrip's side effects): --slow-image-loads
+      # stands in for the iCloud round trip a simulator can never hit, and
+      # this diffs the card's dominant colour between the pre-swipe and
+      # immediately-post-swipe screenshots — a frozen card (still showing the
+      # swiped-away photo) fails here even though nothing else in this job
+      # would catch it.
+      - name: Check deck card updates immediately after a hideSorted swipe (pixel measurement)
+        if: always()
+        run: |
+          BEFORE="screenshots/40-deck-card-before-swipe.png"
+          AFTER="screenshots/41-deck-card-immediately-after-swipe.png"
+          if [ ! -f "$BEFORE" ] || [ ! -f "$AFTER" ]; then
+            echo "Missing $BEFORE or $AFTER (likely an only_testing run that excluded test36DeckCardUpdatesImmediatelyUnderHideSortedWithSlowLoad) — skipping."
+            exit 0
+          fi
+          python3 -m pip install --quiet --break-system-packages pillow
+          python3 .github/scripts/check_deck_card_not_frozen.py "$BEFORE" "$AFTER"
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4

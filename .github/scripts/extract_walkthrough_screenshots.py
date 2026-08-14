@@ -46,6 +46,7 @@ REQUIRED = [
     "27-deck-swipe-down-from-top-exit", "28-compare-mismatched-aspect",
     "29-filmstrip-thumbs-after-hidesorted-swipe",
     "30-filmstrip-before-scale-swipes", "31-filmstrip-after-scale-swipes",
+    "40-deck-card-before-swipe", "41-deck-card-immediately-after-swipe",
 ]
 
 # Best-effort: one per test method, captured in tearDown. See module

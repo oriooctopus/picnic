@@ -1394,6 +1394,18 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(sortedPicsToggle.value as? String, "on",
                        "Hide-sorted toggle did not turn on — every assertion below would measure the wrong mode")
         tapOutside()
+        // check_filmstrip_visually_updated.py diffs this screenshot's
+        // filmstrip band against "31-filmstrip-after-scale-swipes" pixel for
+        // pixel — a baseline captured while the popover still overlaps the
+        // strip would bake the popover's own chrome into the "before" band,
+        // which can never match the "after" shot either way and makes the
+        // diff meaningless regardless of whether the filmstrip itself is
+        // broken. `tapOutside()` above is trusted to have dismissed it, but
+        // this is what actually PROVES that before the screenshot most
+        // responsible for the whole check gets taken, rather than assuming
+        // the dismiss tap landed.
+        XCTAssertFalse(sortedPicsToggle.exists,
+                       "Hide-sorted popover should be fully dismissed before capturing the pixel-diff baseline")
 
         var total = totalCount(fromPosition: position.label)
         XCTAssertEqual(total, Self.largeMonthCount,
@@ -1668,6 +1680,78 @@ final class WalkthroughUITests: XCTestCase {
         let thumb1AfterFilter = app.descendants(matching: .any)["filmstrip.thumb.1"].firstMatch
         XCTAssertFalse(thumb1AfterFilter.exists, "Every cued cluster A member should be ABSENT from the strip with hideSorted on — not just badge-less, gone entirely")
         capture("39-filmstrip-badges-hidesorted-on", delay: 0.3)
+    }
+
+    /// Reproduces the owner's real-device report DIRECTLY, not just via the
+    /// filmstrip's side effects (test27/28/30/31 above): with "Hide Sorted
+    /// Pics" ON, swiping should never leave the BIG CARD showing the
+    /// just-swiped photo, even for one frame, while a fresh fetch is still
+    /// in flight. A simulator's local PhotoKit library answers
+    /// `PHImageManager.requestImage` in the same run-loop tick, so no CI run
+    /// could ever land inside the async gap this bug lives in — that's
+    /// exactly what `--slow-image-loads` (DEBUG-only, see
+    /// `ThumbnailLoader.slowImageLoadsEnabled`) exists to stand in for.
+    ///
+    /// Seeded photos are flat, numbered colour cards (SeedLibrary.swift) —
+    /// May's burst cluster assigns a distinct systemColor per asset — so
+    /// "is the card still showing the swiped photo" is a real question a
+    /// pixel comparison can answer and an accessibility read cannot (this
+    /// repo's AX frames don't track rendered geometry — see
+    /// check_filmstrip_overlap.py's precedent). check_deck_card_not_frozen.py
+    /// does that comparison between this test's "before" and "immediately
+    /// after" screenshots.
+    ///
+    /// This is the test the brief that produced this fix asked to be proven
+    /// red-then-green: it must FAIL against DeckView.loadCurrentImage before
+    /// the A1 promotion step exists, and PASS after.
+    func test36DeckCardUpdatesImmediatelyUnderHideSortedWithSlowLoad() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state", "--slow-image-loads"])
+        let deckCard = openMayDeck()
+
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should offer the 'Sorted pics' toggle")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        // A silently-missed toggle tap has already wasted several CI runs
+        // this session (see test31's doc comment) — retry once, then assert
+        // the toggle genuinely reads "on" before trusting anything below.
+        if sortedPicsToggle.exists, sortedPicsToggle.value as? String != "on" {
+            sortedPicsToggle.tap()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        XCTAssertEqual(sortedPicsToggle.value as? String, "on",
+                       "Hide-sorted toggle did not turn on — this test would otherwise measure the wrong mode")
+        tapOutside()
+        XCTAssertFalse(sortedPicsToggle.exists,
+                       "Hide-sorted popover should be fully dismissed before capturing the pixel baseline below")
+
+        // --slow-image-loads delays EVERY full-image fetch by
+        // ThumbnailLoader.slowImageLoadDelay, and loadCurrentImage() awaits
+        // two of them sequentially per card (currentImage, then the
+        // nextImage prefetch) — so the very first card needs roughly double
+        // that delay to fully settle, including its own nextImage prefetch,
+        // before this test swipes. Without waiting this long, nextImage
+        // might still be nil when the swipe happens, which would exercise a
+        // different (also-correct) code path — the black-background case in
+        // A1's doc comment — rather than the promotion this test exists to
+        // prove.
+        Thread.sleep(forTimeInterval: 6.0)
+
+        capture("40-deck-card-before-swipe", delay: 0.2)
+
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+
+        // Deliberately far shorter than slowImageLoadDelay (2.5s) — this
+        // captures the exact window where, pre-fix, currentImage still held
+        // the swiped-away photo. `capture`'s own settle delay is the only
+        // wait here; anything longer would let the artificial delay elapse
+        // and hide the bug this test exists to catch.
+        capture("41-deck-card-immediately-after-swipe", delay: 0.15)
     }
 
     /// Opens a month's deck, starts the frame monitor, performs several

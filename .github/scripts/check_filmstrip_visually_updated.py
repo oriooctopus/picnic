@@ -36,6 +36,22 @@ from PIL import Image
 MIN_CHANGED_FRACTION = 0.05
 PIXEL_THRESH = 24
 
+# Whole-band MIN_CHANGED_FRACTION alone is satisfiable even when the ACTUAL
+# regression this test chases (see FilmstripView's `.onChange(of:
+# currentAssetID)` doc comment) is present: every cell keeps its identity
+# keying (asset localIdentifier, not array index — see FilmstripView's
+# ForEach comment), so removing a swiped asset always shifts later cells'
+# CONTENT left by one slot regardless of whether the scroll offset ever
+# follows — that content shift alone changes plenty of band pixels even with
+# the strip frozen at its original scroll position. What a frozen scroll
+# offset actually breaks is the CENTER of the band no longer tracking the
+# current photo — the strip keeps showing whichever cells originally
+# scrolled into the middle, while newly-current cells shift in unnoticed at
+# the leading edge. Requiring the CENTER THIRD alone to clear its own
+# (lower, because it's a narrower sample) threshold is what actually targets
+# that failure mode instead of the whole-band check's easily-satisfied one.
+CENTER_MIN_CHANGED_FRACTION = 0.03
+
 
 def load(path):
     im = Image.open(path).convert("RGB")
@@ -135,24 +151,47 @@ def main():
     bottom = max(before_band[1], after_band[1])
     print(f"Filmstrip band: before={before_band} after={after_band} (comparing y=[{top},{bottom}])")
 
+    center_x0 = bw // 3
+    center_x1 = 2 * bw // 3
+
     changed = 0
     total = 0
+    center_changed = 0
+    center_total = 0
     for x in range(0, bw, 2):
+        in_center = center_x0 <= x < center_x1
         for y in range(top, bottom + 1, 2):
             total += 1
-            if dist(before_px[x, y], after_px[x, y]) > PIXEL_THRESH:
+            is_diff = dist(before_px[x, y], after_px[x, y]) > PIXEL_THRESH
+            if is_diff:
                 changed += 1
+            if in_center:
+                center_total += 1
+                if is_diff:
+                    center_changed += 1
 
     frac = changed / total if total else 0.0
-    print(f"Changed pixels: {changed}/{total} ({frac:.1%})")
+    center_frac = center_changed / center_total if center_total else 0.0
+    print(f"Changed pixels: {changed}/{total} ({frac:.1%}); center third: {center_changed}/{center_total} ({center_frac:.1%})")
 
+    failures = []
     if frac < MIN_CHANGED_FRACTION:
-        print(f"FAIL: filmstrip band looks essentially unchanged after 5 swipes "
-              f"({frac:.1%} of sampled pixels differ, need >= {MIN_CHANGED_FRACTION:.0%}) — "
-              f"the strip is not visually updating, matching the owner's real-device report")
+        failures.append(f"whole band looks essentially unchanged after 5 swipes "
+                         f"({frac:.1%} of sampled pixels differ, need >= {MIN_CHANGED_FRACTION:.0%})")
+    if center_frac < CENTER_MIN_CHANGED_FRACTION:
+        failures.append(f"center third of the band (where the current photo should stay scrolled to) "
+                         f"barely changed ({center_frac:.1%}, need >= {CENTER_MIN_CHANGED_FRACTION:.0%}) — "
+                         f"cells can shift content at the leading edge from array removal alone even when "
+                         f"the strip never re-scrolls to follow the current photo (see FilmstripView's "
+                         f"`.onChange(of: currentAssetID)` doc comment); this is what actually catches that")
+
+    if failures:
+        print("FAIL: strip is not genuinely visually updating, matching the owner's real-device report:")
+        for f in failures:
+            print(f"  - {f}")
         return 1
 
-    print(f"PASS: filmstrip band visibly changed after swiping ({frac:.1%} of sampled pixels differ)")
+    print(f"PASS: filmstrip band visibly changed after swiping ({frac:.1%} whole band, {center_frac:.1%} center third)")
     return 0
 
 
