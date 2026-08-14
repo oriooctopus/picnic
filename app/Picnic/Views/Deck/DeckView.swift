@@ -250,11 +250,14 @@ struct DeckView: View {
         // A1: see this function's doc comment. Must run before any `await`
         // — the whole point is closing the gap between currentAsset changing
         // and the first suspension point below, not just shortening it.
-        if nextImageAssetID == asset.localIdentifier, let prefetched = nextImage {
-            currentImage = prefetched
-            nextImage = nil
-            nextImageAssetID = nil
-        }
+        //
+        // TEMP (scratch branch _test36-red-check3, not for merge): promotion
+        // disabled to prove test36 fails red without it before restoring.
+        // if nextImageAssetID == asset.localIdentifier, let prefetched = nextImage {
+        //     currentImage = prefetched
+        //     nextImage = nil
+        //     nextImageAssetID = nil
+        // }
 
         // A2: captured now, used for every gate below.
         let loadingID = asset.localIdentifier
