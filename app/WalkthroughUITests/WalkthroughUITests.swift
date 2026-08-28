@@ -32,7 +32,7 @@ final class WalkthroughUITests: XCTestCase {
         // already isolated from the others by XCTest itself.
         continueAfterFailure = true
         app = XCUIApplication()
-        app.launchArguments = ["--seed-library"]
+        app.launchArguments = Self.baseLaunchArguments
 
         if let dir = ProcessInfo.processInfo.environment["WALKTHROUGH_SCREENSHOT_DIR"] {
             let url = URL(fileURLWithPath: dir)
@@ -1906,8 +1906,46 @@ final class WalkthroughUITests: XCTestCase {
     /// extra seeding without making every other test pay for it.
     private func relaunch(withExtraArguments extra: [String]) {
         app.terminate()
-        app.launchArguments = ["--seed-library"] + extra
+        app.launchArguments = Self.baseLaunchArguments + extra
         app.launch()
         dismissPhotoPermissionSheetIfPresent()
+    }
+
+    /// Every test starts from the My Life grid (openMyLifeGrid asserts the
+    /// header on launch), so the app's launch-into-latest-deck behaviour is
+    /// switched off here and covered on its own by
+    /// test37LaunchOpensLatestMonthDeck, which launches without the flag.
+    private static let baseLaunchArguments = ["--seed-library", "--skip-auto-open-deck"]
+
+    /// A cold launch should land in the newest month's deck (March 2026 is
+    /// the latest month SeedLibrary writes), not on the grid; closing that
+    /// deck returns to the grid, and leaving/re-entering the My Life tab must
+    /// not open it a second time. Launches WITHOUT --skip-auto-open-deck —
+    /// this is the only test on the real launch path.
+    func test37LaunchOpensLatestMonthDeck() throws {
+        app.terminate()
+        app.launchArguments = ["--seed-library"]
+        app.launch()
+        dismissPhotoPermissionSheetIfPresent()
+
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 120),
+                      "Launch should open a deck without any grid tap")
+        XCTAssertTrue(app.staticTexts["March 2026"].waitForExistence(timeout: 5),
+                      "Auto-opened deck should be the NEWEST seeded month (March 2026), not whichever bucket PhotoKit listed first")
+        capture("37-launch-latest-deck")
+
+        // Nothing pending, so X is a plain dismiss back to the grid.
+        app.buttons["deck.commit"].tap()
+        XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 10),
+                      "Closing the auto-opened deck should show the grid")
+
+        // One-shot: coming back to the tab must not re-open the deck.
+        app.buttons["tab.utilities"].tap()
+        XCTAssertTrue(app.staticTexts["Utilities"].waitForExistence(timeout: 5))
+        app.buttons["tab.myLife"].tap()
+        XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 5))
+        XCTAssertFalse(deckCard.waitForExistence(timeout: 3),
+                       "Returning to the My Life tab re-opened the deck — auto-open must fire once per launch")
     }
 }

@@ -31,13 +31,19 @@ struct ComparePhotoCardView: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 24).fill(Color(white: 0.08))
                 if let image {
+                    // .fit, not .fill, to match the deck card
+                    // (PicnicSwipeCard.imageView.contentMode = .scaleAspectFit):
+                    // .fill cropped every photo whose aspect ratio differed
+                    // from this box, so the same photo looked zoomed-in here
+                    // vs. the deck. Landscape/square sources letterbox onto
+                    // the dark rounded fill instead.
                     Image(uiImage: image)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
+                        .aspectRatio(contentMode: .fit)
                 }
             }
             // .frame BEFORE .clipShape, on the ZStack itself: an unframed
-            // .aspectRatio(.fill) Image reports its own oversized ideal
+            // aspect-ratio'd Image reports its own oversized ideal
             // layout size (its intrinsic pixel dimensions) whenever the
             // source's aspect ratio doesn't match the box, not just its
             // drawn/clipped size — same defect class as the deck filmstrip

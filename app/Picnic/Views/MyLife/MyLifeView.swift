@@ -98,7 +98,14 @@ struct MyLifeView: View {
             .onAppear {
                 scrollProxy = proxy
                 appState.refreshMonths()
+                autoOpenLatestMonthIfNeeded()
             }
+            // monthBuckets fills in whenever PhotoKit answers (authorization
+            // resolves after this view's onAppear on a cold launch), and on
+            // CI the first answer is the simulator's stock photos, before
+            // seeding — so watch both signals rather than either alone.
+            .onChange(of: appState.monthBuckets.map(\.id)) { _, _ in autoOpenLatestMonthIfNeeded() }
+            .onChange(of: appState.isSeeding) { _, _ in autoOpenLatestMonthIfNeeded() }
         }
         .overlay(alignment: .bottom) {
             if showScrollTop {
@@ -125,6 +132,21 @@ struct MyLifeView: View {
             .onDisappear { appState.refreshMonths() }
         }
         .background(Color.black.ignoresSafeArea())
+    }
+
+    /// Cold launch opens straight into the newest month's deck (monthBuckets
+    /// is already newest-first). Waits for seeding to finish so CI doesn't
+    /// open whichever stock simulator month PhotoKit reported first.
+    private func autoOpenLatestMonthIfNeeded() {
+        guard !appState.hasAutoOpenedLatestMonth,
+              !appState.skipAutoOpenDeck,
+              !appState.isSeeding,
+              let latest = appState.monthBuckets.first else { return }
+        appState.hasAutoOpenedLatestMonth = true
+        // No slide-up: the deck should read as the screen the app opened on.
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { selectedMonth = latest }
     }
 
     private var header: some View {

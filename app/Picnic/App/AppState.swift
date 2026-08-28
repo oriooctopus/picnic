@@ -25,6 +25,17 @@ final class AppState: ObservableObject {
     // ever resumes — setting this flag any later than init() reopens the
     // exact race it exists to close.
     @Published private(set) var isSeeding: Bool
+    // Launch lands directly in the most recent month's deck (the common
+    // case is "sort the newest photos", so skip the grid tap). One-shot per
+    // process, and kept here rather than as MyLifeView @State because
+    // RootTabView rebuilds MyLifeView on every tab switch — a view-local
+    // flag would re-open the deck each time the user came back to My Life.
+    var hasAutoOpenedLatestMonth = false
+    // Debug-only, UI-test-only: most walkthrough tests script their own
+    // navigation from the grid and would otherwise have to dismiss the
+    // auto-opened deck first. The one test that covers the auto-open itself
+    // launches WITHOUT this flag.
+    let skipAutoOpenDeck: Bool
 
     private let modelContext: ModelContext
 
@@ -41,6 +52,7 @@ final class AppState: ObservableObject {
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
         isSeeding = args.contains("--seed-library") || args.contains("--seed-large-month")
+        skipAutoOpenDeck = args.contains("--skip-auto-open-deck")
         // Debug-only, UI-test-only: DeckViewModel.hideSorted is backed by a
         // UserDefaults key that survives both app relaunches and — since the
         // simulator's defaults plist isn't wiped between test methods — every
@@ -77,6 +89,7 @@ final class AppState: ObservableObject {
         }
         #else
         isSeeding = false
+        skipAutoOpenDeck = false
         #endif
         // Constructed here, after the reset block above — see the
         // LOAD-BEARING ORDERING comment at the top of init().
