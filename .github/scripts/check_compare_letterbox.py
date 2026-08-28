@@ -80,7 +80,12 @@ ROW_COL_MATCH_FRAC = 0.25
 # Expected height/width for an 800x600 source under `.fit` in a
 # taller-than-wide box is 600/800 = 0.75 exactly; this window absorbs
 # rounding from corner clipping and sampling step.
-RATIO_MIN, RATIO_MAX = 0.70, 0.80
+RATIO_MIN, RATIO_MAX = 0.73, 0.77
+# The Compare card box is full-bleed (box left/right == screen edges), so a
+# width-limited .fit band must span (nearly) the whole screen width. A .fit
+# image drawn inside a shrunken frame keeps the right ratio and the right
+# bars but comes out narrower — this is the check that catches it.
+MIN_BAND_WIDTH_FRAC = 0.95
 
 # How far above/below the measured band to look for the box's dark fill,
 # and how much of that probe row may deviate before it counts as "not dark
@@ -187,7 +192,11 @@ def main():
     print(f"Dark-fill match fraction directly above band: {above_frac}")
     print(f"Dark-fill match fraction directly below band: {below_frac}")
 
+    width_frac = band_w / w
+    print(f"Band width as fraction of screen width: {width_frac:.3f} (expect >= {MIN_BAND_WIDTH_FRAC})")
+
     ratio_ok = RATIO_MIN <= ratio <= RATIO_MAX
+    width_ok = width_frac >= MIN_BAND_WIDTH_FRAC
     bars_ok = (
         above_frac is not None and above_frac >= DARK_BAR_MATCH_FRAC
         and below_frac is not None and below_frac >= DARK_BAR_MATCH_FRAC
@@ -202,7 +211,11 @@ def main():
               "with .fit, the box's own dark fill (~RGB(20,20,20)) should show there; its absence "
               "means the photo is covering the box edge-to-edge, i.e. cropped (.fill)")
 
-    if not (ratio_ok and bars_ok):
+    if not width_ok:
+        print(f"FAIL: band width is only {width_frac:.3f} of the screen width — the photo is not "
+              f"width-limited inside the full-bleed box, i.e. it is being drawn in a smaller frame")
+
+    if not (ratio_ok and width_ok and bars_ok):
         return 1
 
     print(f"PASS: band is aspect-fit (ratio {ratio:.3f}) with letterbox bars above and below")
