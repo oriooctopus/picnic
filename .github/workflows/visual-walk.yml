@@ -272,6 +272,27 @@ jobs:
           python3 -m pip install --quiet --break-system-packages pillow
           python3 .github/scripts/check_deck_card_not_frozen.py "$BEFORE" "$AFTER"
 
+      # Real assertion for test38CompareLandscapePhotoIsNotCropped: Compare
+      # used to draw its photo with .aspectRatio(contentMode: .fill), which
+      # crops a source photo to fill the (roughly portrait) card box instead
+      # of shrinking it to fit inside — so a landscape photo came out zoomed
+      # in and cut off, unlike the same photo in Deck (.scaleAspectFit). This
+      # measures the actual rendered band of November's landscape burst
+      # cluster in the "42-compare-landscape-not-cropped" screenshot: its
+      # aspect ratio should match .fit (~0.75 for an 800x600 source) with
+      # dark letterbox bars above and below, not the box's own taller aspect
+      # ratio with no bars at all (what .fill produces).
+      - name: Check Compare photo is aspect-fit, not cropped (pixel measurement)
+        if: always()
+        run: |
+          SHOT="screenshots/42-compare-landscape-not-cropped.png"
+          if [ ! -f "$SHOT" ]; then
+            echo "No $SHOT (likely an only_testing run that excluded test38CompareLandscapePhotoIsNotCropped) — skipping."
+            exit 0
+          fi
+          python3 -m pip install --quiet --break-system-packages pillow
+          python3 .github/scripts/check_compare_letterbox.py "$SHOT"
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4

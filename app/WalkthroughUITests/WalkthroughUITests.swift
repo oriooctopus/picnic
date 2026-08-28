@@ -266,6 +266,31 @@ final class WalkthroughUITests: XCTestCase {
         return deckCard
     }
 
+    /// From the My Life grid, taps the 2025-11 month to enter Deck view on
+    /// its first card (burst cluster C -> Compare pill visible). Neither
+    /// cluster A (May) nor cluster B (September) is safe to reuse for a new
+    /// Compare-reaching test added after test33: test32 (May) and test33
+    /// (September) both TAP CONFIRM on their group, which permanently
+    /// resolves it (sortStore persists across relaunches within a job — see
+    /// confirmResolution's markGroupResolved), and both sort alphabetically
+    /// before any test3-8-and-up method — so by the time a later test in a
+    /// full-suite run reaches either month, its Compare pill is gone.
+    /// November's cluster C is landscape (800x600, like cluster B) but no
+    /// test ever confirms it, so its pill survives regardless of run order.
+    @discardableResult
+    private func openNovemberDeck() -> XCUIElement {
+        openMyLifeGrid()
+        let novemberMonth = app.descendants(matching: .any)["monthCard.2025-11"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(novemberMonth, initialTimeout: 30),
+                      "Seeded month 2025-11 (burst cluster C) should appear in the grid")
+        novemberMonth.tap()
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 20), "Deck first card should appear")
+        XCTAssertTrue(app.staticTexts["November 2025"].waitForExistence(timeout: 5),
+                      "Deck header should show November 2025 — a different month means the grid tap resolved to the wrong card")
+        return deckCard
+    }
+
     /// From Deck view on the burst-cluster card, taps the Compare pill and
     /// waits for the Compare view to appear.
     private func openCompare() {
@@ -1947,5 +1972,44 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 5))
         XCTAssertFalse(deckCard.waitForExistence(timeout: 3),
                        "Returning to the My Life tab re-opened the deck — auto-open must fire once per launch")
+    }
+
+    /// Regression test for the bug this session fixes: ComparePhotoCardView
+    /// drew its photo with `.aspectRatio(contentMode: .fill)`, which crops a
+    /// source photo to fill the box instead of shrinking it to fit inside —
+    /// so any photo whose aspect ratio didn't match Compare's (roughly
+    /// portrait) card got zoomed in, cutting off its edges, even though the
+    /// SAME photo shows uncropped in Deck (PicnicSwipeCard's imageView is
+    /// `.scaleAspectFit`, see PicnicSwipeCard.swift:156). November's burst
+    /// cluster C is landscape (800x600) specifically to reproduce the
+    /// mismatch — see openNovemberDeck()'s doc comment for why this test
+    /// can't reuse May's or September's cluster (both already confirmed and
+    /// resolved by earlier alphabetically-sorted tests).
+    ///
+    /// XCUITest's accessibility-tree element frames don't track this repo's
+    /// real rendered geometry (established precedent — see
+    /// check_filmstrip_overlap.py's doc comment), so this is a pixel
+    /// question, not an element-frame one:
+    /// check_compare_letterbox.py measures the actual rendered band of the
+    /// seeded flat colour in the "42-compare-landscape-not-cropped"
+    /// screenshot this test captures, and asserts its aspect ratio matches
+    /// `.fit` (~0.75 for an 800x600 source) with dark letterbox bars above
+    /// and below it — either signal alone would catch `.fill`'s crop
+    /// (`.fill` renders far taller than wide, no letterbox bars at all).
+    func test38CompareLandscapePhotoIsNotCropped() throws {
+        openNovemberDeck()
+        openCompare()
+
+        // The card's photo loads asynchronously (ComparePhotoCardView's
+        // `.task` calls `ThumbnailLoader.fullImage`, see its `image = await
+        // ThumbnailLoader.fullImage(...)` line) — waiting for the accept
+        // button (present as soon as Compare's chrome renders, regardless of
+        // photo load state) isn't sufficient on its own, so this also gives
+        // the async image load itself a fixed settle window before
+        // capturing, the same pattern test20/28 use for this same view.
+        let accept = app.buttons["compare.accept"].firstMatch
+        XCTAssertTrue(accept.waitForExistence(timeout: 10), "Accept button should exist on the Compare card")
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("42-compare-landscape-not-cropped", delay: 0.3)
     }
 }

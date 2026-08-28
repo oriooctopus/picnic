@@ -83,9 +83,11 @@ enum SeedLibrary {
         let isVideo: Bool
     }
 
-    /// ~28 assets (27 content + 1 marker) spread across 8 months of
+    /// ~31 assets (30 content + 1 marker) spread across 8 months of
     /// 2025-2026: a burst cluster of 4 within 10s (triggers Compare), a
-    /// second burst cluster of 3, a few PNGs, and 2 short generated videos.
+    /// second burst cluster of 3, a third burst cluster of 3 landscape
+    /// photos (November, for the Compare-letterbox regression test), a few
+    /// PNGs, and 2 short generated videos.
     private static func buildItems() -> [SeedItem] {
         let palette: [UIColor] = [
             .systemRed, .systemOrange, .systemYellow, .systemGreen, .systemTeal,
@@ -128,7 +130,26 @@ enum SeedLibrary {
         addImage(2025, 9, 1, 11, 0, 3, size: CGSize(width: 800, height: 600))
         addImage(2025, 9, 1, 11, 0, 6, size: CGSize(width: 800, height: 600))
         addImage(2025, 9, 19, 9, 0, 0, size: CGSize(width: 600, height: 800))
-        // 2025-11
+        // 2025-11 — burst cluster C: 3 landscape (800x600) photos within
+        // 10s, dated BEFORE every other November item. openMayDeck/
+        // openSeptemberDeck's clusters both land on the deck's first card
+        // only because they happen to be the earliest-dated item in their
+        // month (May's 5/18 standalone and September's 9/19 standalone both
+        // postdate their cluster) — Deck opens on the chronologically first
+        // card, not "the burst cluster" specifically. A first attempt at
+        // this cluster used 11/3 11:00, AFTER the existing 11/3 9:00
+        // standalone below, and the Compare pill never appeared: the deck's
+        // first card was that standalone, not the cluster (confirmed via a
+        // CI dispatch of this test that failed exactly there). November is
+        // otherwise untouched by any Compare-confirming test (test32/33
+        // permanently resolve clusters A/B, and both sort alphabetically
+        // before test38 — see openNovemberDeck()'s doc comment), so this is
+        // the one burst cluster guaranteed to still offer its Compare pill
+        // regardless of test order or a full-suite run, PROVIDED it also
+        // stays the earliest item in its month.
+        addImage(2025, 11, 1, 9, 0, 0, size: CGSize(width: 800, height: 600))
+        addImage(2025, 11, 1, 9, 0, 3, size: CGSize(width: 800, height: 600))
+        addImage(2025, 11, 1, 9, 0, 6, size: CGSize(width: 800, height: 600))
         addImage(2025, 11, 3, 9, 0, 0, size: CGSize(width: 700, height: 700))
         addImage(2025, 11, 11, 9, 0, 0, size: CGSize(width: 600, height: 800), format: .png)
         addImage(2025, 11, 27, 9, 0, 0, size: CGSize(width: 900, height: 500))
