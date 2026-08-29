@@ -2012,4 +2012,86 @@ final class WalkthroughUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.5)
         capture("42-compare-landscape-not-cropped", delay: 0.3)
     }
+
+    /// Regression test for this session's fix ("Open Compare on the photo it
+    /// was tapped from"): DeckView used to pass only the CompareGroup to the
+    /// Compare cover and CompareView hard-coded `pageIndex = 0`, so tapping
+    /// the Compare pill from the SECOND (or later) member of a burst cluster
+    /// still opened Compare on the group's FIRST photo — a silent switch to
+    /// a different photo than the one the user was looking at. The fix
+    /// (DeckPresentation.compare now carries the tapped card's asset id;
+    /// CompareView seeds pageIndex from it) is proven here.
+    ///
+    /// November's burst cluster C (SeedLibrary.swift, 2025-11-01
+    /// 09:00:00/03/06 = seed idx 19/20/21) is three flat, distinct colours —
+    /// systemBrown, systemRed, systemOrange — and Deck opens on member 0
+    /// (brown), the same cluster/entry point test38 uses (see
+    /// openNovemberDeck()'s doc comment for why no other cluster survives to
+    /// this point in a full-suite run). This test swipes right (keep) once
+    /// to advance from member 0 (brown) to member 1 (red): a keep does NOT
+    /// resolve the CompareGroup itself — only Compare's own confirm flow
+    /// does (DeckView gates the pill on `isGroupResolved`) — so the pill
+    /// still shows on member 1's card and still points at the same 3-member
+    /// group. Pre-fix, tapping it from there still seeded pageIndex 0,
+    /// landing back on member 0 (brown); post-fix it lands on member 1
+    /// (red).
+    ///
+    /// hideSorted is explicitly reset before the swipe: DeckViewModel's
+    /// hideSorted flag is a UserDefaults key that survives every earlier
+    /// test method in the same CI run (see AppState.init's `#if DEBUG`
+    /// block — there is no automatic per-launch reset, only the explicit
+    /// `--reset-hide-sorted` argument), and if it were left ON from an
+    /// earlier test, marking member 0 kept would drop it out of the
+    /// filtered deck immediately, making member 1 the new numerator-1 card
+    /// instead of numerator-2 — silently changing which photo this test
+    /// thinks it swiped onto. `--reset-sort-state` likewise guards against
+    /// leftover marks, matching test14/test21's "force a known starting
+    /// state" convention.
+    ///
+    /// Colour identity, not an element-frame read — see
+    /// check_compare_letterbox.py's doc comment for why XCUITest's
+    /// accessibility frames aren't trustworthy geometry in this repo; here
+    /// it's not even geometry, it's WHICH photo is on screen, further still
+    /// from anything AX exposes. check_compare_start_index.py compares the
+    /// deck card's dominant colour before/after the swipe (proving the swipe
+    /// really advanced) against Compare's dominant photo colour once opened
+    /// (proving it matches the tapped card, not the group's first).
+    func test39CompareOpensOnTappedPhoto() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
+        let deckCard = openNovemberDeck()
+
+        // Let the card's async image load settle before trusting the
+        // member-0 colour baseline below — same window test38 gives the
+        // Compare card's own async image load.
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("43-deck-first-member", delay: 0.2)
+
+        // Swipe right = keep, the exact sustained press-and-drag pattern
+        // test14HideSortedActuallyFilters uses (WalkthroughUITests.swift
+        // ~585-588) — a quick swipeRight() flick doesn't reliably clear this
+        // repo's DragGesture threshold.
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertEqual(numerator(fromPosition: position.label), 2,
+                       "Swiping right once should advance from member 0 (brown) to member 1 (red) — deck position 2")
+
+        // Same settle window as above before trusting member 1's colour.
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("44-deck-second-member", delay: 0.2)
+
+        // The pill must still exist on member 1's card (same unresolved
+        // group) — openCompare() itself asserts this.
+        openCompare()
+        let accept = app.buttons["compare.accept"].firstMatch
+        XCTAssertTrue(accept.waitForExistence(timeout: 10), "Accept button should exist on the Compare card")
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("45-compare-opened-on-second-member", delay: 0.3)
+    }
 }

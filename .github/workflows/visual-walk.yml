@@ -293,6 +293,27 @@ jobs:
           python3 -m pip install --quiet --break-system-packages pillow
           python3 .github/scripts/check_compare_letterbox.py "$SHOT"
 
+      # Real assertion for test39CompareOpensOnTappedPhoto: DeckView used to
+      # pass only the CompareGroup to the Compare cover and CompareView
+      # hard-coded pageIndex = 0, so tapping the Compare pill from the
+      # SECOND (or later) burst-cluster member still opened Compare on the
+      # group's FIRST photo. This compares the deck card's dominant colour
+      # before/after a keep-swipe (member 0 -> member 1 of November's burst
+      # cluster C) against Compare's dominant photo colour once opened from
+      # member 1's pill — it should match member 1, not member 0.
+      - name: Check Compare opens on the tapped photo, not the group's first (pixel measurement)
+        if: always()
+        run: |
+          FIRST="screenshots/43-deck-first-member.png"
+          SECOND="screenshots/44-deck-second-member.png"
+          COMPARE="screenshots/45-compare-opened-on-second-member.png"
+          if [ ! -f "$FIRST" ] || [ ! -f "$SECOND" ] || [ ! -f "$COMPARE" ]; then
+            echo "Missing $FIRST, $SECOND, or $COMPARE (likely an only_testing run that excluded test39CompareOpensOnTappedPhoto) — skipping."
+            exit 0
+          fi
+          python3 -m pip install --quiet --break-system-packages pillow
+          python3 .github/scripts/check_compare_start_index.py "$FIRST" "$SECOND" "$COMPARE"
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4

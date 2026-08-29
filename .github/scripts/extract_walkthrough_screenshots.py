@@ -48,6 +48,8 @@ REQUIRED = [
     "30-filmstrip-before-scale-swipes", "31-filmstrip-after-scale-swipes",
     "40-deck-card-before-swipe", "41-deck-card-immediately-after-swipe",
     "42-compare-landscape-not-cropped",
+    "43-deck-first-member", "44-deck-second-member",
+    "45-compare-opened-on-second-member",
 ]
 
 # Best-effort: one per test method, captured in tearDown. See module
