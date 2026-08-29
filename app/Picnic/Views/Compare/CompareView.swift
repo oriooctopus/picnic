@@ -4,10 +4,18 @@ import Photos
 struct CompareView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject var viewModel: CompareViewModel
-    @State private var pageIndex = 0
+    @State private var pageIndex: Int
 
-    init(viewModel: CompareViewModel) {
+    /// startAssetID: the group member Compare was opened from (the deck card
+    /// under the Compare pill), so the pager starts on that photo rather
+    /// than always on the group's first. The deck only offers Compare for
+    /// the current card's own group, so the id is always a member.
+    init(startAssetID: String, viewModel: CompareViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
+        guard let start = viewModel.group.assets.firstIndex(where: { $0.localIdentifier == startAssetID }) else {
+            preconditionFailure("Compare opened from an asset outside its own group: \(startAssetID)")
+        }
+        _pageIndex = State(initialValue: start)
     }
 
     var body: some View {

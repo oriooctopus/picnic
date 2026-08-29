@@ -52,12 +52,15 @@ struct DeckView: View {
     private let cardAspectRatio: CGFloat = 4.0 / 5.0
 
     enum DeckPresentation: Identifiable {
-        case compare(CompareGroup)
+        // startAssetID: the deck card Compare was tapped from. Compare opens
+        // on THAT member, not the group's first — tapping Compare on the
+        // second burst photo used to land on the first one.
+        case compare(CompareGroup, startAssetID: String)
         case livePhoto(PHLivePhoto)
 
         var id: String {
             switch self {
-            case .compare(let group): return "compare-\(group.id)"
+            case .compare(let group, _): return "compare-\(group.id)"
             case .livePhoto: return "livePhoto"
             }
         }
@@ -93,7 +96,7 @@ struct DeckView: View {
                         compareGroup: viewModel.groupByAssetID[asset.localIdentifier].flatMap {
                             appState.sortStore.isGroupResolved($0.id) ? nil : $0
                         },
-                        onCompare: { presentation = .compare($0) },
+                        onCompare: { presentation = .compare($0, startAssetID: asset.localIdentifier) },
                         onLongPress: { presentLivePhotoIfNeeded(asset) },
                         onDelete: { viewModel.markForDelete() },
                         onKeep: { viewModel.markKept() },
@@ -177,8 +180,8 @@ struct DeckView: View {
         }
         .fullScreenCover(item: $presentation) { item in
             switch item {
-            case .compare(let group):
-                CompareView(viewModel: CompareViewModel(
+            case .compare(let group, let startAssetID):
+                CompareView(startAssetID: startAssetID, viewModel: CompareViewModel(
                     group: group,
                     photoLibrary: appState.photoLibrary,
                     onResolve: { toDelete, kept, groupID in
