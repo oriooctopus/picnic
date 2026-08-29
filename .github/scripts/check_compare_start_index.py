@@ -11,8 +11,8 @@ November's seeded burst cluster C (SeedLibrary.swift) is three flat, DISTINCT
 numbered colours (systemBrown, systemRed, systemOrange for seed idx
 19/20/21) with Deck opening on member 0 (brown) — see
 test39CompareOpensOnTappedPhoto's doc comment for why this cluster survives
-to that point in a full-suite run. The test swipes right once (keep) to
-advance the deck to member 1 (red) — the group stays unresolved, so the
+to that point in a full-suite run. The test swipes right twice (keep) to
+advance the deck to member 2 (orange) — the group stays unresolved, so the
 Compare pill still points at it — then opens Compare from there.
 
 Three screenshots, same technique as this repo's other start/identity
@@ -21,9 +21,9 @@ checks:
                            swipe. Sampled the same way as
                            check_deck_card_not_frozen.py: most-common colour
                            in the card's central inset box.
-  44-deck-second-member — deck card showing member 1 (red), after the swipe.
+  44-deck-tapped-member — deck card showing member 2 (orange), after two keep-swipes.
                            Same box.
-  45-compare-opened-on-second-member — Compare, opened from member 1's card.
+  45-compare-opened-on-tapped-member — Compare, opened from member 2's card.
                            Sampled the same way as check_compare_letterbox.py:
                            most-common SATURATED colour in the photo band.
 
@@ -33,7 +33,7 @@ Three assertions:
       vacuous: 45 would trivially equal 43 no matter what CompareView does,
       since the deck never moved off member 0 in the first place.
   (b) dom(45) == dom(44) — Compare opened on the SAME photo the deck was
-      showing when the pill was tapped (member 1, red). This is the actual
+      showing when the pill was tapped (member 2, orange — neither the group's first nor its BEST). This is the actual
       fix.
   (c) dom(45) != dom(43) — Compare did NOT fall back to the group's first
       photo (member 0, brown). Belt-and-suspenders with (b): a bug that
@@ -52,8 +52,8 @@ only Compare's start index is wrong).
 Screenshots are 1170x2532 (iPhone 14 class @3x). pt = px/3.
 
 Usage: check_compare_start_index.py <43-deck-first-member.png>
-                                     <44-deck-second-member.png>
-                                     <45-compare-opened-on-second-member.png>
+                                     <44-deck-tapped-member.png>
+                                     <45-compare-opened-on-tapped-member.png>
 Exit 0 on PASS, 1 on FAIL.
 """
 import sys
@@ -123,7 +123,7 @@ def compare_dominant_photo_color(im_path):
 def main():
     if len(sys.argv) != 4:
         print(f"Usage: {sys.argv[0]} <43-deck-first-member.png> "
-              f"<44-deck-second-member.png> <45-compare-opened-on-second-member.png>")
+              f"<44-deck-tapped-member.png> <45-compare-opened-on-tapped-member.png>")
         return 2
     first_path, second_path, compare_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -168,7 +168,7 @@ def main():
     if not (swipe_advanced and opened_on_tapped and avoided_group_first):
         return 1
 
-    print("PASS: Compare opened on the photo it was tapped from (member 1), not the group's first")
+    print("PASS: Compare opened on the photo it was tapped from, not the group's first")
     return 0
 
 

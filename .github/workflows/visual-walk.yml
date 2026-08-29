@@ -213,6 +213,14 @@ jobs:
           SHOT="screenshots/24-deck-filmstrip-mixed-aspect.png"
           if [ ! -f "$SHOT" ]; then
             echo "No $SHOT (likely an only_testing run that excluded test17DeckFilmstripMixedAspectRatios) — skipping."
+            # A missing screenshot is only benign when the dispatch narrowed the
+            # test list. In a full-suite run it means the test was renamed, its
+            # capture name drifted, or the attachment export broke — and this
+            # pixel check would otherwise pass forever without ever running.
+            if [ -z "${{ github.event.inputs.only_testing }}" ]; then
+              echo "::error::full-suite run, but the screenshot this check needs was never produced"
+              exit 1
+            fi
             exit 0
           fi
           python3 -m pip install --quiet --break-system-packages pillow
@@ -228,6 +236,14 @@ jobs:
           SHOT="screenshots/29-filmstrip-thumbs-after-hidesorted-swipe.png"
           if [ ! -f "$SHOT" ]; then
             echo "No $SHOT (likely an only_testing run that excluded test30FilmstripThumbnailsRetainImageAfterSwipeUnderHideSorted) — skipping."
+            # A missing screenshot is only benign when the dispatch narrowed the
+            # test list. In a full-suite run it means the test was renamed, its
+            # capture name drifted, or the attachment export broke — and this
+            # pixel check would otherwise pass forever without ever running.
+            if [ -z "${{ github.event.inputs.only_testing }}" ]; then
+              echo "::error::full-suite run, but the screenshot this check needs was never produced"
+              exit 1
+            fi
             exit 0
           fi
           python3 -m pip install --quiet --break-system-packages pillow
@@ -247,6 +263,14 @@ jobs:
           AFTER="screenshots/31-filmstrip-after-scale-swipes.png"
           if [ ! -f "$BEFORE" ] || [ ! -f "$AFTER" ]; then
             echo "Missing $BEFORE or $AFTER (likely an only_testing run that excluded test31FilmstripDropsCountUnderHideSortedAtScale) — skipping."
+            # A missing screenshot is only benign when the dispatch narrowed the
+            # test list. In a full-suite run it means the test was renamed, its
+            # capture name drifted, or the attachment export broke — and this
+            # pixel check would otherwise pass forever without ever running.
+            if [ -z "${{ github.event.inputs.only_testing }}" ]; then
+              echo "::error::full-suite run, but the screenshot this check needs was never produced"
+              exit 1
+            fi
             exit 0
           fi
           python3 -m pip install --quiet --break-system-packages pillow
@@ -267,6 +291,14 @@ jobs:
           AFTER="screenshots/41-deck-card-immediately-after-swipe.png"
           if [ ! -f "$BEFORE" ] || [ ! -f "$AFTER" ]; then
             echo "Missing $BEFORE or $AFTER (likely an only_testing run that excluded test36DeckCardUpdatesImmediatelyUnderHideSortedWithSlowLoad) — skipping."
+            # A missing screenshot is only benign when the dispatch narrowed the
+            # test list. In a full-suite run it means the test was renamed, its
+            # capture name drifted, or the attachment export broke — and this
+            # pixel check would otherwise pass forever without ever running.
+            if [ -z "${{ github.event.inputs.only_testing }}" ]; then
+              echo "::error::full-suite run, but the screenshot this check needs was never produced"
+              exit 1
+            fi
             exit 0
           fi
           python3 -m pip install --quiet --break-system-packages pillow
@@ -288,6 +320,14 @@ jobs:
           SHOT="screenshots/42-compare-landscape-not-cropped.png"
           if [ ! -f "$SHOT" ]; then
             echo "No $SHOT (likely an only_testing run that excluded test38CompareLandscapePhotoIsNotCropped) — skipping."
+            # A missing screenshot is only benign when the dispatch narrowed the
+            # test list. In a full-suite run it means the test was renamed, its
+            # capture name drifted, or the attachment export broke — and this
+            # pixel check would otherwise pass forever without ever running.
+            if [ -z "${{ github.event.inputs.only_testing }}" ]; then
+              echo "::error::full-suite run, but the screenshot this check needs was never produced"
+              exit 1
+            fi
             exit 0
           fi
           python3 -m pip install --quiet --break-system-packages pillow
@@ -305,10 +345,18 @@ jobs:
         if: always()
         run: |
           FIRST="screenshots/43-deck-first-member.png"
-          SECOND="screenshots/44-deck-second-member.png"
-          COMPARE="screenshots/45-compare-opened-on-second-member.png"
+          SECOND="screenshots/44-deck-tapped-member.png"
+          COMPARE="screenshots/45-compare-opened-on-tapped-member.png"
           if [ ! -f "$FIRST" ] || [ ! -f "$SECOND" ] || [ ! -f "$COMPARE" ]; then
             echo "Missing $FIRST, $SECOND, or $COMPARE (likely an only_testing run that excluded test39CompareOpensOnTappedPhoto) — skipping."
+            # A missing screenshot is only benign when the dispatch narrowed the
+            # test list. In a full-suite run it means the test was renamed, its
+            # capture name drifted, or the attachment export broke — and this
+            # pixel check would otherwise pass forever without ever running.
+            if [ -z "${{ github.event.inputs.only_testing }}" ]; then
+              echo "::error::full-suite run, but the screenshot this check needs was never produced"
+              exit 1
+            fi
             exit 0
           fi
           python3 -m pip install --quiet --break-system-packages pillow

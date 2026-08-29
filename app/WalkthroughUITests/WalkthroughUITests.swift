@@ -2070,28 +2070,36 @@ final class WalkthroughUITests: XCTestCase {
         // test14HideSortedActuallyFilters uses (WalkthroughUITests.swift
         // ~585-588) — a quick swipeRight() flick doesn't reliably clear this
         // repo's DragGesture threshold.
-        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
-            .press(forDuration: 0.1,
-                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
-                   withVelocity: .default,
-                   thenHoldForDuration: 0.1)
-
+        // TWICE, to land on member 2 (orange, seed idx 21): member 1 (red,
+        // idx 20) is also the group's BEST photo (largest file — see
+        // CompareViewModel.bestAssetID), so a regression that opened Compare
+        // on the BEST member instead of the tapped one would have produced a
+        // byte-identical screenshot from member 1. Member 2 is neither the
+        // group's first nor its BEST, so both wrong-start regressions differ
+        // from it in colour.
         let position = app.descendants(matching: .any)["deck.position"].firstMatch
-        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
-        Thread.sleep(forTimeInterval: 1.0)
-        XCTAssertEqual(numerator(fromPosition: position.label), 2,
-                       "Swiping right once should advance from member 0 (brown) to member 1 (red) — deck position 2")
+        for expectedPosition in [2, 3] {
+            deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+                .press(forDuration: 0.1,
+                       thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                       withVelocity: .default,
+                       thenHoldForDuration: 0.1)
+            XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+            Thread.sleep(forTimeInterval: 1.0)
+            XCTAssertEqual(numerator(fromPosition: position.label), expectedPosition,
+                           "Each keep-swipe should advance the deck by one — expected position \(expectedPosition)")
+        }
 
-        // Same settle window as above before trusting member 1's colour.
+        // Same settle window as above before trusting member 2's colour.
         Thread.sleep(forTimeInterval: 1.5)
-        capture("44-deck-second-member", delay: 0.2)
+        capture("44-deck-tapped-member", delay: 0.2)
 
-        // The pill must still exist on member 1's card (same unresolved
+        // The pill must still exist on member 2's card (same unresolved
         // group) — openCompare() itself asserts this.
         openCompare()
         let accept = app.buttons["compare.accept"].firstMatch
         XCTAssertTrue(accept.waitForExistence(timeout: 10), "Accept button should exist on the Compare card")
         Thread.sleep(forTimeInterval: 1.5)
-        capture("45-compare-opened-on-second-member", delay: 0.3)
+        capture("45-compare-opened-on-tapped-member", delay: 0.3)
     }
 }
