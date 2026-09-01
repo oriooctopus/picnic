@@ -106,6 +106,7 @@ export function createFakePage(config = {}) {
       async press(key) {
         page.log.push(`key:${key}`);
         if (key === 'Escape') page.escapePresses = (page.escapePresses ?? 0) + 1;
+        if (key === '#' && !page.config.swallowTrashShortcut) page.advancePastTrash();
         if (key === 'ArrowRight') {
           // Real UI: ArrowRight is what actually advances the photo (the
           // "View next photo" button is present but not reliably clickable).
@@ -140,6 +141,7 @@ export function createFakePage(config = {}) {
     async evaluate() {
       // Mirrors readPanelText(): returns the current photo's info-panel text.
       page.log.push('evaluate:panelText');
+      if (page.trashedPastEnd) return 'TRASHED-END 1x1';
       const seq = page.config.photoSequence[page.activeQuery] ?? [];
       return seq[page.photoIndex] ?? '';
     },
@@ -160,6 +162,9 @@ export function createFakePage(config = {}) {
       }
       if (/aria-label="Move to trash"/i.test(selector)) {
         return 1;
+      }
+      if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) {
+        return 0; // no confirmation dialog in the fake UI
       }
       // The panel-open signal: present once the info panel has been opened.
       if (/aria-label="Close info"/i.test(selector)) {
@@ -205,12 +210,23 @@ export function createFakePage(config = {}) {
       if (/aria-label="Open info"/i.test(selector)) {
         return Boolean(page.config.infoButtonVisible);
       }
+      if (/aria-label="Move to trash"/i.test(selector)) {
+        return page.config.trashButtonVisible !== false;
+      }
       return false;
     },
     async onClick(selector) {
       if (/aria-label="View next photo"/i.test(selector)) {
         page.photoIndex += 1;
       }
+      // Trashing removes the current photo, so the view advances — that shift
+      // is exactly what moveToTrash() waits on to confirm the delete took.
+      if (/aria-label="Move to trash"/i.test(selector)) page.advancePastTrash();
+    },
+    advancePastTrash() {
+      const seq = page.config.photoSequence[page.activeQuery] ?? [];
+      if (page.photoIndex + 1 < seq.length) page.photoIndex += 1;
+      else page.trashedPastEnd = true;
     },
   };
   return page;

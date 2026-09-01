@@ -60,15 +60,19 @@ const RESULT_LINK_SELECTOR = 'a[href^="./search/"]';
 // Exact aria-label, not a substring match: `[aria-label*="Info"]` also
 // hits "Close info" and others (4 elements observed live) and .first()
 // on that times out. "Open info" is exact.
-const OPEN_INFO_SELECTOR = 'button[aria-label="Open info"]';
+const OPEN_INFO_SELECTOR = '[aria-label="Open info" i]';
 // The open panel has no stable container selector of its own — verified live
 // on 2026-09-01: '[aria-label="Info"]' / '[role="complementary"]' never match.
 // The reliable signal that the panel is open is the toolbar button flipping
 // from "Open info" to "Close info". Panel TEXT is read by locating the
 // container that holds the dimensions string (see readPanelText).
 const INFO_PANEL_OPEN_SELECTOR = 'button[aria-label="Close info"]';
-const NEXT_PHOTO_SELECTOR = 'button[aria-label="View next photo" i]';
-const TRASH_SELECTOR = 'button[aria-label="Move to trash" i]';
+const NEXT_PHOTO_SELECTOR = '[aria-label="View next photo" i]';
+// NOT scoped to <button>: these toolbar controls are not necessarily real
+// button elements, and a 'button[...]' selector silently matched nothing —
+// which sent moveToTrash down its keyboard fallback and deleted nothing at
+// all, twice. Match on the aria-label alone. Verified live 2026-09-01.
+const TRASH_SELECTOR = '[aria-label="Move to trash" i]';
 // Randomized 4-9s between jobs (was a fixed 4000ms) — a constant interval is
 // itself a bot signature per rules/social-media-browsing.md; jitter it.
 const PACE_MS_MIN = 4000;
@@ -342,11 +346,58 @@ async function viewNextPhoto(page, previousText) {
   return false;
 }
 
-/** Move the currently-open photo to trash via the UI. NEVER permanent-delete. */
-async function moveToTrash(page) {
-  const trashButton = page.locator(TRASH_SELECTOR).first();
+/**
+ * Move the currently-open photo to trash via the UI. NEVER permanent-delete.
+ *
+ * Returns true only if the deletion was CONFIRMED. "Open info" and "View next
+ * photo" both turned out to have hidden duplicates that make a .first() click
+ * silently time out, so a click that merely resolves is not evidence the photo
+ * was trashed — and a job wrongly marked "trashed" is one we would never
+ * revisit. Confirm by the panel moving off this photo.
+ */
+async function moveToTrash(page, panelTextBefore) {
   await randomDelay(500, 2000);
-  await trashButton.click();
+  const trashButton = page.locator(TRASH_SELECTOR).first();
+  const trashVisible = await trashButton.isVisible().catch(() => false);
+  if (VERBOSE) console.log(`    trash control: count=${await page.locator(TRASH_SELECTOR).count()} visible=${trashVisible}`);
+  if (trashVisible) {
+    // NOT .catch(() => {}): swallowing the click error is what made the first
+    // real run indistinguishable from "clicked but Google ignored it". Let it
+    // throw so the caller records a real reason.
+    await trashButton.click();
+  } else {
+    // Keyboard fallback only. Note focus often sits on "Back to search" in
+    // this view, so the shortcut may go nowhere — hence the confirmation below.
+    await page.keyboard.press('#');
+  }
+
+  // A confirmation dialog may appear; take it only if it is actually there.
+  const confirm = page.locator('button:has-text("Move to trash"), button:has-text("Delete")').first();
+  if (await confirm.isVisible().catch(() => false)) {
+    await randomDelay(600, 1600);
+    await confirm.click();
+  }
+
+  // Confirmation, in priority order:
+  //  1. Google's own "Moved to trash" toast — unambiguous.
+  //  2. The panel moving to a DIFFERENT photo.
+  //  3. The photo view closing entirely (panel text empties) — trashing the
+  //     last item returns to the grid, which the first version wrongly read as
+  //     "no change" because an empty string is falsy.
+  const deadline = Date.now() + (FAST_DELAYS ? 50 : 12000);
+  while (Date.now() < deadline) {
+    await randomDelay(700, 1500);
+    const toast = await page
+      .locator('text=/moved to trash/i')
+      .first()
+      .isVisible()
+      .catch(() => false);
+    if (toast) return true;
+    const now = await readPanelText(page);
+    if (now && now !== panelTextBefore) return true;
+    if (!now && panelTextBefore) return true;
+  }
+  return false;
 }
 
 /**
@@ -386,13 +437,23 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
       if (dryRun) {
         console.log(`[dry-run WOULD TRASH] ${job.filename} (search ${query})`);
       } else {
-        await moveToTrash(page);
-        queue.update(job.id, {
-          status: 'trashed',
-          comparison: { searchDate: query, matchedFilename: parsed.filename, pixelWidth: parsed.pixelWidth, pixelHeight: parsed.pixelHeight },
-          attempts: job.attempts + 1,
-        });
-        console.log(`[trashed] ${job.filename} (search ${query})`);
+        const confirmed = await moveToTrash(page, text);
+        const comparison = { searchDate: query, matchedFilename: parsed.filename, pixelWidth: parsed.pixelWidth, pixelHeight: parsed.pixelHeight };
+        if (confirmed) {
+          queue.update(job.id, { status: 'trashed', comparison, attempts: job.attempts + 1 });
+          console.log(`[trashed] ${job.filename} (search ${query})`);
+        } else {
+          // Matched the right photo but could not prove the trash took. Leave
+          // it for a human rather than recording a deletion that may not have
+          // happened.
+          queue.update(job.id, {
+            status: 'needs_review',
+            comparison,
+            error: 'matched but trash action not confirmed',
+            attempts: job.attempts + 1,
+          });
+          console.log(`[needs_review] ${job.filename}: matched but trash not confirmed (search ${query})`);
+        }
       }
       remaining = remaining.filter((j) => j !== job);
     }

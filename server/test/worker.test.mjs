@@ -244,3 +244,27 @@ test('walk through a date is bounded by MAX_STEPS_PER_DATE', async () => {
     assert.ok(nextClicks.length <= MAX_STEPS_PER_DATE, `expected at most ${MAX_STEPS_PER_DATE} "next" clicks, got ${nextClicks.length}`);
   });
 });
+
+
+// A trash click that resolves is NOT proof the photo was trashed: "Open info"
+// and "View next photo" both turned out to have hidden duplicates whose clicks
+// silently time out. A job wrongly recorded as "trashed" would never be
+// revisited, so an unconfirmed delete must fall back to needs_review.
+test('a trash action that does not take is recorded as needs_review, never trashed', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': ['Photo - Portrait - Aug 5, 2026, 6:54:07 PM'] },
+      photoSequence: { 'August 5, 2026': [IMG_1433_BLOCK] },
+      infoButtonFound: true,
+      trashButtonVisible: false,
+      swallowTrashShortcut: true,
+    });
+
+    await processDateGroup(page, '2026-08-05', [queue.getById(job.id)], queue, { dryRun: false });
+
+    const after = queue.getById(job.id);
+    assert.equal(after.status, 'needs_review', 'unconfirmed trash must not be recorded as trashed');
+    assert.match(after.error ?? '', /not confirmed/i);
+  });
+});
