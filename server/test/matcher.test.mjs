@@ -11,6 +11,10 @@ import {
   groupJobsByDate,
   isRealPhotoTile,
   dedupeTilesByAriaLabel,
+  parseTileAriaLabel,
+  jobMediaTypeMatchesTile,
+  calibrateOffsetSeconds,
+  planAriaMatches,
 } from '../lib/matcher.mjs';
 
 // Verbatim panel text observed live, 2026-09-01 (see task brief).
@@ -173,4 +177,100 @@ test('dedupeTilesByAriaLabel: drops repeats of the same photo rendered at anothe
   ];
   const deduped = dedupeTilesByAriaLabel(tiles);
   assert.equal(deduped.length, 3);
+});
+
+// -- CHANGE 1: aria-label fast-path matching --------------------------------
+
+test('parseTileAriaLabel: extracts mediaType and a wall-clock-as-UTC ms from a tile label', () => {
+  const photo = parseTileAriaLabel('Photo - Portrait - Aug 5, 2026, 6:54:07 PM');
+  assert.equal(photo.mediaType, 'photo');
+  assert.equal(new Date(photo.wallClockAsUtcMs).toISOString(), '2026-08-05T18:54:07.000Z');
+
+  const video = parseTileAriaLabel('Video - Landscape - Aug 5, 2026, 7:31:07 PM');
+  assert.equal(video.mediaType, 'video');
+  assert.equal(new Date(video.wallClockAsUtcMs).toISOString(), '2026-08-05T19:31:07.000Z');
+});
+
+test('parseTileAriaLabel: returns null for decoy chips and anything not shaped like a tile label', () => {
+  assert.equal(parseTileAriaLabel('Favorites'), null);
+  assert.equal(parseTileAriaLabel(null), null);
+  assert.equal(parseTileAriaLabel(''), null);
+});
+
+test('jobMediaTypeMatchesTile: video jobs only match Video tiles, image jobs only match Photo tiles', () => {
+  assert.equal(jobMediaTypeMatchesTile({ mediaType: 'video' }, 'video'), true);
+  assert.equal(jobMediaTypeMatchesTile({ mediaType: 'video' }, 'photo'), false);
+  assert.equal(jobMediaTypeMatchesTile({ mediaType: 'image' }, 'photo'), true);
+  assert.equal(jobMediaTypeMatchesTile({ mediaType: 'image' }, 'video'), false);
+});
+
+test('jobMediaTypeMatchesTile: legacy jobs with no mediaType field are not gated on it', () => {
+  assert.equal(jobMediaTypeMatchesTile({ mediaType: null }, 'photo'), true);
+  assert.equal(jobMediaTypeMatchesTile({ mediaType: null }, 'video'), true);
+  assert.equal(jobMediaTypeMatchesTile({}, 'photo'), true);
+});
+
+const ARIA_JOBS = [
+  { id: 'j1', filename: 'IMG_1433.HEIC', creationDate: '2026-08-05T12:54:07.000Z', pixelWidth: 2316, pixelHeight: 3088, mediaType: 'image' },
+  { id: 'j2', filename: 'IMG_1441.HEIC', creationDate: '2026-08-05T13:31:07.000Z', pixelWidth: 3024, pixelHeight: 4032, mediaType: 'image' },
+  { id: 'j3', filename: 'IMG_1500.MOV', creationDate: '2026-08-05T15:00:00.000Z', pixelWidth: 1920, pixelHeight: 1080, mediaType: 'video' },
+];
+// True local-time tiles for the 3 jobs above at a real +6h offset, plus a
+// decoy tile (an unrelated photo on the same date, arbitrary time) that must
+// never sway the calibration.
+const ARIA_TILE_J1 = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
+const ARIA_TILE_J2 = 'Photo - Portrait - Aug 5, 2026, 7:31:07 PM';
+const ARIA_TILE_J3 = 'Video - Landscape - Aug 5, 2026, 9:00:00 PM';
+const ARIA_DECOY = 'Photo - Portrait - Aug 5, 2026, 3:00:00 PM';
+
+function parsedTiles(labels) {
+  return labels.map((ariaLabel) => ({ tile: { ariaLabel }, parsed: parseTileAriaLabel(ariaLabel) }));
+}
+
+test('calibrateOffsetSeconds: picks the offset multiple true pairs agree on, ignoring decoy noise', () => {
+  const offset = calibrateOffsetSeconds(ARIA_JOBS, parsedTiles([ARIA_TILE_J1, ARIA_TILE_J2, ARIA_TILE_J3, ARIA_DECOY]));
+  assert.equal(offset, 6 * 3600, 'must land on the real +6h boundary, not any decoy diff');
+});
+
+test('calibrateOffsetSeconds: REFUSES (returns null) when only a single pair could agree on a boundary', () => {
+  // Only one job -- at most one true pair exists, which is exactly the
+  // "a single coincidental pair must not set the offset" case from the
+  // task brief. Must refuse rather than trust it.
+  const offset = calibrateOffsetSeconds([ARIA_JOBS[0]], parsedTiles([ARIA_TILE_J1, ARIA_DECOY]));
+  assert.equal(offset, null);
+});
+
+test('planAriaMatches: matches every job to its one true tile when the offset calibrates cleanly', () => {
+  const tiles = [{ ariaLabel: ARIA_TILE_J1 }, { ariaLabel: ARIA_TILE_J2 }, { ariaLabel: ARIA_TILE_J3 }, { ariaLabel: ARIA_DECOY }];
+  const plan = planAriaMatches(ARIA_JOBS, tiles);
+  assert.ok(plan, 'expected a plan, calibration should succeed with 3 agreeing true pairs');
+  assert.equal(plan.size, 3);
+  assert.equal(plan.get(ARIA_JOBS[0]).ariaLabel, ARIA_TILE_J1);
+  assert.equal(plan.get(ARIA_JOBS[1]).ariaLabel, ARIA_TILE_J2);
+  assert.equal(plan.get(ARIA_JOBS[2]).ariaLabel, ARIA_TILE_J3, 'video job must match the Video tile, not a Photo tile');
+});
+
+test('planAriaMatches: a video job never matches a Photo tile at the same predicted second', () => {
+  // Construct a Photo tile that lands on job3's (the video job) predicted
+  // second -- jobMediaTypeMatchesTile must reject it as a candidate, so it
+  // must not appear as job3's match even though the timestamp lines up.
+  const wrongKindTile = 'Photo - Landscape - Aug 5, 2026, 9:00:00 PM';
+  const tiles = [{ ariaLabel: ARIA_TILE_J1 }, { ariaLabel: ARIA_TILE_J2 }, { ariaLabel: wrongKindTile }, { ariaLabel: ARIA_DECOY }];
+  const plan = planAriaMatches(ARIA_JOBS, tiles);
+  // job3 (video) has zero valid candidates now (the only tile at its second
+  // is a Photo) -- ambiguous for that job, so the WHOLE date falls back.
+  assert.equal(plan, null);
+});
+
+test('planAriaMatches: two tiles sharing the same second trigger the exhaustive fallback, never a guess', () => {
+  const collidingTile = 'Photo - Landscape - Aug 5, 2026, 7:31:07 PM'; // same second + mediaType as ARIA_TILE_J2
+  const tiles = [{ ariaLabel: ARIA_TILE_J1 }, { ariaLabel: ARIA_TILE_J2 }, { ariaLabel: collidingTile }];
+  const plan = planAriaMatches([ARIA_JOBS[0], ARIA_JOBS[1]], tiles);
+  assert.equal(plan, null, 'a burst-shot collision on job2\'s predicted second must refuse the whole date, not guess');
+});
+
+test('planAriaMatches: refuses (null) when the offset never calibrates', () => {
+  // A single job with no tile at all -- no valid-boundary diffs exist.
+  const plan = planAriaMatches([ARIA_JOBS[0]], [{ ariaLabel: ARIA_DECOY }]);
+  assert.equal(plan, null);
 });

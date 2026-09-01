@@ -172,3 +172,155 @@ export function dedupeTilesByAriaLabel(tiles) {
   }
   return out;
 }
+
+/**
+ * -- CHANGE 1: aria-label fast-path matching -------------------------------
+ *
+ * A result-grid tile's aria-label carries capture time to the SECOND, in the
+ * viewer's local time zone, e.g. "Photo - Portrait - Aug 5, 2026, 6:54:07 PM"
+ * / "Video - Portrait - Aug 5, 2026, 7:31:07 PM". That's more precise than
+ * the info panel (minutes only), so if we can work out the local UTC offset
+ * for a date group we can predict exactly which tile matches each queued
+ * job WITHOUT opening every tile -- see planAriaMatches() below.
+ *
+ * The job's creationDate is UTC and the offset varies by trip, so it's
+ * self-calibrated per date group from the data itself (never configured):
+ * for every (job, tile) pair, treat the tile's local wall-clock reading as
+ * if it were a UTC instant (parseTileAriaLabel's wallClockAsUtcMs -- pure
+ * bookkeeping, not a real UTC time) and subtract the job's real UTC instant.
+ * For a TRUE pair (the tile really is that job's photo) this difference is
+ * exactly the zone's UTC offset, every time, because both timestamps carry
+ * second precision. For an unrelated pair it's whatever the two random
+ * timestamps happen to differ by. So: keep only diffs landing exactly on a
+ * real UTC-offset boundary (calibrateOffsetSeconds' VALID_OFFSET_SECONDS,
+ * 15-minute granularity, +/-14h), and trust the value multiple independent
+ * pairs agree on -- a lone coincidental hit must never set the offset.
+ *
+ * This is a pre-filter only. planAriaMatches() names which tile to open for
+ * each job, but opening it and confirming the FILENAME from the info panel
+ * (worker.mjs's confirmAndTrash, unchanged from before this change) is still
+ * the only thing that ever authorises a trash.
+ */
+
+/** Abbreviated ("Aug") and full ("August") month names, case-insensitive -> index. Tile aria-labels use the abbreviated form; matched defensively against both. */
+const MONTH_INDEX = new Map();
+MONTH_NAMES.forEach((name, i) => {
+  MONTH_INDEX.set(name.toLowerCase(), i);
+  MONTH_INDEX.set(name.slice(0, 3).toLowerCase(), i);
+});
+
+const TILE_LABEL_PATTERN =
+  /^(Photo|Video)\s*-\s*[A-Za-z]+\s*-\s*([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4}),\s*(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)/i;
+
+/**
+ * Parse a result-grid tile's aria-label into {mediaType, wallClockAsUtcMs}.
+ * Returns null for anything that doesn't match the expected shape (decoy
+ * chips already filtered by isRealPhotoTile, but also protects against any
+ * future aria-label format Google ships) -- callers must treat null as "no
+ * signal", never coerce it into a match.
+ */
+export function parseTileAriaLabel(ariaLabel) {
+  const m = TILE_LABEL_PATTERN.exec(ariaLabel || '');
+  if (!m) return null;
+  const [, kind, monthName, day, year, hourStr, minute, second, ampm] = m;
+  const monthIdx = MONTH_INDEX.get(monthName.toLowerCase());
+  if (monthIdx == null) return null;
+  let hour = Number(hourStr) % 12;
+  if (/PM/i.test(ampm)) hour += 12;
+  return {
+    mediaType: kind.toLowerCase(), // 'photo' | 'video'
+    // The tile's LOCAL wall-clock reading, reinterpreted as if it were a UTC
+    // instant -- see the module comment above. Never compare this to a real
+    // UTC timestamp directly; it only makes sense as a diff against another
+    // value produced the same way (or against a job's UTC ms, which is
+    // exactly what calibrateOffsetSeconds does).
+    wallClockAsUtcMs: Date.UTC(Number(year), monthIdx, Number(day), hour, Number(minute), Number(second)),
+  };
+}
+
+/**
+ * Does a queued job's declared media type allow it to match a tile of
+ * `tileMediaType` ('photo' | 'video')? MirrorQueueStore.swift emits
+ * mediaType as 'video' | 'image' (never null) for real queue entries, but
+ * older queued jobs predate the field and carry null -- for those, don't
+ * gate on a signal we don't have and let filename+dimensions decide, same
+ * as before this change existed.
+ */
+export function jobMediaTypeMatchesTile(job, tileMediaType) {
+  if (job.mediaType == null) return true;
+  const jobKind = job.mediaType === 'video' ? 'video' : 'photo';
+  return jobKind === tileMediaType;
+}
+
+// Every real-world UTC offset, 15-minute granularity (covers the standard
+// hour/half-hour zones and the handful of :45 outliers like Nepal/Chatham
+// Islands), +/-14h. A spurious (job,tile) diff landing exactly on one of
+// these AND recurring across independent pairs is not plausible by chance.
+const VALID_OFFSET_SECONDS = new Set();
+for (let m = -14 * 60; m <= 14 * 60; m += 15) VALID_OFFSET_SECONDS.add(m * 60);
+
+// "A single coincidental pair must not set the offset" (task brief) -- two
+// independent (job,tile) pairs agreeing on the same boundary is the floor.
+const MIN_AGREEING_PAIRS = 2;
+
+/**
+ * Self-calibrate a date group's local-time UTC offset (in seconds) from its
+ * own (job, tile) data -- see the module comment above. `parsedTiles` is
+ * `[{tile, parsed}, ...]` (parsed = parseTileAriaLabel output, already
+ * filtered non-null by the caller). Returns null when no offset reaches
+ * MIN_AGREEING_PAIRS -- refuse rather than trust a weak signal.
+ */
+export function calibrateOffsetSeconds(jobs, parsedTiles) {
+  const counts = new Map();
+  for (const job of jobs) {
+    const jobMs = new Date(job.creationDate).getTime();
+    for (const { parsed } of parsedTiles) {
+      if (!jobMediaTypeMatchesTile(job, parsed.mediaType)) continue;
+      const diffSeconds = Math.round((parsed.wallClockAsUtcMs - jobMs) / 1000);
+      if (!VALID_OFFSET_SECONDS.has(diffSeconds)) continue;
+      counts.set(diffSeconds, (counts.get(diffSeconds) ?? 0) + 1);
+    }
+  }
+  let best = null;
+  for (const [offset, count] of counts) {
+    if (!best || count > best.count) best = { offset, count };
+  }
+  if (!best || best.count < MIN_AGREEING_PAIRS) return null;
+  return best.offset;
+}
+
+/**
+ * Decide which tiles are worth opening for a date group, from the grid's
+ * own aria-labels alone. Returns a Map<job, tile> naming exactly the ONE
+ * tile predicted to confirm each job, or null when the date isn't safe to
+ * fast-path: the offset didn't calibrate, or ANY job's predicted slot has 0
+ * or more than 1 candidate tile (burst shots; a Live Photo can surface as a
+ * paired image+video tile at the same second, but jobMediaTypeMatchesTile
+ * already disambiguates that case when the job's mediaType is known).
+ *
+ * null means "fall back to the exhaustive walk for the WHOLE date" -- never
+ * open some jobs' tiles via a plan we don't fully trust. This function only
+ * decides what's worth OPENING; the caller (worker.mjs) still requires the
+ * info panel's filename to agree before ever trashing anything.
+ */
+export function planAriaMatches(jobs, tiles) {
+  const parsedTiles = tiles
+    .map((tile) => ({ tile, parsed: parseTileAriaLabel(tile.ariaLabel) }))
+    .filter((t) => t.parsed);
+  if (parsedTiles.length === 0) return null;
+
+  const offsetSeconds = calibrateOffsetSeconds(jobs, parsedTiles);
+  if (offsetSeconds == null) return null;
+
+  const matches = new Map();
+  for (const job of jobs) {
+    const jobMs = new Date(job.creationDate).getTime();
+    const predictedMs = jobMs + offsetSeconds * 1000;
+    const candidates = parsedTiles.filter(
+      (t) => t.parsed.wallClockAsUtcMs === predictedMs && jobMediaTypeMatchesTile(job, t.parsed.mediaType)
+    );
+    if (candidates.length !== 1) return null; // ambiguous (0 or >1) -- never guess
+    matches.set(job, candidates[0].tile);
+  }
+  return matches;
+}

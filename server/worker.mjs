@@ -12,12 +12,24 @@
  *   2. Search "<Month> <D>, <YYYY>" via the in-app search box.
  *   3. Collect real photo/video tiles (filter Google's own decoy chips by
  *      aria-label), dedupe (the grid renders one photo at multiple sizes).
- *   4. Open the first tile, open the info panel once, then step through
- *      the day with "View next photo", reading + parsing the panel per
- *      photo (lib/matcher.mjs's parsePanelText).
- *   5. A photo confirms a job when filename matches exactly AND dimensions
- *      agree (either orientation) — lib/matcher.mjs's findMatchingJob.
- *   6. Because the job's creationDate is UTC and Google Photos displays
+ *   4. CHANGE 1 (2026-09-01): before opening anything, try to predict
+ *      exactly which tile matches each queued job from the tiles' own
+ *      aria-labels, which carry capture time to the SECOND (more precise
+ *      than the info panel's minutes-only reading) — see lib/matcher.mjs's
+ *      planAriaMatches() for the self-calibration + collision-safety logic.
+ *      When it returns a plan, ONLY those tiles get opened (~221 opens
+ *      instead of ~700 across ~30 dates). When it returns null (offset
+ *      didn't calibrate, or any job's predicted tile is ambiguous), fall
+ *      straight through to step 5 unchanged — the exhaustive walk.
+ *   5. Exhaustive fallback: open the first unvisited tile, open the info
+ *      panel once, then step through the day's tiles, reading + parsing
+ *      the panel per photo (lib/matcher.mjs's parsePanelText).
+ *   6. A photo confirms a job when filename matches exactly AND dimensions
+ *      agree (either orientation) — lib/matcher.mjs's findMatchingJob. This
+ *      is the ONLY thing that ever authorises a trash — the aria pre-filter
+ *      in step 4 only decides what's worth opening, never confirms a match
+ *      by itself.
+ *   7. Because the job's creationDate is UTC and Google Photos displays
  *      local capture time, and the offset isn't known ahead of time, a
  *      date group's still-unmatched jobs get a second search on day-1 and
  *      a third on day+1 before falling back to needs_review. A wrong-day
@@ -28,6 +40,15 @@
  * job 'trashed'. Ambiguous (0 or >1 agreeing) after all date attempts ->
  * needs_review, never guess.
  *
+ * CHANGE 2 (2026-09-01): Oliver has explicitly decided this worker does not
+ * need bot-detection avoidance (he already bulk-deletes via a scripted
+ * browser extension), so the human-mimicry pacing that used to run by
+ * default (inter-click jitter, pre-submit dwell, per-character typing,
+ * randomized inter-job pacing) is now OFF by default — see stealthDelay()
+ * below. Pass --slow to restore it. The STOP-on-friction behaviour
+ * (assertNoFriction, FRICTION_PATTERNS) is UNCHANGED either way — dropping
+ * pacing is not the same as ignoring a captcha/rate-limit if one shows up.
+ *
  * Connects to the persistent Windows Chrome (profile signed into
  * oliverullman@gmail.com) via the CDP relay on the WSL2 default-route
  * gateway, port 9251. Per ~/.claude/rules/playwright.md: any CDP/selector
@@ -35,6 +56,7 @@
  *
  * Run: node worker.mjs --dry-run [--cap 50]   (safe: never trashes anything)
  *      node worker.mjs --cap 50               (live: trashes matched photos)
+ *      node worker.mjs --cap 50 --slow        (live, with human-scale pacing restored)
  */
 import { execSync } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -49,6 +71,7 @@ import {
   groupJobsByDate,
   isRealPhotoTile,
   dedupeTilesByAriaLabel,
+  planAriaMatches,
 } from './lib/matcher.mjs';
 
 const QUEUE_PATH = process.env.PICNIC_QUEUE_PATH || join(homedir(), '.local/share/picnic/queue.jsonl');
@@ -72,8 +95,9 @@ const INFO_PANEL_OPEN_SELECTOR = 'button[aria-label="Close info"]';
 // which sent moveToTrash down its keyboard fallback and deleted nothing at
 // all, twice. Match on the aria-label alone. Verified live 2026-09-01.
 const TRASH_SELECTOR = '[aria-label="Move to trash" i]';
-// Randomized 4-9s between jobs (was a fixed 4000ms) — a constant interval is
-// itself a bot signature per rules/social-media-browsing.md; jitter it.
+// Only meaningful under --slow (see stealthDelay below) -- the pacing
+// between date-group attempts and between jobs, restored for anyone who
+// wants the old bot-avoidance behaviour back.
 const PACE_MS_MIN = 4000;
 const PACE_MS_MAX = 9000;
 // Bound the walk through a single day's search results so a huge day can't
@@ -86,17 +110,28 @@ export const MAX_STEPS_PER_DATE = 80;
 // tiles that were never going to load.
 export const MAX_SCROLL_ATTEMPTS_PER_DATE = 6;
 
-function parseArgs(argv) {
-  const args = { cap: DEFAULT_CAP, dryRun: false };
+// CHANGE 2 (2026-09-01): Oliver has decided this worker does not need
+// bot-detection avoidance (he already bulk-deletes via a scripted browser
+// extension elsewhere), so human-mimicry pacing is OFF by default now.
+// --slow restores it for anyone who wants it back. Set by parseArgs' return
+// value at the top-level entry point below -- NOT mutated by parseArgs
+// itself (unlike VERBOSE), so stealthDelayRange() below stays a pure,
+// directly-testable function of an explicit boolean.
+let SLOW = false;
+
+export function parseArgs(argv) {
+  const args = { cap: DEFAULT_CAP, dryRun: false, slow: false };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--cap') args.cap = Number(argv[++i]);
     if (argv[i] === '--dry-run') args.dryRun = true;
     if (argv[i] === '--verbose') VERBOSE = true;
+    if (argv[i] === '--slow') args.slow = true;
     if (argv[i] === '--help' || argv[i] === '-h') {
       console.log(
-        'Usage: node worker.mjs [--dry-run] [--cap N]\n' +
+        'Usage: node worker.mjs [--dry-run] [--cap N] [--slow]\n' +
           '  --dry-run  Search + read candidate info + decide, but never trash. Safe default for a first run.\n' +
-          '  --cap N    Max queued jobs to process this run (default 50).'
+          '  --cap N    Max queued jobs to process this run (default 50).\n' +
+          '  --slow     Restore human-scale pacing (inter-click jitter, dwell, per-character typing). Off by default.'
       );
       process.exit(0);
     }
@@ -114,23 +149,48 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Test-only escape hatch: the real pacing (1-9s per action) makes the unit
-// suite take minutes for no benefit, since node:test never touches a real
-// browser or a real rate limiter. Gated by an explicit opt-in env var (never
-// a silent/default change) so production runs always get real human-scale
-// jitter; only worker.test.mjs sets this, before importing the module.
+// Test-only escape hatch: even the fast pacing below still has a real (if
+// short) poll interval for correctness waits, which would make the unit
+// suite take whole seconds for no benefit, since node:test never touches a
+// real browser. Gated by an explicit opt-in env var (never a silent/default
+// change); only worker.test.mjs sets this, before importing the module. This
+// ALWAYS collapses delays to 0 regardless of --slow -- proving --slow
+// actually restores the long delays is done by testing stealthDelayRange()
+// directly (a pure function of its `slow` argument), not by timing a real
+// sleep.
 const FAST_DELAYS = process.env.PICNIC_WORKER_FAST_DELAYS === '1';
 
 /**
- * Random delay in [min, max] ms. Used everywhere instead of a fixed sleep()
- * so the whole run's timing pattern doesn't look scripted — a fixed
- * interval between actions is itself a bot signature (rules/
- * social-media-browsing.md).
+ * Pure: what [min, max] ms range a stealth delay would sleep for, given
+ * whether --slow is set. Exported so --slow's effect is unit-testable
+ * without the suite waiting real seconds (see FAST_DELAYS above).
  */
-function randomDelay(min, max) {
+export function stealthDelayRange(min, max, slow) {
+  return slow ? [min, max] : [0, 0];
+}
+
+/**
+ * Delay that exists ONLY for human-mimicry (inter-click jitter, pre-submit
+ * dwell, "dwell reading the panel", inter-job pacing) -- i.e. the pacing
+ * Oliver said this worker doesn't need. Off by default (sleeps 0); --slow
+ * restores the original random [min, max] jitter. Never used for a wait
+ * that real Google Photos UI needs to settle -- see pollDelay() for that.
+ */
+function stealthDelay(min, max) {
   if (FAST_DELAYS) return sleep(0);
-  const ms = min + Math.random() * (max - min);
-  return sleep(ms);
+  const [lo, hi] = stealthDelayRange(min, max, SLOW);
+  if (lo === hi) return sleep(lo);
+  return sleep(lo + Math.random() * (hi - lo));
+}
+
+// Fixed short pause between polls of a real async UI condition (info panel
+// content, trash confirmation dialog, search-box reachability after
+// Escape). NOT a stealth signal -- repeatedly checking local DOM state isn't
+// something Google's server can see the cadence of -- so this stays fast
+// regardless of --slow; it exists only to avoid busy-looping the CPU while
+// genuinely waiting on the page.
+function pollDelay() {
+  return sleep(FAST_DELAYS ? 0 : 150);
 }
 
 function loud(msg) {
@@ -184,7 +244,7 @@ async function openPhotosHome(page) {
   await page.goto('https://photos.google.com', { waitUntil: 'domcontentloaded' });
   await assertNoFriction(page);
   await page.locator(SEARCH_BOX_SELECTOR).first().waitFor({ state: 'visible', timeout: 30000 });
-  await randomDelay(1000, 3000); // dwell on the loaded page like a person
+  await stealthDelay(1000, 3000); // dwell on the loaded page like a person — pure mimicry, off unless --slow
 }
 
 /**
@@ -193,13 +253,23 @@ async function openPhotosHome(page) {
  * view still covers the app, and the search input resolves but is NOT visible,
  * so the next date's search dies with a click timeout. Escape is the app's own
  * dismiss affordance (no goto/reload, per rules/playwright.md).
+ *
+ * The retry loop itself is a correctness wait (Google's dismiss animation
+ * needs a moment), so it's kept regardless of --slow -- but it now POLLS for
+ * the search box becoming visible after each Escape (up to 2s) instead of
+ * committing to a single fixed dwell, which is both faster when the UI
+ * settles quickly and no less safe when it doesn't.
  */
 async function closeAnyOpenPhoto(page) {
   const searchBox = page.locator(SEARCH_BOX_SELECTOR).first();
   for (let attempt = 0; attempt < 4; attempt++) {
     if (await searchBox.isVisible().catch(() => false)) return;
     await page.keyboard.press('Escape');
-    await randomDelay(900, 1800);
+    const deadline = Date.now() + (FAST_DELAYS ? 20 : 2000);
+    while (Date.now() < deadline) {
+      if (await searchBox.isVisible().catch(() => false)) return;
+      await pollDelay();
+    }
   }
   if (!(await searchBox.isVisible().catch(() => false))) {
     throw new Error('search box still not reachable after 4 Escape presses — UI drift, stopping rather than forcing navigation');
@@ -209,25 +279,27 @@ async function closeAnyOpenPhoto(page) {
 /**
  * Search Google Photos by calendar date ("<Month> <D>, <YYYY>") using the
  * app's own search box (never goto()'ing a /search/<query> URL directly —
- * see module header). Types character-by-character with human-scale delay
- * rather than page.fill(), which pastes the whole string in one DOM
- * mutation and is a well-known automation tell.
+ * see module header). Under --slow, types character-by-character with
+ * human-scale delay rather than page.fill()/a plain type(), which pastes the
+ * whole string in one DOM mutation and is a well-known automation tell; by
+ * default (no bot-avoidance needed) a plain fast type is fine.
  */
 async function searchByDate(page, dateStr) {
   const query = formatSearchDate(dateStr);
   await closeAnyOpenPhoto(page);
   const searchBox = page.locator(SEARCH_BOX_SELECTOR).first();
   await searchBox.click();
-  await randomDelay(1000, 4000);
+  await stealthDelay(1000, 4000); // pure mimicry, off unless --slow
   // Clear any prior query with the keyboard rather than fill().
   await page.keyboard.press('Control+A');
   await page.keyboard.press('Delete');
-  await page.keyboard.type(query, { delay: 80 + Math.random() * 70 }); // 80-150ms/char
-  await randomDelay(2000, 6000); // dwell before submitting, like a person re-reading the query
+  const typeOptions = !FAST_DELAYS && SLOW ? { delay: 80 + Math.random() * 70 } : undefined; // 80-150ms/char only under --slow
+  await page.keyboard.type(query, typeOptions);
+  await stealthDelay(2000, 6000); // pre-submit dwell — pure mimicry, off unless --slow
   await page.keyboard.press('Enter');
   await page.locator(RESULT_LINK_SELECTOR).first().waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
   await assertNoFriction(page);
-  await randomDelay(1500, 3500); // dwell on the results before acting on them
+  await stealthDelay(1500, 3500); // dwell on the results before acting on them — pure mimicry, off unless --slow
   return query;
 }
 
@@ -274,10 +346,10 @@ async function openTile(page, tile) {
     throw new StaleTileError(`tile no longer visible: "${tile.ariaLabel}"`);
   }
   await tile.locator.scrollIntoViewIfNeeded();
-  await randomDelay(500, 2000);
+  await stealthDelay(500, 2000); // pre-click jitter — pure mimicry, off unless --slow
   await tile.locator.click();
   await assertNoFriction(page);
-  await randomDelay(1000, 3000);
+  await stealthDelay(1000, 3000); // post-click settle jitter — pure mimicry, off unless --slow
 }
 
 /**
@@ -291,24 +363,28 @@ async function openTile(page, tile) {
  * yields a dimensions string — rather than on any selector being visible.
  */
 async function openInfoPanelOnce(page) {
-  await randomDelay(500, 1500);
+  await stealthDelay(500, 1500); // pure mimicry, off unless --slow
   // The panel is sticky: once opened it stays open as you move between photos
   // and across searches. Pressing "i" when it is ALREADY open closes it, which
   // is what broke the second date of the first successful walk. Only toggle it
   // when it is genuinely shut. Verified live 2026-09-01.
   const already = await readPanelText(page);
   if (/\d{3,5}\s*[\u00d7x]\s*\d{3,5}/.test(already)) {
-    await randomDelay(400, 1200);
+    await stealthDelay(400, 1200); // pure mimicry, off unless --slow
     return;
   }
   await page.keyboard.press('i');
 
+  // Real correctness wait: poll until the panel actually yields dimensions
+  // text. The poll interval (pollDelay) stays fast regardless of --slow --
+  // it's a local content check, not a network action Google could see the
+  // cadence of.
   const deadline = Date.now() + (FAST_DELAYS ? 50 : 15000);
   while (Date.now() < deadline) {
-    await randomDelay(700, 1400);
+    await pollDelay();
     const text = await readPanelText(page);
     if (/\d{3,5}\s*[\u00d7x]\s*\d{3,5}/.test(text)) {
-      await randomDelay(800, 2000); // dwell reading the panel
+      await stealthDelay(800, 2000); // "dwell reading the panel" — pure mimicry, off unless --slow
       return;
     }
     // Second chance: a VISIBLE "Open info" button, if one is actually there.
@@ -345,12 +421,14 @@ async function readPanelText(page) {
  * Scroll the results grid to load more of the day's tiles. `collectResultTiles`
  * only sees what is currently rendered -- a big day's grid is virtualized, so
  * concluding a date is exhausted just because no unvisited tile is on-screen
- * would silently leave photos unwalked. Human-paced (a real wheel event, then
- * a dwell), not a jump-to-bottom.
+ * would silently leave photos unwalked. The post-scroll wait here is a real
+ * correctness wait (the grid needs a moment to fetch/render newly-scrolled-
+ * into-view tiles before the caller re-collects), not human mimicry, so it
+ * stays short and fixed regardless of --slow.
  */
 async function scrollResults(page) {
   await page.mouse.wheel(0, 600 + Math.random() * 400);
-  await randomDelay(1200, 2200);
+  await sleep(FAST_DELAYS ? 0 : 500);
 }
 
 /**
@@ -384,22 +462,34 @@ async function moveToTrash(page, panelTextBefore) {
   //    toolbar control while it is up dies with "subtree intercepts pointer
   //    events" — exactly how the previous version failed on IMG_1447.PNG.
   // So: press, accept the dialog, check; only then consider a click fallback.
-  const confirmDialog = async () => {
+  // Real correctness wait: the confirmation dialog takes a moment to render
+  // after '#' or a toolbar click. Poll for it rather than committing to a
+  // fixed dwell first -- a fast-rendering dialog doesn't cost the full wait,
+  // and a slow one still gets caught.
+  const waitForConfirmButton = async () => {
     const confirm = page
       .locator('button:has-text("Move to trash"), button:has-text("Delete"), button:has-text("Move to bin")')
       .first();
-    if (await confirm.isVisible().catch(() => false)) {
-      await randomDelay(600, 1500);
-      await confirm.click();
-      return true;
+    const deadline = Date.now() + (FAST_DELAYS ? 20 : 3000);
+    while (Date.now() < deadline) {
+      if (await confirm.isVisible().catch(() => false)) return confirm;
+      await pollDelay();
     }
-    return false;
+    return null;
+  };
+
+  const confirmDialog = async () => {
+    const confirm = await waitForConfirmButton();
+    if (!confirm) return false;
+    await stealthDelay(600, 1500); // pure mimicry, off unless --slow
+    await confirm.click();
+    return true;
   };
 
   const settled = async () => {
     const deadline = Date.now() + (FAST_DELAYS ? 50 : 12000);
     while (Date.now() < deadline) {
-      await randomDelay(700, 1400);
+      await pollDelay();
       const toast = await page.locator('text=/moved to (trash|bin)/i').first().isVisible().catch(() => false);
       if (toast) return true;
       const now = await readPanelText(page);
@@ -409,10 +499,9 @@ async function moveToTrash(page, panelTextBefore) {
     return false;
   };
 
-  await randomDelay(500, 2000);
+  await stealthDelay(500, 2000); // pure mimicry, off unless --slow
   if (VERBOSE) console.log("    trash: pressing '#'");
   await page.keyboard.press('#');
-  await randomDelay(900, 1800);
   const tookDialog = await confirmDialog();
   if (VERBOSE) console.log(`    trash: confirmation dialog ${tookDialog ? 'accepted' : 'not shown'}`);
   if (await settled()) return true;
@@ -423,7 +512,6 @@ async function moveToTrash(page, panelTextBefore) {
     if (await candidate.isVisible().catch(() => false)) {
       if (VERBOSE) console.log('    trash: falling back to clicking the visible control');
       await candidate.click();
-      await randomDelay(900, 1800);
       await confirmDialog();
       break;
     }
@@ -444,6 +532,41 @@ async function moveToTrash(page, panelTextBefore) {
  * dedupeTilesByAriaLabel in lib/matcher.mjs), never by array index: the grid
  * re-renders between tiles and indices shift.
  */
+
+/**
+ * Shared by the aria fast path and the exhaustive walk below: the currently
+ * open photo's panel has just been read and parsed, and (by exact filename +
+ * dimensions -- lib/matcher.mjs's findMatchingJob, already checked by the
+ * caller) confirmed to be `job`'s photo. Live only, trashes it and records
+ * the outcome on the queue; dry-run only logs. This is the ONLY place that
+ * ever calls moveToTrash -- whether the tile got opened via the aria
+ * pre-filter or the exhaustive walk makes no difference to how a match gets
+ * confirmed or trashed.
+ */
+async function confirmAndTrash(page, job, parsed, text, query, queue, dryRun) {
+  if (dryRun) {
+    console.log(`[dry-run WOULD TRASH] ${job.filename} (search ${query})`);
+    return;
+  }
+  const confirmed = await moveToTrash(page, text);
+  const comparison = { searchDate: query, matchedFilename: parsed.filename, pixelWidth: parsed.pixelWidth, pixelHeight: parsed.pixelHeight };
+  if (confirmed) {
+    queue.update(job.id, { status: 'trashed', comparison, attempts: job.attempts + 1 });
+    console.log(`[trashed] ${job.filename} (search ${query})`);
+  } else {
+    // Matched the right photo but could not prove the trash took. Leave it
+    // for a human rather than recording a deletion that may not have
+    // happened.
+    queue.update(job.id, {
+      status: 'needs_review',
+      comparison,
+      error: 'matched but trash action not confirmed',
+      attempts: job.attempts + 1,
+    });
+    console.log(`[needs_review] ${job.filename}: matched but trash not confirmed (search ${query})`);
+  }
+}
+
 export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun }) {
   let remaining = [...unmatchedJobs];
   if (remaining.length === 0) return { stillUnmatched: remaining };
@@ -461,6 +584,68 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
   let scrollAttempts = 0;
   let boundHit = false;
 
+  // --- CHANGE 1: aria fast path -------------------------------------------
+  // Predict which tiles are worth opening from the grid's own aria-labels
+  // (capture time to the SECOND) before falling back to opening every tile.
+  // planAriaMatches() needs the date's FULL tile set to judge safety -- a
+  // tile that hasn't loaded yet could be the duplicate that makes a
+  // seemingly-unique match actually ambiguous -- so scroll to completion
+  // first. This costs at most one wasted scroll+recollect when there was
+  // nothing more to load (cheap; VERIFIED via the fake-page unit suite,
+  // never against live Google Photos -- see the module header).
+  while (scrollAttempts < MAX_SCROLL_ATTEMPTS_PER_DATE) {
+    const beforeCount = tiles.length;
+    await scrollResults(page);
+    scrollAttempts += 1;
+    tiles = await collectResultTiles(page);
+    if (tiles.length <= beforeCount) break; // scroll revealed nothing new -- fully loaded
+  }
+
+  const ariaPlan = planAriaMatches(remaining, tiles);
+  if (ariaPlan) {
+    if (VERBOSE) {
+      console.log(`[search ${query}] aria fast path: ${ariaPlan.size}/${remaining.length} job(s) matched to a tile, opening only those`);
+    }
+    for (const [job, tile] of ariaPlan) {
+      visited.add(tile.ariaLabel);
+      steps += 1;
+      try {
+        await openTile(page, tile);
+      } catch (err) {
+        if (err instanceof StaleTileError) {
+          // Grid shifted under us since planAriaMatches ran. Don't guess --
+          // leave this job for the exhaustive walk below, which re-collects
+          // tiles fresh and will still reach it if it's there.
+          if (VERBOSE) console.log(`  [aria] ${err.message} — leaving for the exhaustive walk`);
+          continue;
+        }
+        throw err;
+      }
+      await openInfoPanelOnce(page);
+      const text = await readPanelText(page);
+      const parsed = parsePanelText(text);
+      // The aria match only decided this tile was worth OPENING -- it never
+      // authorises a trash by itself. If the panel's filename doesn't
+      // confirm `job` (a coincidental offset hit, or the grid reordering
+      // under us), leave the job in `remaining` for the exhaustive walk
+      // rather than giving up on it.
+      if (findMatchingJob(remaining, parsed) === job) {
+        await confirmAndTrash(page, job, parsed, text, query, queue, dryRun);
+        remaining = remaining.filter((j) => j !== job);
+      } else if (VERBOSE) {
+        console.log(
+          `  [aria] predicted tile for ${job.filename} did not confirm by filename ` +
+            `(got ${parsed.filename ?? '(none)'}) — leaving for the exhaustive walk`
+        );
+      }
+      if (remaining.length === 0) break;
+      await closeAnyOpenPhoto(page);
+    }
+    if (remaining.length === 0) return { stillUnmatched: remaining };
+    tiles = await collectResultTiles(page); // grid re-renders after trashing/closing
+  }
+
+  // --- Exhaustive fallback (unchanged from before Change 1) --------------
   while (remaining.length > 0) {
     let tile = tiles.find((t) => !visited.has(t.ariaLabel));
 
@@ -506,27 +691,7 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
     }
     const job = findMatchingJob(remaining, parsed);
     if (job) {
-      if (dryRun) {
-        console.log(`[dry-run WOULD TRASH] ${job.filename} (search ${query})`);
-      } else {
-        const confirmed = await moveToTrash(page, text);
-        const comparison = { searchDate: query, matchedFilename: parsed.filename, pixelWidth: parsed.pixelWidth, pixelHeight: parsed.pixelHeight };
-        if (confirmed) {
-          queue.update(job.id, { status: 'trashed', comparison, attempts: job.attempts + 1 });
-          console.log(`[trashed] ${job.filename} (search ${query})`);
-        } else {
-          // Matched the right photo but could not prove the trash took. Leave
-          // it for a human rather than recording a deletion that may not have
-          // happened.
-          queue.update(job.id, {
-            status: 'needs_review',
-            comparison,
-            error: 'matched but trash action not confirmed',
-            attempts: job.attempts + 1,
-          });
-          console.log(`[needs_review] ${job.filename}: matched but trash not confirmed (search ${query})`);
-        }
-      }
+      await confirmAndTrash(page, job, parsed, text, query, queue, dryRun);
       remaining = remaining.filter((j) => j !== job);
     }
 
@@ -562,7 +727,7 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun }) {
         if (unmatched.length === 0) break;
         const { stillUnmatched } = await processDateGroup(page, attemptDate, unmatched, queue, { dryRun });
         unmatched = stillUnmatched;
-        if (unmatched.length > 0) await randomDelay(PACE_MS_MIN, PACE_MS_MAX);
+        if (unmatched.length > 0) await stealthDelay(PACE_MS_MIN, PACE_MS_MAX); // pure mimicry, off unless --slow
       }
     } catch (err) {
       if (isPageClosedError(page, err)) {
@@ -598,7 +763,7 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun }) {
         console.log(`[needs_review] ${job.filename}: no filename+dimensions match for ${dateStr} (+/-1 day)`);
       }
     }
-    await randomDelay(PACE_MS_MIN, PACE_MS_MAX); // pace between date groups
+    await stealthDelay(PACE_MS_MIN, PACE_MS_MAX); // pace between date groups — pure mimicry, off unless --slow
   }
 }
 
@@ -665,6 +830,7 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false } = {}) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = parseArgs(process.argv.slice(2));
+  if (args.slow) SLOW = true;
   runWorker(args).catch((err) => {
     loud(`BLOCKER: unhandled worker failure: ${err.stack || err}`);
     process.exit(1);

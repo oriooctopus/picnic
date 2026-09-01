@@ -14,9 +14,15 @@ import { createFakePage } from './helpers/fakePage.mjs';
 // in milliseconds instead of minutes, without changing that pacing for a
 // real run (see the FAST_DELAYS comment in worker.mjs).
 process.env.PICNIC_WORKER_FAST_DELAYS = '1';
-const { processDateGroup, runDateGroups, assertNoFriction, isPageClosedError, MAX_STEPS_PER_DATE } = await import(
-  '../worker.mjs'
-);
+const {
+  processDateGroup,
+  runDateGroups,
+  assertNoFriction,
+  isPageClosedError,
+  MAX_STEPS_PER_DATE,
+  parseArgs,
+  stealthDelayRange,
+} = await import('../worker.mjs');
 
 async function withTempQueue(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'picnic-worker-test-'));
@@ -460,4 +466,163 @@ test('isPageClosedError recognizes both page.isClosed() and the Playwright close
   const openPage = createFakePage();
   assert.equal(isPageClosedError(openPage, new Error('Target page, context or browser has been closed')), true);
   assert.equal(isPageClosedError(openPage, new Error('totally unrelated failure')), false);
+});
+
+// -- CHANGE 1: aria fast-path integration tests -----------------------------
+//
+// These use real tile aria-label timestamps (not the placeholder
+// "tile-A"-style labels the tests above use), computed at a genuine +6h
+// offset from each job's UTC creationDate -- same shape as the live tiles
+// described in the task brief ("Photo - Portrait - Aug 5, 2026, 6:54:07 PM").
+
+test('aria fast path: with many tiles on the date but few jobs, only the matched tiles get opened', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: jobPhoto } = queue.enqueue({
+      filename: 'IMG_3001.HEIC',
+      creationDate: '2026-08-05T10:00:00.000Z',
+      pixelWidth: 1000,
+      pixelHeight: 1000,
+      mediaType: 'image',
+    });
+    const { job: jobVideo } = queue.enqueue({
+      filename: 'IMG_3002.MOV',
+      creationDate: '2026-08-05T11:15:00.000Z',
+      pixelWidth: 1920,
+      pixelHeight: 1080,
+      mediaType: 'video',
+    });
+    // True tiles (+6h local offset, matching the two jobs above) plus a
+    // decoy Photo tile sharing jobVideo's exact predicted second (proves
+    // mediaType gating, not just timestamp, decides the match) plus 5
+    // unrelated decoy tiles elsewhere on the date.
+    const tPhoto = 'Photo - Portrait - Aug 5, 2026, 4:00:00 PM';
+    const tVideoTrue = 'Video - Landscape - Aug 5, 2026, 5:15:00 PM';
+    const tVideoDecoyPhoto = 'Photo - Landscape - Aug 5, 2026, 5:15:00 PM'; // same second as tVideoTrue, wrong kind
+    const decoys = [
+      'Photo - Portrait - Aug 5, 2026, 1:00:00 AM',
+      'Photo - Portrait - Aug 5, 2026, 2:11:17 AM',
+      'Photo - Portrait - Aug 5, 2026, 3:22:34 AM',
+      'Photo - Portrait - Aug 5, 2026, 4:33:51 AM',
+      'Photo - Portrait - Aug 5, 2026, 5:44:08 AM',
+    ];
+    // The true tiles go LAST: if the aria fast path didn't actually fire and
+    // the code fell back to opening tiles in grid order instead, it would
+    // have to open every decoy before ever reaching a real match, which
+    // would blow well past the "exactly 2" assertion below and expose the
+    // regression. (Putting them first would let a broken always-exhaustive
+    // fallback coincidentally match this assertion too, since the walk stops
+    // as soon as every job is matched -- verified by mutation, see report.)
+    const allLabels = [...decoys, tVideoDecoyPhoto, tPhoto, tVideoTrue];
+
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': allLabels.map((ariaLabel) => ({ ariaLabel })) },
+      panelTextByLabel: {
+        // Only the two TRUE tiles get panel text -- if the aria fast path
+        // regressed and opened a decoy instead, its panel would come back
+        // empty and the job would wrongly go unmatched, failing this test.
+        'August 5, 2026': {
+          [tPhoto]: panelBlock('IMG_3001.HEIC', 1000, 1000),
+          [tVideoTrue]: panelBlock('IMG_3002.MOV', 1920, 1080),
+        },
+      },
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [jobPhoto, jobVideo], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0);
+    assert.equal(queue.getById(jobPhoto.id).status, 'trashed');
+    assert.equal(queue.getById(jobVideo.id).status, 'trashed');
+
+    const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
+    assert.equal(tileClicks.length, 2, `expected exactly 2 tiles opened (of ${allLabels.length} on the date), got: ${JSON.stringify(tileClicks)}`);
+    assert.ok(tileClicks.includes(`tile-click:${tPhoto}`));
+    assert.ok(tileClicks.includes(`tile-click:${tVideoTrue}`));
+    assert.ok(!tileClicks.includes(`tile-click:${tVideoDecoyPhoto}`), 'video job must match the Video tile, never the same-second Photo decoy');
+    for (const decoy of decoys) {
+      assert.ok(!tileClicks.includes(`tile-click:${decoy}`), `unrelated decoy tile "${decoy}" must never be opened`);
+    }
+  });
+});
+
+test('aria fast path: two tiles sharing the same predicted second fall back to the exhaustive walk, never a guess', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue(IMG_1433_JOB); // Aug 5, 12:54:07Z -> local 6:54:07 PM at +6h
+    const { job: job2 } = queue.enqueue(IMG_1441_JOB); // Aug 5, 13:31:07Z -> local 7:31:07 PM at +6h
+    const label1 = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
+    const label2 = 'Photo - Portrait - Aug 5, 2026, 7:31:07 PM';
+    // A second tile at job2's exact predicted second+mediaType -- a genuine
+    // burst-shot collision. planAriaMatches must refuse the WHOLE date
+    // rather than guess between label2 and this one. Placed BEFORE label2
+    // in tile order so the exhaustive walk's in-order scan necessarily opens
+    // it before reaching job2's real match -- if the code had instead
+    // trusted a 2-tile aria plan (label1, label2), this tile would never be
+    // opened at all, so its presence in the open log is the fallback's
+    // fingerprint.
+    const collidingLabel = 'Photo - Landscape - Aug 5, 2026, 7:31:07 PM';
+    const labels = [label1, collidingLabel, label2];
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': labels.map((ariaLabel) => ({ ariaLabel })) },
+      panelTextByLabel: {
+        'August 5, 2026': {
+          [label1]: IMG_1433_BLOCK,
+          [label2]: IMG_1441_BLOCK,
+          [collidingLabel]: panelBlock('IMG_9999.HEIC', 1000, 1000), // matches neither job -- just noise the walk must step past
+        },
+      },
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'the exhaustive walk must still resolve both jobs by filename');
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.equal(queue.getById(job2.id).status, 'trashed');
+    // The fallback signature: the walk opened the COLLIDING tile too (it sits
+    // between label1 and label2 in the grid), proving it walked every tile in
+    // order rather than trusting a 2-tile aria plan that would have skipped it.
+    const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
+    for (const label of labels) {
+      assert.ok(tileClicks.includes(`tile-click:${label}`), `expected exhaustive walk to open "${label}"`);
+    }
+  });
+});
+
+test('aria fast path: a predicted tile that does not confirm by filename is never trashed (falls through to the exhaustive walk)', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue(IMG_1433_JOB);
+    const { job: job2 } = queue.enqueue(IMG_1441_JOB);
+    const label1 = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
+    const label2 = 'Photo - Portrait - Aug 5, 2026, 7:31:07 PM';
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [{ ariaLabel: label1 }, { ariaLabel: label2 }] },
+      panelTextByLabel: {
+        'August 5, 2026': {
+          [label1]: IMG_1433_BLOCK, // job1's aria-predicted tile confirms normally
+          // job2's aria-predicted tile (label2) opens to a DIFFERENT photo's
+          // panel -- simulates the aria prediction landing on the wrong
+          // tile. Must never be trashed off the aria match alone.
+          [label2]: panelBlock('IMG_9999.HEIC', 3024, 4032, 'Aug 5Wed, 7:31 PMGMT-06:00'),
+        },
+      },
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false });
+
+    assert.equal(queue.getById(job1.id).status, 'trashed', 'job1 confirmed normally via the aria match');
+    assert.equal(stillUnmatched.length, 1, 'job2 must remain unresolved, not silently dropped or trashed');
+    assert.equal(stillUnmatched[0].id, job2.id);
+    assert.equal(queue.getById(job2.id).status, 'queued', 'processDateGroup itself must not mark it -- unchanged from the pre-existing filename-mismatch contract');
+    // '#' (the trash shortcut) must be pressed exactly once -- job1's
+    // legitimate trash. If job2's mismatched aria-predicted tile had been
+    // trashed anyway, this would be 2.
+    const trashPresses = page.log.filter((l) => l === 'key:#');
+    assert.equal(trashPresses.length, 1, 'the mismatched tile must never reach the trash keyboard shortcut');
+  });
+});
+
+test('--slow: parseArgs recognizes the flag, and stealthDelayRange restores the long delays only when slow=true', () => {
+  assert.equal(parseArgs([]).slow, false, 'off by default');
+  assert.equal(parseArgs(['--dry-run', '--slow', '--cap', '10']).slow, true);
+
+  assert.deepEqual(stealthDelayRange(500, 2000, false), [0, 0], 'default (fast): no jitter');
+  assert.deepEqual(stealthDelayRange(500, 2000, true), [500, 2000], '--slow: original human-scale range restored');
 });
