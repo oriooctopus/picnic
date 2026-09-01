@@ -2,24 +2,36 @@
 /**
  * Drains queued Picnic mirror jobs against Google Photos web.
  *
- * Per job: search photos.google.com by filename, open each candidate's info
- * panel, and require filename + capture timestamp + pixel dimensions to ALL
- * agree (see lib/matcher.mjs) before moving the photo to Google Photos
- * TRASH. Never permanent-delete. Ambiguous (0 or >1 agreeing candidates) ->
+ * STRATEGY (rewritten 2026-09-01 — see git history for the prior filename-
+ * search design, which was disproven live: Google Photos search does not
+ * match filenames, it returns semantically "relevant" photos spanning
+ * years). Date search DOES work, so:
+ *
+ *   1. Group queued jobs by the UTC calendar date of their creationDate.
+ *      One search per date group, not per job (221 jobs -> ~30 searches).
+ *   2. Search "<Month> <D>, <YYYY>" via the in-app search box.
+ *   3. Collect real photo/video tiles (filter Google's own decoy chips by
+ *      aria-label), dedupe (the grid renders one photo at multiple sizes).
+ *   4. Open the first tile, open the info panel once, then step through
+ *      the day with "View next photo", reading + parsing the panel per
+ *      photo (lib/matcher.mjs's parsePanelText).
+ *   5. A photo confirms a job when filename matches exactly AND dimensions
+ *      agree (either orientation) — lib/matcher.mjs's findMatchingJob.
+ *   6. Because the job's creationDate is UTC and Google Photos displays
+ *      local capture time, and the offset isn't known ahead of time, a
+ *      date group's still-unmatched jobs get a second search on day-1 and
+ *      a third on day+1 before falling back to needs_review. A wrong-day
+ *      guess only costs a wasted search — every hit is still confirmed by
+ *      exact filename, never assumed from the date match alone.
+ *
+ * On a match: click "Move to trash" (never permanent-delete) and mark the
+ * job 'trashed'. Ambiguous (0 or >1 agreeing) after all date attempts ->
  * needs_review, never guess.
  *
  * Connects to the persistent Windows Chrome (profile signed into
  * oliverullman@gmail.com) via the CDP relay on the WSL2 default-route
  * gateway, port 9251. Per ~/.claude/rules/playwright.md: any CDP/selector
  * failure is surfaced loudly and the run stops (no silent retry loops).
- *
- * NOTE: this file has intentionally NOT been run against real Google Photos
- * (per task instructions — the live test happens later with Oliver). The
- * DOM selectors in searchCandidates/openInfoPanel/moveToTrash are
- * best-effort against Google Photos' current web UI and MUST be verified
- * against the live site on the first real run before trusting its output.
- * DEFAULT to --dry-run for that first live run: it exercises search, info
- * reads, and decideMatch without ever calling moveToTrash.
  *
  * Run: node worker.mjs --dry-run [--cap 50]   (safe: never trashes anything)
  *      node worker.mjs --cap 50               (live: trashes matched photos)
@@ -28,21 +40,38 @@ import { execSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { JobQueue } from './lib/queue.mjs';
-import { decideMatch } from './lib/matcher.mjs';
+import {
+  parsePanelText,
+  findMatchingJob,
+  utcDateOf,
+  shiftDateDays,
+  formatSearchDate,
+  groupJobsByDate,
+  isRealPhotoTile,
+  dedupeTilesByAriaLabel,
+} from './lib/matcher.mjs';
 
 const QUEUE_PATH = process.env.PICNIC_QUEUE_PATH || join(homedir(), '.local/share/picnic/queue.jsonl');
 const DEFAULT_CAP = 50;
 const SEARCH_BOX_SELECTOR = 'input[aria-label*="Search" i], input[placeholder*="Search" i]';
-const TILE_SELECTOR = '[data-latest-bg], a[href^="./photo/"]';
+// Search-result tiles share this href prefix with non-photo chips (e.g.
+// "Favorites") — filtered down to real tiles via isRealPhotoTile().
+const RESULT_LINK_SELECTOR = 'a[href^="./search/"]';
+// Exact aria-label, not a substring match: `[aria-label*="Info"]` also
+// hits "Close info" and others (4 elements observed live) and .first()
+// on that times out. "Open info" is exact.
+const OPEN_INFO_SELECTOR = 'button[aria-label="Open info"]';
+const INFO_PANEL_SELECTOR = '[aria-label="Info"], [role="complementary"]';
+const NEXT_PHOTO_SELECTOR = 'button[aria-label="View next photo" i]';
+const TRASH_SELECTOR = 'button[aria-label="Move to trash" i]';
 // Randomized 4-9s between jobs (was a fixed 4000ms) — a constant interval is
 // itself a bot signature per rules/social-media-browsing.md; jitter it.
 const PACE_MS_MIN = 4000;
 const PACE_MS_MAX = 9000;
-// At most 3 candidates opened per job (was 10) — opening every search hit
-// back-to-back is "rapid-fire enumeration", the strongest scraper signature
-// per rules/social-media-browsing.md. 3 is enough for decideMatch's
-// all-fields-agree check to find (or rule out) the real match in practice.
-export const MAX_CANDIDATES_PER_JOB = 3;
+// Bound the walk through a single day's search results so a huge day can't
+// loop forever. Unmatched jobs for that date attempt just fall through to
+// the next date attempt (or needs_review) once the cap is hit.
+export const MAX_STEPS_PER_DATE = 80;
 
 function parseArgs(argv) {
   const args = { cap: DEFAULT_CAP, dryRun: false };
@@ -137,10 +166,7 @@ export async function assertNoFriction(page) {
  */
 async function openPhotosHome(page) {
   // NOT 'networkidle': Google Photos holds long-lived connections open, so
-  // the network never goes idle and the wait dies with "Target page,
-  // context or browser has been closed" instead of ever resolving (observed
-  // on the first live run, 2026-09-01). Wait for a real piece of the UI
-  // instead — that is what "loaded" actually means here.
+  // the network never goes idle. Wait for a real piece of the UI instead.
   await page.goto('https://photos.google.com', { waitUntil: 'domcontentloaded' });
   await assertNoFriction(page);
   await page.locator(SEARCH_BOX_SELECTOR).first().waitFor({ state: 'visible', timeout: 30000 });
@@ -148,162 +174,175 @@ async function openPhotosHome(page) {
 }
 
 /**
- * Search Google Photos by filename using the app's own search box (never
- * goto()'ing a /search/<query> URL directly — see module header). Types
- * the filename character-by-character with human-scale delay rather than
- * page.fill(), which pastes the whole string in one DOM mutation and is a
- * well-known automation tell.
+ * Search Google Photos by calendar date ("<Month> <D>, <YYYY>") using the
+ * app's own search box (never goto()'ing a /search/<query> URL directly —
+ * see module header). Types character-by-character with human-scale delay
+ * rather than page.fill(), which pastes the whole string in one DOM
+ * mutation and is a well-known automation tell.
  */
-async function searchCandidates(page, filename) {
+async function searchByDate(page, dateStr) {
+  const query = formatSearchDate(dateStr);
   const searchBox = page.locator(SEARCH_BOX_SELECTOR).first();
   await searchBox.click();
   await randomDelay(1000, 4000);
-  // Clear any prior query with the keyboard rather than fill(): fill() pastes
-  // in a single DOM mutation, which rules/social-media-browsing.md calls out.
+  // Clear any prior query with the keyboard rather than fill().
   await page.keyboard.press('Control+A');
   await page.keyboard.press('Delete');
-  await page.keyboard.type(filename, { delay: 80 + Math.random() * 70 }); // 80-150ms/char
+  await page.keyboard.type(query, { delay: 80 + Math.random() * 70 }); // 80-150ms/char
   await randomDelay(2000, 6000); // dwell before submitting, like a person re-reading the query
   await page.keyboard.press('Enter');
-  // See openPhotosHome: networkidle never settles on this site. Wait for the
-  // results themselves, and treat "no tiles" as a real empty result rather
-  // than hanging.
-  await page.locator(TILE_SELECTOR).first().waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
+  await page.locator(RESULT_LINK_SELECTOR).first().waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
   await assertNoFriction(page);
   await randomDelay(1500, 3500); // dwell on the results before acting on them
-
-  // Photo tiles in Google Photos search results.
-  const tiles = await page.locator(TILE_SELECTOR).all();
-  return tiles;
+  return query;
 }
 
 /**
- * Open a candidate's info panel (the "i" details view) and read back
- * filename, capture timestamp, and pixel dimensions as displayed by Google
- * Photos.
+ * Collect this date's real photo/video tiles (filtering Google's own decoy
+ * chips, deduping the same photo rendered at multiple grid sizes).
  */
-async function readCandidateInfo(page, tileLocator) {
-  await tileLocator.click();
-  await assertNoFriction(page);
-  await randomDelay(1000, 4000);
-  // Open info panel (keyboard shortcut "i", matches Google Photos UI).
-  await page.keyboard.press('i');
-  const infoPanel = page.locator('[aria-label="Info"], [role="complementary"]').first();
-  await infoPanel.waitFor({ state: 'visible', timeout: 10000 });
-  await randomDelay(1000, 3000); // dwell reading the panel before extracting text
-
-  const filename = (await infoPanel.locator('text=/\\.[A-Za-z0-9]{2,4}$/').first().textContent().catch(() => null))?.trim();
-  const dateText = (await infoPanel.locator('[aria-label*="date" i], [aria-label*="Date" i]').first().textContent().catch(() => null))?.trim();
-  const dimsText = (await infoPanel.locator('text=/\\d+\\s*[×x]\\s*\\d+/').first().textContent().catch(() => null))?.trim();
-
-  let pixelWidth = null;
-  let pixelHeight = null;
-  const dimsMatch = dimsText && /(\d+)\s*[×x]\s*(\d+)/.exec(dimsText);
-  if (dimsMatch) {
-    pixelWidth = Number(dimsMatch[1]);
-    pixelHeight = Number(dimsMatch[2]);
+async function collectResultTiles(page) {
+  const links = await page.locator(RESULT_LINK_SELECTOR).all();
+  const withLabels = [];
+  for (const link of links) {
+    const ariaLabel = await link.getAttribute('aria-label').catch(() => null);
+    withLabels.push({ locator: link, ariaLabel });
   }
-
-  const captureDateTime = dateText ? new Date(dateText).toISOString() : null;
-
-  return {
-    filename,
-    captureDateTime,
-    pixelWidth,
-    pixelHeight,
-    url: page.url(),
-  };
+  return dedupeTilesByAriaLabel(withLabels.filter((t) => isRealPhotoTile(t.ariaLabel)));
 }
 
-/**
- * Return from an open photo to the search results. Google Photos' own UI
- * has a close ("X" / back arrow) control in the photo viewer toolbar —
- * prefer clicking that over page.goBack(), which is a full history
- * navigation rather than an in-app action and is what rules/playwright.md
- * forbids for authenticated apps. Falls back to goBack() only if that
- * control genuinely isn't found (unverified selector — flagged for the
- * first live run), with an explicit comment so it's never silently assumed
- * to be the primary path.
- */
-async function returnToResults(page) {
-  const closeButton = page.locator('button[aria-label="Back" i], button[aria-label="Close" i]').first();
-  if (await closeButton.count()) {
+/** Open a tile. Requires bringToFront() first — see module header note. */
+async function openTile(page, tile) {
+  await page.bringToFront();
+  await tile.locator.scrollIntoViewIfNeeded();
+  await randomDelay(500, 2000);
+  await tile.locator.click();
+  await assertNoFriction(page);
+  await randomDelay(1000, 3000);
+}
+
+/** Open the info panel once (button, falling back to the "i" shortcut). */
+async function openInfoPanelOnce(page) {
+  const infoButton = page.locator(OPEN_INFO_SELECTOR).first();
+  if (await infoButton.count()) {
     await randomDelay(500, 2000);
-    await closeButton.click();
-    await page.locator(TILE_SELECTOR).first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
-    await assertNoFriction(page);
-    return;
+    await infoButton.click();
+  } else {
+    await page.keyboard.press('i');
   }
-  // KNOWN DEVIATION: no in-app close/back control matched. Falling back to
-  // browser history nav rather than getting the whole job stuck — this is
-  // exactly the goBack() the rules discourage, kept only as a last resort
-  // until the real selector is confirmed against the live site.
-  await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
+  const panel = page.locator(INFO_PANEL_SELECTOR).first();
+  await panel.waitFor({ state: 'visible', timeout: 10000 });
+  await randomDelay(1000, 3000); // dwell reading the panel before extracting text
+}
+
+async function readPanelText(page) {
+  return (await page.locator(INFO_PANEL_SELECTOR).first().textContent().catch(() => '')) ?? '';
+}
+
+/** Step to the next photo in the day, keeping the info panel open. Returns false when there's no next photo. */
+async function viewNextPhoto(page) {
+  const nextButton = page.locator(NEXT_PHOTO_SELECTOR).first();
+  if (!(await nextButton.count())) return false;
+  await randomDelay(1000, 3000);
+  await nextButton.click();
   await assertNoFriction(page);
+  await randomDelay(1000, 3000); // dwell for the panel to update before reading it
+  return true;
 }
 
 /** Move the currently-open photo to trash via the UI. NEVER permanent-delete. */
 async function moveToTrash(page) {
-  // The actual mechanism is the confirm button below, not a keyboard
-  // shortcut: Google Photos' web UI does not bind a bare Delete/Shift+Delete
-  // key to trash reliably across all view types (album vs. search-result
-  // viewer), so we click the toolbar/menu trash action and then confirm.
-  // (An earlier version of this comment claimed Shift+Delete was the
-  // shortcut; that was never verified against the live UI and did not match
-  // the code below, which pressed plain Delete. Selector below is
-  // unverified — see module header — confirm on first live run.)
-  const trashButton = page.locator('button[aria-label="Delete" i], button[aria-label="Move to trash" i]').first();
+  const trashButton = page.locator(TRASH_SELECTOR).first();
   await randomDelay(500, 2000);
   await trashButton.click();
-  const confirmButton = page.locator('button:has-text("Move to trash")');
-  await confirmButton.waitFor({ state: 'visible', timeout: 5000 });
-  await randomDelay(500, 1500);
-  await confirmButton.click();
 }
 
-export async function processJob(page, job, queue, { dryRun }) {
-  const tiles = await searchCandidates(page, job.filename);
+/**
+ * Search one calendar date and walk its results, confirming and (live
+ * only) trashing every still-unmatched job it can. Returns the jobs from
+ * `unmatchedJobs` that remain unconfirmed after this date's walk.
+ */
+export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun }) {
+  let remaining = [...unmatchedJobs];
+  if (remaining.length === 0) return { stillUnmatched: remaining };
+
+  const query = await searchByDate(page, dateStr);
+  const tiles = await collectResultTiles(page);
   if (tiles.length === 0) {
-    const decision = decideMatch(job, []);
-    if (dryRun) {
-      console.log(`[dry-run needs_review] ${job.filename}: no search results`);
-    } else {
-      queue.update(job.id, { status: 'needs_review', comparison: decision, attempts: job.attempts + 1 });
-      console.log(`[needs_review] ${job.filename}: no search results`);
-    }
-    return;
+    console.log(`[search ${query}] no results`);
+    return { stillUnmatched: remaining };
   }
 
-  const candidates = [];
-  for (const tile of tiles.slice(0, MAX_CANDIDATES_PER_JOB)) {
-    const info = await readCandidateInfo(page, tile);
-    candidates.push(info);
-    await returnToResults(page);
-    await randomDelay(1000, 4000); // between-candidate pacing, not just between-job
+  await openTile(page, tiles[0]);
+  await openInfoPanelOnce(page);
+
+  let steps = 0;
+  let hasMore = true;
+  while (hasMore && remaining.length > 0 && steps < MAX_STEPS_PER_DATE) {
+    const text = await readPanelText(page);
+    const parsed = parsePanelText(text);
+    const job = findMatchingJob(remaining, parsed);
+    if (job) {
+      if (dryRun) {
+        console.log(`[dry-run WOULD TRASH] ${job.filename} (search ${query})`);
+      } else {
+        await moveToTrash(page);
+        queue.update(job.id, {
+          status: 'trashed',
+          comparison: { searchDate: query, matchedFilename: parsed.filename, pixelWidth: parsed.pixelWidth, pixelHeight: parsed.pixelHeight },
+          attempts: job.attempts + 1,
+        });
+        console.log(`[trashed] ${job.filename} (search ${query})`);
+      }
+      remaining = remaining.filter((j) => j !== job);
+    }
+    steps += 1;
+    if (remaining.length === 0) break;
+    hasMore = await viewNextPhoto(page);
   }
 
-  const decision = decideMatch(job, candidates);
+  return { stillUnmatched: remaining };
+}
 
-  if (decision.decision === 'match') {
-    if (dryRun) {
-      // Dry-run must never call moveToTrash and must never mutate the
-      // queue — it exists precisely so the first live exercise of these
-      // unverified selectors can be observed without any side effect.
-      console.log(`[dry-run WOULD TRASH] ${job.filename} -> ${decision.matchedCandidate.url}`);
-      return;
+/**
+ * Process every date group: UTC-derived date first, then day-1 and day+1
+ * only for jobs still unmatched after the prior attempt. Anything left
+ * unmatched after all three attempts becomes needs_review.
+ */
+export async function runDateGroups(page, groupedJobs, queue, { dryRun }) {
+  for (const [dateStr, jobs] of groupedJobs) {
+    let unmatched = [...jobs];
+    const attemptDates = [dateStr, shiftDateDays(dateStr, -1), shiftDateDays(dateStr, 1)];
+
+    try {
+      for (const attemptDate of attemptDates) {
+        if (unmatched.length === 0) break;
+        const { stillUnmatched } = await processDateGroup(page, attemptDate, unmatched, queue, { dryRun });
+        unmatched = stillUnmatched;
+        if (unmatched.length > 0) await randomDelay(PACE_MS_MIN, PACE_MS_MAX);
+      }
+    } catch (err) {
+      if (!dryRun) {
+        for (const job of unmatched) {
+          queue.update(job.id, { status: 'error', error: String(err.message || err), attempts: job.attempts + 1 });
+        }
+      }
+      throw err; // stop the whole run, no silent retry loop
     }
-    const matchedTileIndex = candidates.indexOf(decision.matchedCandidate);
-    await readCandidateInfo(page, tiles[matchedTileIndex]); // reopen the matched photo
-    await moveToTrash(page);
-    queue.update(job.id, { status: 'trashed', comparison: decision, attempts: job.attempts + 1 });
-    console.log(`[trashed] ${job.filename}`);
-  } else {
-    if (dryRun) {
-      console.log(`[dry-run needs_review] ${job.filename}: ${candidates.length} candidate(s), none conclusively agreed`);
-      return;
+
+    for (const job of unmatched) {
+      if (dryRun) {
+        console.log(`[dry-run needs_review] ${job.filename}: no filename+dimensions match for ${dateStr} (+/-1 day)`);
+      } else {
+        queue.update(job.id, {
+          status: 'needs_review',
+          comparison: { reason: `no filename+dimensions match for ${dateStr} (+/-1 day)` },
+          attempts: job.attempts + 1,
+        });
+        console.log(`[needs_review] ${job.filename}: no filename+dimensions match for ${dateStr} (+/-1 day)`);
+      }
     }
-    queue.update(job.id, { status: 'needs_review', comparison: decision, attempts: job.attempts + 1 });
-    console.log(`[needs_review] ${job.filename}: ${candidates.length} candidate(s), none conclusively agreed`);
+    await randomDelay(PACE_MS_MIN, PACE_MS_MAX); // pace between date groups
   }
 }
 
@@ -316,8 +355,10 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false } = {}) {
     return;
   }
 
+  const groups = groupJobsByDate(jobs);
+
   if (dryRun) {
-    console.log(`--dry-run: will search + decide for ${jobs.length} job(s) but never trash or mutate the queue.`);
+    console.log(`--dry-run: will search + decide for ${jobs.length} job(s) across ${groups.size} date(s) but never trash or mutate the queue.`);
   }
 
   let gw;
@@ -351,29 +392,17 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false } = {}) {
     const context = browser.contexts()[0] ?? (await browser.newContext());
     page = await context.newPage();
     await openPhotosHome(page);
-
-    for (const job of jobs) {
-      try {
-        await processJob(page, job, queue, { dryRun });
-      } catch (err) {
-        if (!dryRun) {
-          queue.update(job.id, { status: 'error', error: String(err.message || err), attempts: job.attempts + 1 });
-        }
-        loud(`BLOCKER: worker error on job ${job.id} (${job.filename}): ${err.stack || err}`);
-        process.exitCode = 1;
-        return; // stop the run, no silent retry loop
-      }
-      await randomDelay(PACE_MS_MIN, PACE_MS_MAX);
-    }
+    await runDateGroups(page, groups, queue, { dryRun });
+  } catch (err) {
+    loud(`BLOCKER: worker error: ${err.stack || err}`);
+    process.exitCode = 1;
   } finally {
     // IMPORTANT: only close the page/tab this worker opened, never the
     // browser. `browser` here came from chromium.connectOverCDP() against
     // Oliver's persistent, already-signed-in Windows Chrome — calling
     // browser.close() on a CDP connection sends Browser.close and kills
     // that real Chrome process outright (not just this tab), same as
-    // "never kill a Chrome to free a port" in CLAUDE.md. A previous version
-    // of this file did call browser.close() here; that was never exercised
-    // against the live browser and would have taken down Oliver's session.
+    // "never kill a Chrome to free a port" in CLAUDE.md.
     await page?.close().catch(() => {});
   }
 }

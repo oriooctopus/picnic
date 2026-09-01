@@ -1,12 +1,21 @@
 /**
  * Minimal fake of the slice of the Playwright `page` API worker.mjs
- * actually calls (locator/keyboard/goto/waitForLoadState/url), driven by a
+ * actually calls (locator/keyboard/goto/bringToFront/url), driven by a
  * small config object instead of a real browser. Selector matching is by
  * regex against the CSS/text selector string worker.mjs passes to
- * page.locator(...) / infoPanel.locator(...) — this mirrors how Playwright
- * itself would resolve those selectors, just against fake data instead of
- * a real DOM, so the same worker.mjs code path (search box -> tiles ->
- * info panel -> back/trash buttons) runs unmodified in tests.
+ * page.locator(...) — this mirrors how Playwright itself would resolve
+ * those selectors, just against fake data instead of a real DOM, so the
+ * same worker.mjs code path (date search -> tiles -> info panel -> "View
+ * next photo" -> trash) runs unmodified in tests.
+ *
+ * Model: a search ("August 5, 2026") resolves to a fixed list of result
+ * tiles (`searchResults[query]`, each `{ ariaLabel }` — real tiles and
+ * decoy chips alike, exactly like the live grid) and a fixed, ordered
+ * sequence of info-panel texts (`photoSequence[query]`) reached by opening
+ * the first tile and then repeatedly clicking "View next photo". The fake
+ * doesn't try to line up tiles[i] with photoSequence[i] — worker.mjs only
+ * ever opens tiles[0] and then walks forward via "next", matching how the
+ * real UI works (the panel is what advances, not re-clicking tiles).
  */
 
 class FakeLocator {
@@ -22,10 +31,7 @@ class FakeLocator {
   }
   async click() {
     this.page.log.push(`click:${this.selector}`);
-    this.page.onClick?.(this.selector);
-  }
-  async fill(value) {
-    this.page.log.push(`fill:${this.selector}:${value}`);
+    await this.page.onClick?.(this.selector);
   }
   async count() {
     return this.page.countFor(this.selector);
@@ -34,54 +40,75 @@ class FakeLocator {
     return this.page.allFor(this.selector);
   }
   async textContent() {
-    const value = this.page.textFor(this.selector);
-    if (value === undefined) throw new Error(`fakePage: no text configured for selector ${this.selector}`);
-    return value;
+    return this.page.textFor(this.selector);
+  }
+  async getAttribute(name) {
+    return this.page.attrFor(this.selector, name);
   }
   async waitFor() {
     if (this.page.shouldTimeout(this.selector)) {
       throw new Error(`fakePage: configured timeout for selector ${this.selector}`);
     }
   }
+  async scrollIntoViewIfNeeded() {
+    this.page.log.push(`scroll:${this.selector}`);
+  }
 }
 
-class FakeTile {
-  constructor(page, index) {
+/** One result-grid tile, as returned by `.all()` on the result-link selector. */
+class FakeTileLink {
+  constructor(page, ariaLabel, index) {
     this.page = page;
+    this.ariaLabel = ariaLabel;
     this.index = index;
   }
+  async getAttribute(name) {
+    return name === 'aria-label' ? this.ariaLabel : null;
+  }
+  async scrollIntoViewIfNeeded() {
+    this.page.log.push(`scroll:tile:${this.index}`);
+  }
   async click() {
-    this.page.currentTileIndex = this.index;
     this.page.log.push(`tile-click:${this.index}`);
+    this.page.openedTileIndex = this.index;
   }
 }
 
 /**
  * @param config {{
- *   bodyText?: string,               // what assertNoFriction sees (default: benign)
- *   tiles?: number,                  // how many search-result tiles searchCandidates finds
- *   candidates?: Array<{filenameText, dateText, dimsText}>, // per-tile info panel contents, indexed by tile order
- *   backButtonFound?: boolean,       // whether returnToResults finds an in-app close/back control
+ *   bodyText?: string,                          // what assertNoFriction sees (default: benign)
+ *   searchResults?: Record<string, Array<{ariaLabel: string}|string>>, // query -> tiles (real + decoy)
+ *   photoSequence?: Record<string, string[]>,    // query -> ordered raw info-panel texts, walked via "View next photo"
+ *   infoButtonFound?: boolean,                   // whether the "Open info" button is present
  * }}
  */
 export function createFakePage(config = {}) {
   const page = {
     config: {
       bodyText: 'Your photos, organized. Search your library.',
-      tiles: 0,
-      candidates: [],
-      backButtonFound: true,
+      searchResults: {},
+      photoSequence: {},
+      infoButtonFound: true,
       ...config,
     },
     log: [],
-    currentTileIndex: 0,
-    goBackCalls: 0,
+    searchLog: [], // every date-search query actually submitted, in order
+    activeQuery: null,
+    photoIndex: 0,
+    openedTileIndex: null,
     keyboard: {
       async press(key) {
         page.log.push(`key:${key}`);
+        if (key === 'Enter') {
+          page.activeQuery = page.pendingTypedText ?? null;
+          page.photoIndex = 0;
+          page.openedTileIndex = null;
+          if (page.activeQuery != null) page.searchLog.push(page.activeQuery);
+        }
       },
       async type(text) {
         page.log.push(`type:${text}`);
+        page.pendingTypedText = text;
       },
     },
     locator(selector) {
@@ -94,40 +121,54 @@ export function createFakePage(config = {}) {
     async waitForLoadState() {
       page.log.push('waitForLoadState');
     },
+    async bringToFront() {
+      page.log.push('bringToFront');
+    },
     async goBack() {
-      page.goBackCalls += 1;
+      page.goBackCalls = (page.goBackCalls ?? 0) + 1;
       page.log.push('goBack');
     },
     url() {
       return page._url ?? 'https://photos.google.com';
     },
     countFor(selector) {
-      if (/aria-label="Back"|aria-label="Close"/i.test(selector)) {
-        return page.config.backButtonFound ? 1 : 0;
+      if (/aria-label="Open info"/i.test(selector)) {
+        return page.config.infoButtonFound ? 1 : 0;
+      }
+      if (/aria-label="View next photo"/i.test(selector)) {
+        const seq = page.config.photoSequence[page.activeQuery] ?? [];
+        return page.photoIndex + 1 < seq.length ? 1 : 0;
+      }
+      if (/aria-label="Move to trash"/i.test(selector)) {
+        return 1;
       }
       return 0;
     },
     allFor(selector) {
-      if (/data-latest-bg/.test(selector)) {
-        return Array.from({ length: page.config.tiles }, (_, i) => new FakeTile(page, i));
+      if (selector.includes('./search/')) {
+        const results = page.config.searchResults[page.activeQuery] ?? [];
+        return results.map((tile, i) => new FakeTileLink(page, typeof tile === 'string' ? tile : tile.ariaLabel, i));
       }
       return [];
     },
+    attrFor() {
+      return null; // tiles resolve their own aria-label via FakeTileLink
+    },
     textFor(selector) {
       if (selector === 'body') return page.config.bodyText;
-      const candidate = page.config.candidates[page.currentTileIndex] ?? {};
-      // Selector strings here are the literal ones worker.mjs passes to
-      // page/infoPanel.locator(...) — matched by the distinctive substring
-      // each one contains (filename's char-class, the date aria-label, the
-      // dims digit pattern), same as Playwright would resolve them against
-      // a real DOM, just against this config instead.
-      if (selector.includes('[A-Za-z0-9]{2,4}')) return candidate.filenameText ?? '';
-      if (/aria-label\*="date"/i.test(selector)) return candidate.dateText ?? '';
-      if (selector.includes('\\d+')) return candidate.dimsText ?? '';
+      if (/aria-label="Info"|role="complementary"/i.test(selector)) {
+        const seq = page.config.photoSequence[page.activeQuery] ?? [];
+        return seq[page.photoIndex] ?? '';
+      }
       return '';
     },
     shouldTimeout() {
       return false;
+    },
+    async onClick(selector) {
+      if (/aria-label="View next photo"/i.test(selector)) {
+        page.photoIndex += 1;
+      }
     },
   };
   return page;
