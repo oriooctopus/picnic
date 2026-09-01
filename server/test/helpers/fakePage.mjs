@@ -78,19 +78,30 @@ function tilesInGrid(page) {
  * live bug worker.mjs had: it judged "did this scroll find anything new" by
  * comparing counts, which is blind to a windowed swap.
  *
- * Modelled as a tail-slice of `tilesInGrid`'s full (base + revealed-so-far)
- * list: the most-recently-revealed `windowSize` tiles are "mounted", the
- * rest are not -- for BOTH addressing paths worker.mjs uses (the positional
- * `.all()` walk behind collectResultTiles, AND the identity-scoped selector
- * openTile() builds via tileLocatorFor), matching how a real unmounted DOM
- * node answers neither query. Omitted (the default) => unchanged, unwindowed
- * behaviour, so every pre-existing fixture keeps working.
+ * BIDIRECTIONAL (2026-09-01): the window's start position (`page.windowStart`,
+ * an index into `tilesInGrid`'s full list) can move BOTH ways now, not just
+ * grow with `revealedCount`. This is what lets a test express worker.mjs's
+ * upward-recovery path (scrollResultsUp -> a negative page.mouse.wheel delta,
+ * see the `mouse.wheel` handler below): a tile the walk already knows about
+ * (tracked in `seen`) but which scrolled out of the mounted window as later
+ * content loaded is reachable again once the window scrolls back over it,
+ * exactly like a real scrollable grid -- distinct from a tile that hasn't
+ * loaded at all, which no amount of scrolling back up can produce. Downward
+ * scrolling still snaps the window to the tail on every reveal (unchanged
+ * from the original tail-slice behaviour), so every pre-existing windowSize
+ * fixture -- which never scrolls up -- keeps working exactly as before.
+ * Omitting `windowSize` entirely (the default) => unchanged, unwindowed
+ * behaviour, so every fixture without it is untouched.
  */
 function windowedTiles(page) {
   const windowSize = page.config.windowSize;
   const all = tilesInGrid(page);
   if (!windowSize) return all;
-  return all.slice(-windowSize);
+  // Clamp defensively: `all` can shrink (a trash removes a tile from
+  // tilesInGrid) even though windowStart was set against a longer list.
+  const maxStart = Math.max(0, all.length - windowSize);
+  const start = Math.min(page.windowStart, maxStart);
+  return all.slice(start, start + windowSize);
 }
 
 function findTileByLabel(page, label) {
@@ -243,7 +254,7 @@ function performTrash(page) {
  *   searchBoxHiddenUntilEscape?: boolean,
  *   closeAfterTiles?: number,        // browser tab "closes" right after this many tiles have been opened, across the whole run
  *   staleTileClickTargets?: Record<string, string>, // ariaLabel -> ariaLabel a POSITIONAL tile.locator.click() actually lands on instead (models live re-render drift; the identity-scoped locator is immune -- see FakeTileLink.click())
- *   windowSize?: number,             // only the most-recently-revealed N tiles are "mounted" at once -- models a VIRTUALIZED grid where scrolling swaps the visible window rather than only ever growing it (see windowedTiles())
+ *   windowSize?: number,             // only N tiles are "mounted" at once -- models a VIRTUALIZED grid where scrolling swaps the visible window rather than only ever growing it. A positive-dy mouse.wheel (scrollResults) follows the tail forward and loads more; a negative-dy wheel (scrollResultsUp) moves the window back over already-loaded content without loading anything new (see windowedTiles())
  *   unopenableLabels?: string[]|Set<string>, // labels that collectResultTiles() can see (on-screen, real) but the identity-scoped selector openTile() clicks can NEVER resolve -- models a tile the grid refuses to mount, for the "unreachable tile, retried then recorded" behaviour
  *   swallowInfoPressesCount?: number, // first N "i" keypresses across the whole run are silently lost (models the keystroke landing mid-transition, before the photo view existed)
  * }}
@@ -266,6 +277,7 @@ export function createFakePage(config = {}) {
     infoPanelOpen: false,
     trashedLabels: new Set(),
     revealedCount: 0,
+    windowStart: 0, // index into tilesInGrid(page) where the mounted window (windowedTiles) currently begins -- see mouse.wheel below
     recollectCount: {},
     escapePresses: 0,
     infoPressesSwallowed: 0, // count of "i" presses dropped so far, capped by config.swallowInfoPressesCount
@@ -305,6 +317,7 @@ export function createFakePage(config = {}) {
           page.activeQuery = page.pendingTypedText ?? null;
           page.openedAriaLabel = null;
           page.revealedCount = 0;
+          page.windowStart = 0; // fresh grid for the new search -- mounted window resets too
           if (page.activeQuery != null) page.searchLog.push(page.activeQuery);
         }
       },
@@ -315,11 +328,42 @@ export function createFakePage(config = {}) {
       },
     },
     mouse: {
-      async wheel() {
+      // worker.mjs's scrollResultsUp() passes a NEGATIVE dy (Google Photos'
+      // own "scroll up" gesture) -- everything else in the worker still
+      // calls scrollResults() with a positive dy, so a missing/positive dy
+      // means "down", matching every pre-existing call site and fixture.
+      async wheel(dx, dy) {
         page.guard();
+        const scrollingUp = typeof dy === 'number' && dy < 0;
+        // Keep the plain 'wheel' entry every pre-existing test asserts on
+        // (via page.log.includes('wheel')) AND add a directional one so a
+        // new test can tell a recovery up-scroll apart from an ordinary
+        // down-scroll.
         page.log.push('wheel');
+        page.log.push(scrollingUp ? 'wheel:up' : 'wheel:down');
+        if (scrollingUp) {
+          // Move the mounted window back toward the top of whatever has
+          // already loaded. Deliberately does NOT touch revealedCount --
+          // scrolling up over already-loaded content must never trigger
+          // loading MORE, or an up-scroll would be indistinguishable from a
+          // down-scroll and no test could tell them apart.
+          if (page.config.windowSize) {
+            page.windowStart = Math.max(0, page.windowStart - page.config.windowSize);
+          }
+          return;
+        }
         const reveals = page.config.scrollReveals[page.activeQuery] ?? [];
         if (page.revealedCount < reveals.length) page.revealedCount += 1;
+        // A downward scroll also advances the mounted window to keep
+        // following the tail -- mirrors the live grid mounting newly-
+        // scrolled-into-view tiles while unmounting ones that scrolled off
+        // the top (see windowedTiles' header comment). Snapping straight to
+        // the tail, rather than advancing by one windowSize step, matches
+        // the tail-slice behaviour every pre-existing windowSize fixture
+        // (none of which ever scroll up) already relies on.
+        if (page.config.windowSize) {
+          page.windowStart = Math.max(0, tilesInGrid(page).length - page.config.windowSize);
+        }
       },
     },
     locator(selector) {

@@ -894,3 +894,166 @@ test('unreachable tile: known but never openable is retried a bounded number of 
     );
   });
 });
+
+// -- CHANGE 2 (2026-09-01): aria pre-scroll cumulative-set fix, upward
+// recovery, and the ambiguity-safety risk that motivated both -----------
+//
+// The aria fast path's OWN pre-scroll loop had the exact count-based bug
+// already fixed in the exhaustive walk above: it judged "did that scroll
+// load anything new" by comparing on-screen tile COUNTS, which a virtualized
+// window swap can hold flat while the labels underneath move on entirely.
+// planAriaMatches() got handed whatever tiles happened to be on-screen when
+// the (buggy) loop broke -- never the FULL set the date ever showed -- which
+// is a correctness risk, not just a coverage one: planAriaMatches uses the
+// full set to decide whether a predicted match is AMBIGUOUS (see the
+// ambiguity-safety test below).
+
+test('pre-scroll accumulates across windows, so planAriaMatches sees the full cumulative tile set (not just the last on-screen snapshot)', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue(IMG_1433_JOB); // Aug 5, 12:54:07Z -> local 6:54:07 PM at +6h
+    const { job: job2 } = queue.enqueue(IMG_1441_JOB); // Aug 5, 13:31:07Z -> local 7:31:07 PM at +6h
+    const label1 = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM'; // job1's real match
+    const label2 = 'Photo - Portrait - Aug 5, 2026, 7:31:07 PM'; // job2's real match
+    // Non-colliding filler, interleaved so label1 (revealed early) has fallen
+    // OUT of the mounted window (windowSize: 2) by the time the pre-scroll
+    // loop stops -- decoyC and label2 are the only ones still on-screen.
+    const decoyA = 'Photo - Portrait - filler-a';
+    const decoyB = 'Photo - Portrait - filler-b';
+    const decoyC = 'Photo - Portrait - filler-c';
+
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [{ ariaLabel: decoyA }] },
+      scrollReveals: {
+        'August 5, 2026': [[{ ariaLabel: decoyB }], [{ ariaLabel: label1 }], [{ ariaLabel: decoyC }], [{ ariaLabel: label2 }]],
+      },
+      panelTextByLabel: {
+        'August 5, 2026': {
+          [decoyA]: panelBlock('IMG_9990.HEIC', 1000, 1000),
+          [decoyB]: panelBlock('IMG_9991.HEIC', 1000, 1000),
+          [decoyC]: panelBlock('IMG_9992.HEIC', 1000, 1000),
+          [label1]: IMG_1433_BLOCK,
+          [label2]: IMG_1441_BLOCK,
+        },
+      },
+      windowSize: 2, // by the time all 4 reveals have loaded, only the last 2 (decoyC, label2) are mounted -- label1 fell out 2 scrolls ago
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'both jobs must still resolve');
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.equal(queue.getById(job2.id).status, 'trashed');
+    // The fast-path fingerprint: if planAriaMatches saw the CUMULATIVE set
+    // (including label1, dropped from the window it merely happens to be
+    // ambiguity-free), it predicts both tiles uniquely and opens EXACTLY
+    // those 2 -- never touching a decoy. With the count-based bug, label1 is
+    // missing from what planAriaMatches sees, job1 can never be uniquely
+    // predicted, the WHOLE date falls back to the exhaustive walk, and every
+    // decoy gets opened too (proven by mutation -- see report).
+    const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
+    assert.equal(
+      tileClicks.length,
+      2,
+      `expected the aria fast path to fire (exactly 2 tiles opened), got: ${JSON.stringify(tileClicks)}`
+    );
+    assert.ok(tileClicks.includes(`tile-click:${label1}`));
+    assert.ok(tileClicks.includes(`tile-click:${label2}`));
+  });
+});
+
+// REGRESSION (2026-09-01): reachable ONLY via upward recovery -- the tile
+// that resolves the job is revealed FIRST, then scrolled out of the mounted
+// window by later filler before the exhaustive walk ever starts (the aria
+// fast path never fires here: none of these labels are date-format, so
+// planAriaMatches bails out immediately and the whole date runs through the
+// walk). Down-only scrolling can never bring it back -- there's nothing
+// further to reveal once all 4 filler batches are loaded -- so this is
+// exactly the scenario that made the "virtualized grid" test above fail
+// under my first (recovery-less) attempt at the pre-scroll fix.
+test('upward recovery: a tile scrolled out of the window by the pre-scroll is still reached and matched', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const matchLabel = 'Photo - Portrait - recovery-match (revealed first, buried by later filler)';
+    const padLabels = ['Photo - Portrait - recovery-pad-a', 'Photo - Portrait - recovery-pad-b', 'Photo - Portrait - recovery-pad-c', 'Photo - Portrait - recovery-pad-d'];
+    const panelText = { [matchLabel]: IMG_1433_BLOCK };
+    for (const [i, label] of padLabels.entries()) panelText[label] = panelBlock(`IMG_930${i}.HEIC`, 1000, 1000);
+
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [{ ariaLabel: matchLabel }] }, // on-screen before any scroll
+      scrollReveals: { 'August 5, 2026': padLabels.map((ariaLabel) => [{ ariaLabel }]) }, // 4 batches of filler, pushing matchLabel out
+      panelTextByLabel: { 'August 5, 2026': panelText },
+      windowSize: 3, // matchLabel falls out of the window after the 3rd filler batch loads, well before the pre-scroll (budget 6) stops
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'the buried tile must still be reached and matched');
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.ok(page.log.includes(`tile-click:${matchLabel}`), 'the buried tile must actually have been opened');
+    // The mechanism, not just the outcome: an upward ('wheel:up') scroll must
+    // have happened -- down-only scrolling cannot express this recovery at
+    // all (there's nothing further to reveal once all 4 filler batches have
+    // loaded), so without it the walk would exhaust its scroll budget and
+    // report the date ABANDONED with the job still unmatched.
+    assert.ok(page.log.includes('wheel:up'), 'expected an upward recovery scroll, got: ' + JSON.stringify(page.log.filter((l) => l.startsWith('wheel'))));
+  });
+});
+
+// AMBIGUITY SAFETY (2026-09-01): the specific correctness risk problem A
+// describes -- a burst-shot duplicate (same predicted second, different
+// orientation, so a DIFFERENT aria-label -- see the "two tiles sharing the
+// same predicted second" test above for why orientation is what makes this a
+// distinct tile rather than a re-render of the same one) that's visible ONLY
+// in an early window must still make the aria match AMBIGUOUS, even though
+// it has long since scrolled out of view by the time the pre-scroll loop
+// stops. If the pre-scroll only ever saw the last on-screen snapshot, the
+// duplicate would be invisible to planAriaMatches and job1's real match
+// (label1) would look falsely unique -- a WRONG-BUT-LUCKY trash, not a
+// caught ambiguity. The exhaustive walk must run instead.
+test('ambiguity safety: a duplicate tile visible only in an early window still makes the aria match ambiguous, deferring to the exhaustive walk', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue(IMG_1433_JOB); // Aug 5, 12:54:07Z -> local 6:54:07 PM at +6h
+    const { job: job2 } = queue.enqueue(IMG_1441_JOB); // Aug 5, 13:31:07Z -> local 7:31:07 PM at +6h
+    const label1 = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM'; // job1's real match
+    const label2 = 'Photo - Portrait - Aug 5, 2026, 7:31:07 PM'; // job2's real match
+    // Same predicted second as label1, different orientation -- a genuine
+    // burst-shot collision, revealed FIRST (in searchResults) and long
+    // scrolled out of the window by the time the pre-scroll loop stops.
+    const dupLabel = 'Photo - Landscape - Aug 5, 2026, 6:54:07 PM';
+    const decoyA = 'Photo - Portrait - Aug 5, 2026, 1:00:00 AM'; // non-colliding filler
+
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [{ ariaLabel: dupLabel }] },
+      scrollReveals: { 'August 5, 2026': [[{ ariaLabel: decoyA }], [{ ariaLabel: label1 }], [{ ariaLabel: label2 }]] },
+      panelTextByLabel: {
+        'August 5, 2026': {
+          [dupLabel]: panelBlock('IMG_9998.HEIC', 1000, 1000), // matches neither job -- just noise the walk must step past
+          [decoyA]: panelBlock('IMG_9997.HEIC', 1000, 1000),
+          [label1]: IMG_1433_BLOCK,
+          [label2]: IMG_1441_BLOCK,
+        },
+      },
+      windowSize: 3, // dupLabel has fallen out of the mounted window by the time all 3 reveals have loaded
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'the exhaustive walk must still resolve both jobs by filename');
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.equal(queue.getById(job2.id).status, 'trashed');
+    // The fallback's fingerprint: decoyA (which no aria plan would ever open
+    // -- it doesn't match either job's predicted second) gets opened, proving
+    // the WHOLE date fell through to the exhaustive walk rather than the
+    // fast path trusting a falsely-unique match for job1. With the count-
+    // based pre-scroll bug, dupLabel is invisible to planAriaMatches, job1's
+    // slot looks uniquely resolved, and the fast path opens ONLY label1 and
+    // label2 -- decoyA (and dupLabel) never opened at all.
+    const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
+    assert.ok(
+      tileClicks.includes(`tile-click:${decoyA}`),
+      `expected the exhaustive walk to fire (proving the fast path declined the ambiguous match), got: ${JSON.stringify(tileClicks)}`
+    );
+    assert.ok(tileClicks.includes(`tile-click:${label1}`));
+    assert.ok(tileClicks.includes(`tile-click:${label2}`));
+  });
+});

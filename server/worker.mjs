@@ -490,6 +490,34 @@ async function scrollResults(page) {
 }
 
 /**
+ * Scroll the results grid back UP -- toward tiles this worker already knows
+ * about (tracked in `seen`, see processDateGroup) but that scrolled out of
+ * the mounted window as later content loaded.
+ *
+ * VERIFIED LIVE 2026-09-01: a single collectResultTiles() call returned 27
+ * mounted tiles for one date, all reporting visible, so the live grid may
+ * not aggressively unmount tiles at all -- but where it does (or on a
+ * slower render, or a future Google change), a virtualized grid only ever
+ * mounts a WINDOW, and this worker's own pre-scroll can run that window
+ * well past an early tile before the exhaustive walk even starts (a live
+ * failure I hit and reverted -- see the module header). Scrolling DOWN can
+ * never recover such a tile: there's nothing further to reveal, and the
+ * window only ever follows the tail forward once new content loads. This is
+ * therefore the ONLY path back to a tile that fell behind -- used by the
+ * walk's StaleTileError retry (below) whenever the failing tile came from
+ * `seen` rather than being freshly on-screen.
+ *
+ * A negative wheel delta is Google Photos' own "scroll up" gesture. Same
+ * real-correctness settle wait as scrollResults -- the grid needs a moment
+ * to re-render the newly-scrolled-into-view tiles -- not human mimicry, so
+ * it stays short and fixed regardless of --slow.
+ */
+async function scrollResultsUp(page) {
+  await page.mouse.wheel(0, -(600 + Math.random() * 400));
+  await sleep(FAST_DELAYS ? 0 : 500);
+}
+
+/**
  * True when `err` (or the page itself) indicates the tab/browser this worker
  * was driving has gone away -- Oliver's real Chrome, which can close a tab
  * out from under this run at any time (he uses the browser, or Chrome closes
@@ -675,6 +703,14 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
   // visited. Regression test 85 in worker.test.mjs proves this by mutation.
   let walkScrollAttempts = 0;
   let boundHit = false;
+  // UPWARD RECOVERY (2026-09-01): which direction the "no on-screen
+  // candidate" branch below tried LAST time it made real progress -- 'up'
+  // | 'down' | null (never yet). Used to ALTERNATE the preferred direction
+  // each time, rather than always trying the same one first -- see that
+  // branch's comment for why (proven necessary by mutation against the
+  // "virtualized grid" regression test: always-up-first re-covers the same
+  // recovered ground forever and never reaches genuinely new content).
+  let lastRecoveryDirection = null;
 
   /**
    * Merge freshly-collected tiles into `seen`. Returns true iff at least one
@@ -700,46 +736,75 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
   // planAriaMatches() needs the date's FULL tile set to judge safety -- a
   // tile that hasn't loaded yet could be the duplicate that makes a
   // seemingly-unique match actually ambiguous -- so scroll to completion
-  // first. This costs at most one wasted scroll+recollect when there was
-  // nothing more to load (cheap; VERIFIED via the fake-page unit suite,
-  // never against live Google Photos -- see the module header).
+  // first.
+  //
+  // BUG FIX (2026-09-01, live): this used to judge "did that scroll load
+  // anything new" by comparing on-screen tile COUNTS before/after -- exactly
+  // the virtualized-grid bug fixed in the exhaustive walk below (see `seen`'s
+  // comment further down): a windowed swap can hold the on-screen COUNT flat
+  // (or shrink it) while the labels underneath move on entirely, so a tile
+  // that only ever appeared in an EARLIER window silently never reaches
+  // planAriaMatches. That's a correctness risk, not just a coverage one --
+  // planAriaMatches uses the full tile set specifically to judge whether a
+  // predicted match is AMBIGUOUS (a burst-shot duplicate landing on the same
+  // predicted second), so a duplicate dropped by this comparison could turn
+  // a genuinely ambiguous match into a FALSELY CONFIDENT one, which is worse
+  // than never fast-pathing at all. Fixed the same way as the walk:
+  // accumulate into `seen` (a label-SET comparison, not a count) and hand
+  // planAriaMatches the CUMULATIVE set, never just the last on-screen
+  // snapshot. `seen`/mergeSeen are defined above (used by the walk too), so
+  // this loop and the walk share one memory of "everything this date has
+  // ever shown us" from the very first collection onward.
+  mergeSeen(tiles); // seed `seen` with whatever was on-screen before any pre-scroll happened
   while (scrollAttempts < MAX_SCROLL_ATTEMPTS_PER_DATE) {
-    const beforeCount = tiles.length;
     await scrollResults(page);
     scrollAttempts += 1;
     tiles = await collectResultTiles(page);
-    if (tiles.length <= beforeCount) break; // scroll revealed nothing new -- fully loaded
+    if (!mergeSeen(tiles)) break; // scroll revealed no label we hadn't already seen -- fully loaded
   }
 
-  const ariaPlan = planAriaMatches(remaining, tiles);
+  const ariaPlan = planAriaMatches(remaining, [...seen.values()]);
   if (ariaPlan) {
     if (VERBOSE) {
       console.log(`[search ${query}] aria fast path: ${ariaPlan.size}/${remaining.length} job(s) matched to a tile, opening only those`);
     }
     for (const [job, tile] of ariaPlan) {
-      visited.add(tile.ariaLabel);
-      // Keep `seen` in sync with `visited` for aria-opened tiles too --
-      // otherwise a tile opened here (and, say, later trashed and dropped
-      // from the grid) never enters `seen` at all, and the exhaustive
-      // walk's end-of-date summary below can end up reporting more tiles
-      // "opened" than it ever "saw" (visited.size > seen.size), which is a
-      // nonsensical thing to print even though it doesn't affect
-      // correctness (visited/unreachable membership, not seen membership,
-      // drives candidate selection).
+      // Keep `seen` in sync for aria-considered tiles too -- it's a real,
+      // known tile regardless of whether opening it below succeeds.
       mergeSeen([tile]);
       steps += 1;
       try {
         await openTile(page, tile);
       } catch (err) {
         if (err instanceof StaleTileError) {
-          // Grid shifted under us since planAriaMatches ran. Don't guess --
-          // leave this job for the exhaustive walk below, which re-collects
-          // tiles fresh and will still reach it if it's there.
+          // Grid shifted under us since planAriaMatches ran -- expected now
+          // that planAriaMatches sees the CUMULATIVE tile set (2026-09-01
+          // fix above), which can legitimately include a tile that's no
+          // longer on-screen. Don't guess -- leave this job for the
+          // exhaustive walk below, which re-collects tiles fresh (and can
+          // scroll back up) and will still reach it if it's there.
+          //
+          // BUG FIX (2026-09-01): this used to mark the tile `visited`
+          // UNCONDITIONALLY, before the attempt above -- so a StaleTileError
+          // here silently and PERMANENTLY dropped the job: `visited`
+          // already contained the label, so the exhaustive walk's own
+          // candidate search (which filters out anything in `visited`)
+          // would never try it again, contradicting this very comment's
+          // claim that the walk "will still reach it if it's there." Same
+          // failure class as the exhaustive walk's own StaleTileError
+          // handling above (see its comment) -- only mark a tile visited
+          // once it has genuinely been opened, never on a failed attempt.
+          // Regression test "pre-scroll accumulates..." in worker.test.mjs
+          // proves this by mutation (moving `visited.add` back above the
+          // try block reproduces job1 going permanently unmatched).
           if (VERBOSE) console.log(`  [aria] ${err.message} — leaving for the exhaustive walk`);
           continue;
         }
         throw err;
       }
+      // Only reaching here means the tile genuinely opened -- see the
+      // comment above for why marking it visited any earlier is a bug.
+      visited.add(tile.ariaLabel);
       await openInfoPanelOnce(page);
       const text = await readPanelText(page);
       const parsed = parsePanelText(text);
@@ -782,25 +847,71 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
 
     if (!tile) {
       // Nothing on-screen is both unvisited and not given up on. Before
-      // concluding the date is exhausted, scroll the grid and re-collect --
-      // it's virtualized, so unwalked tiles can exist off-screen even when
-      // the on-screen tile COUNT didn't grow (see mergeSeen's comment: a
-      // scroll that swaps the mounted window for an equally-sized one still
-      // reveals genuinely new content).
+      // concluding the date is exhausted, scroll and re-collect.
+      //
+      // UPWARD RECOVERY (2026-09-01): this used to only ever scroll DOWN,
+      // which finds genuinely NEW content but can never recover a tile the
+      // window has already moved PAST -- e.g. the aria fast path's own
+      // pre-scroll (above) can run the window all the way to the tail
+      // before this walk even starts, stranding an early tile above the
+      // viewport with nothing further to reveal below it (a live failure I
+      // hit and reverted -- see the module header, and scrollResultsUp's
+      // comment for why down-only scrolling can't fix this). So: try BOTH
+      // directions here, not just down.
+      //
+      // Direction is chosen by ALTERNATION, not "always up then down": a
+      // direction that just paid off tends to keep re-covering the SAME
+      // ground (scrolling up repeatedly just re-mounts tiles already
+      // opened during the last up-scroll), so once a direction succeeds,
+      // the next attempt prefers the OTHER one first -- proven necessary by
+      // mutation against the "virtualized grid" regression test (always
+      // preferring up first eventually reaches all the way back to the
+      // very first tile ever seen, before down-scrolling ever gets a
+      // chance to reveal the tile that would have resolved the date and
+      // ended the walk). If the preferred direction genuinely finds
+      // nothing usable, the OTHER direction is tried immediately, in the
+      // SAME event -- so a single "nothing on-screen" moment costs at most
+      // one wasted scroll, never a whole budget slot, keeping the common
+      // (non-virtualized, or not-yet-scrolled-past) case just as cheap as
+      // before this fix.
       if (walkScrollAttempts >= MAX_SCROLL_ATTEMPTS_PER_DATE) break; // give up scrolling -- see EXHAUSTED-vs-ABANDONED reporting below
-      await scrollResults(page);
-      const fresh = await collectResultTiles(page);
-      tiles = fresh;
-      if (mergeSeen(fresh)) {
+
+      const tryDirection = async (direction) => {
+        if (direction === 'down') await scrollResults(page);
+        else await scrollResultsUp(page);
+        const fresh = await collectResultTiles(page);
+        // "Progress" covers BOTH senses scrolling can help: a genuinely NEW
+        // label (down's original case, mergeSeen) OR an already-known
+        // label that's simply back on-screen and still actionable (up's
+        // recovery case -- mergeSeen alone would say "nothing new" for a
+        // tile already in `seen`, which is exactly wrong here).
+        const newlySeen = mergeSeen(fresh);
+        const recoveredKnown = fresh.some((t) => !visited.has(t.ariaLabel) && !unreachable.has(t.ariaLabel));
+        return { fresh, progressed: newlySeen || recoveredKnown };
+      };
+
+      const preferred = lastRecoveryDirection === 'up' ? 'down' : 'up';
+      let outcome = await tryDirection(preferred);
+      let directionUsed = preferred;
+      if (!outcome.progressed) {
+        directionUsed = preferred === 'up' ? 'down' : 'up';
+        outcome = await tryDirection(directionUsed);
+      }
+
+      tiles = outcome.fresh;
+      if (outcome.progressed) {
         walkScrollAttempts = 0; // genuine progress -- keep scrolling as long as it keeps paying off
+        lastRecoveryDirection = directionUsed;
       } else {
-        // A scroll that revealed nothing UNSEEN. Deliberately NOT the old
-        // `tiles.length <= beforeCount` check: that compares on-screen
-        // COUNTS, which stay flat across a virtualized window swap even
-        // though the labels underneath moved on entirely -- exactly the bug
-        // that made a 27-tile day report EXHAUSTED after 3 tiles live.
-        // Comparing against `seen`'s label set is what actually detects
-        // "this scroll genuinely found nothing new".
+        // Neither direction revealed anything new or brought back an
+        // unvisited/reachable known tile. Deliberately NOT the old
+        // `tiles.length <= beforeCount` count check: that compares
+        // on-screen COUNTS, which stay flat across a virtualized window
+        // swap even though the labels underneath moved on entirely --
+        // exactly the bug that made a 27-tile day report EXHAUSTED after 3
+        // tiles live. Comparing against `seen`'s label set (and against
+        // visited/unreachable for the recovery case) is what actually
+        // detects "this scroll genuinely found nothing new".
         walkScrollAttempts += 1;
       }
       continue; // re-check the freshly-collected/merged set for a candidate
@@ -820,7 +931,10 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
         // open -- e.g. the grid re-virtualized it out between collecting and
         // clicking. Retry a bounded number of times, scrolling in between in
         // case that's what brings it back, before giving up on THIS tile
-        // specifically.
+        // specifically. Always down here: `tile` came from the on-screen
+        // `tiles` snapshot just above, so it was mounted a moment ago --
+        // the window-moved-past case is handled by the "nothing on-screen"
+        // branch's own up/down alternation, not this per-tile retry.
         //
         // Crucially this does NOT add the tile to `visited` on failure. The
         // OLD code marked a tile visited BEFORE attempting to open it, so a
