@@ -252,9 +252,27 @@ async function collectResultTiles(page) {
   return dedupeTilesByAriaLabel(withLabels);
 }
 
-/** Open a tile. Requires bringToFront() first — see module header note. */
+/** Thrown when a held tile locator no longer points at the tile we collected. */
+export class StaleTileError extends Error {}
+
+/**
+ * Open a tile. Requires bringToFront() first — see module header note.
+ *
+ * Locators from .all() resolve positionally (nth(i)), so any scroll or
+ * re-render shifts what they point at. A held locator was observed resolving
+ * to an "unlabeled person" chip at nth(52) and hanging the run for 30s.
+ * Re-check identity immediately before clicking and bail out to a re-collect
+ * instead of clicking whatever now occupies that index.
+ */
 async function openTile(page, tile) {
   await page.bringToFront();
+  const labelNow = await tile.locator.getAttribute('aria-label').catch(() => null);
+  if (labelNow !== tile.ariaLabel) {
+    throw new StaleTileError(`tile moved: expected "${tile.ariaLabel}", found "${labelNow}"`);
+  }
+  if (!(await tile.locator.isVisible().catch(() => false))) {
+    throw new StaleTileError(`tile no longer visible: "${tile.ariaLabel}"`);
+  }
   await tile.locator.scrollIntoViewIfNeeded();
   await randomDelay(500, 2000);
   await tile.locator.click();
@@ -357,49 +375,62 @@ export function isPageClosedError(page, err) {
  * revisit. Confirm by the panel moving off this photo.
  */
 async function moveToTrash(page, panelTextBefore) {
+  // Ordering matters, and this got it wrong twice:
+  //  - '#' is Google Photos' own move-to-trash shortcut and is the ONLY path
+  //    ever observed to actually delete (the verified IMG_1418.HEIC deletion
+  //    went through it).
+  //  - '#' opens a CONFIRMATION DIALOG, which lays a scrim over the page
+  //    (<div class="LB4Y1">, data-back-to-cancel="true"), so clicking the
+  //    toolbar control while it is up dies with "subtree intercepts pointer
+  //    events" — exactly how the previous version failed on IMG_1447.PNG.
+  // So: press, accept the dialog, check; only then consider a click fallback.
+  const confirmDialog = async () => {
+    const confirm = page
+      .locator('button:has-text("Move to trash"), button:has-text("Delete"), button:has-text("Move to bin")')
+      .first();
+    if (await confirm.isVisible().catch(() => false)) {
+      await randomDelay(600, 1500);
+      await confirm.click();
+      return true;
+    }
+    return false;
+  };
+
+  const settled = async () => {
+    const deadline = Date.now() + (FAST_DELAYS ? 50 : 12000);
+    while (Date.now() < deadline) {
+      await randomDelay(700, 1400);
+      const toast = await page.locator('text=/moved to (trash|bin)/i').first().isVisible().catch(() => false);
+      if (toast) return true;
+      const now = await readPanelText(page);
+      if (now && now !== panelTextBefore) return true;
+      if (!now && panelTextBefore) return true;
+    }
+    return false;
+  };
+
   await randomDelay(500, 2000);
-  const trashButton = page.locator(TRASH_SELECTOR).first();
-  const trashVisible = await trashButton.isVisible().catch(() => false);
-  if (VERBOSE) console.log(`    trash control: count=${await page.locator(TRASH_SELECTOR).count()} visible=${trashVisible}`);
-  if (trashVisible) {
-    // NOT .catch(() => {}): swallowing the click error is what made the first
-    // real run indistinguishable from "clicked but Google ignored it". Let it
-    // throw so the caller records a real reason.
-    await trashButton.click();
-  } else {
-    // Keyboard fallback only. Note focus often sits on "Back to search" in
-    // this view, so the shortcut may go nowhere — hence the confirmation below.
-    await page.keyboard.press('#');
-  }
+  if (VERBOSE) console.log("    trash: pressing '#'");
+  await page.keyboard.press('#');
+  await randomDelay(900, 1800);
+  const tookDialog = await confirmDialog();
+  if (VERBOSE) console.log(`    trash: confirmation dialog ${tookDialog ? 'accepted' : 'not shown'}`);
+  if (await settled()) return true;
 
-  // A confirmation dialog may appear; take it only if it is actually there.
-  const confirm = page.locator('button:has-text("Move to trash"), button:has-text("Delete")').first();
-  if (await confirm.isVisible().catch(() => false)) {
-    await randomDelay(600, 1600);
-    await confirm.click();
+  // Fallback: only now, with no dialog scrim in the way, try the control.
+  const candidates = await page.locator(TRASH_SELECTOR).all();
+  for (const candidate of candidates) {
+    if (await candidate.isVisible().catch(() => false)) {
+      if (VERBOSE) console.log('    trash: falling back to clicking the visible control');
+      await candidate.click();
+      await randomDelay(900, 1800);
+      await confirmDialog();
+      break;
+    }
   }
-
-  // Confirmation, in priority order:
-  //  1. Google's own "Moved to trash" toast — unambiguous.
-  //  2. The panel moving to a DIFFERENT photo.
-  //  3. The photo view closing entirely (panel text empties) — trashing the
-  //     last item returns to the grid, which the first version wrongly read as
-  //     "no change" because an empty string is falsy.
-  const deadline = Date.now() + (FAST_DELAYS ? 50 : 12000);
-  while (Date.now() < deadline) {
-    await randomDelay(700, 1500);
-    const toast = await page
-      .locator('text=/moved to trash/i')
-      .first()
-      .isVisible()
-      .catch(() => false);
-    if (toast) return true;
-    const now = await readPanelText(page);
-    if (now && now !== panelTextBefore) return true;
-    if (!now && panelTextBefore) return true;
-  }
-  return false;
+  return await settled();
 }
+
 
 /**
  * Search one calendar date and walk its results EXHAUSTIVELY -- every visible
@@ -453,7 +484,16 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
     visited.add(tile.ariaLabel);
     steps += 1;
 
-    await openTile(page, tile);
+    try {
+      await openTile(page, tile);
+    } catch (err) {
+      if (err instanceof StaleTileError) {
+        if (VERBOSE) console.log(`  [step ${steps}] ${err.message} — re-collecting`);
+        tiles = await collectResultTiles(page);
+        continue;
+      }
+      throw err;
+    }
     await openInfoPanelOnce(page);
     const text = await readPanelText(page);
     const parsed = parsePanelText(text);
