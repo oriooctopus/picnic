@@ -67,8 +67,48 @@ function tilesInGrid(page) {
   });
 }
 
+/**
+ * VIRTUALIZED MODEL (config.windowSize): unlike the plain `tilesInGrid`
+ * above -- which keeps every revealed tile "mounted" forever, matching the
+ * existing (additive-only) `scrollReveals` fixtures -- a real Google Photos
+ * grid only ever keeps a WINDOW of tiles mounted at a time. Scrolling
+ * further mounts new tiles and can unmount ones that scrolled off the top,
+ * so the on-screen tile COUNT can stay constant across a scroll even though
+ * the actual SET of on-screen labels moved on entirely. This is exactly the
+ * live bug worker.mjs had: it judged "did this scroll find anything new" by
+ * comparing counts, which is blind to a windowed swap.
+ *
+ * Modelled as a tail-slice of `tilesInGrid`'s full (base + revealed-so-far)
+ * list: the most-recently-revealed `windowSize` tiles are "mounted", the
+ * rest are not -- for BOTH addressing paths worker.mjs uses (the positional
+ * `.all()` walk behind collectResultTiles, AND the identity-scoped selector
+ * openTile() builds via tileLocatorFor), matching how a real unmounted DOM
+ * node answers neither query. Omitted (the default) => unchanged, unwindowed
+ * behaviour, so every pre-existing fixture keeps working.
+ */
+function windowedTiles(page) {
+  const windowSize = page.config.windowSize;
+  const all = tilesInGrid(page);
+  if (!windowSize) return all;
+  return all.slice(-windowSize);
+}
+
 function findTileByLabel(page, label) {
-  return tilesInGrid(page).find((t) => (typeof t === 'string' ? t : t.ariaLabel) === label) ?? null;
+  return windowedTiles(page).find((t) => (typeof t === 'string' ? t : t.ariaLabel) === label) ?? null;
+}
+
+/**
+ * True when `label` names a tile worker.mjs's collectResultTiles() can see
+ * (it's on-screen, real, and in the positional `.all()` walk) but which the
+ * identity-scoped selector (tileLocatorFor, what openTile() actually clicks)
+ * can NEVER resolve -- models a tile the live grid genuinely refuses to
+ * mount, distinct from one merely scrolled out of the current window.
+ * `config.unopenableLabels` is an array or Set of such labels.
+ */
+function isUnopenable(page, label) {
+  const set = page.config.unopenableLabels;
+  if (!set) return false;
+  return set instanceof Set ? set.has(label) : Array.isArray(set) && set.includes(label);
 }
 
 /**
@@ -116,7 +156,7 @@ class FakeLocator {
     // not click, which is the one that matters for reaching the panel text.
     if (isTileIdentitySelector(this.selector)) {
       const label = ariaLabelFromSelector(this.selector);
-      if (findTileByLabel(this.page, label)) {
+      if (!isUnopenable(this.page, label) && findTileByLabel(this.page, label)) {
         openTileInFake(this.page, label);
         return;
       }
@@ -203,6 +243,8 @@ function performTrash(page) {
  *   searchBoxHiddenUntilEscape?: boolean,
  *   closeAfterTiles?: number,        // browser tab "closes" right after this many tiles have been opened, across the whole run
  *   staleTileClickTargets?: Record<string, string>, // ariaLabel -> ariaLabel a POSITIONAL tile.locator.click() actually lands on instead (models live re-render drift; the identity-scoped locator is immune -- see FakeTileLink.click())
+ *   windowSize?: number,             // only the most-recently-revealed N tiles are "mounted" at once -- models a VIRTUALIZED grid where scrolling swaps the visible window rather than only ever growing it (see windowedTiles())
+ *   unopenableLabels?: string[]|Set<string>, // labels that collectResultTiles() can see (on-screen, real) but the identity-scoped selector openTile() clicks can NEVER resolve -- models a tile the grid refuses to mount, for the "unreachable tile, retried then recorded" behaviour
  *   swallowInfoPressesCount?: number, // first N "i" keypresses across the whole run are silently lost (models the keystroke landing mid-transition, before the photo view existed)
  * }}
  */
@@ -304,12 +346,16 @@ export function createFakePage(config = {}) {
     },
     countFor(selector) {
       if (isTileIdentitySelector(selector)) {
-        // Must check the SAME grid (base + scroll-revealed, minus trashed)
-        // that .all() sees, not just the base searchResults -- otherwise a
-        // tile that only exists after a scroll reveal (see "scrolling
-        // reveals more tiles" in worker.test.mjs) would read as a
-        // StaleTileError even though it's genuinely there.
-        return findTileByLabel(page, ariaLabelFromSelector(selector)) ? 1 : 0;
+        // Must check the SAME (possibly windowed) grid that .all() sees, not
+        // just the base searchResults -- otherwise a tile that only exists
+        // after a scroll reveal (see "scrolling reveals more tiles" in
+        // worker.test.mjs) would read as a StaleTileError even though it's
+        // genuinely there. `unopenableLabels` models a tile that's on-screen
+        // (findTileByLabel would find it) but that the identity-scoped
+        // selector can never resolve -- see the "unreachable tile" test.
+        const label = ariaLabelFromSelector(selector);
+        if (isUnopenable(page, label)) return 0;
+        return findTileByLabel(page, label) ? 1 : 0;
       }
       if (/aria-label="Open info"/i.test(selector)) {
         return page.config.infoButtonFound ? 1 : 0;
@@ -327,7 +373,7 @@ export function createFakePage(config = {}) {
       const query = page.activeQuery;
       page.recollectCount[query] = (page.recollectCount[query] ?? 0) + 1;
 
-      let all = tilesInGrid(page);
+      let all = windowedTiles(page);
 
       // Simulates the grid re-rendering tiles in a different order between
       // collections -- worker.mjs must dedupe/track by aria-label, not index.
@@ -354,7 +400,9 @@ export function createFakePage(config = {}) {
      */
     visibleFor(selector) {
       if (isTileIdentitySelector(selector)) {
-        const hit = findTileByLabel(page, ariaLabelFromSelector(selector));
+        const label = ariaLabelFromSelector(selector);
+        if (isUnopenable(page, label)) return false;
+        const hit = findTileByLabel(page, label);
         return hit ? (typeof hit === 'string' ? true : hit.hidden !== true) : false;
       }
       if (/aria-label\*?="Search|placeholder\*?="Search/i.test(selector)) {

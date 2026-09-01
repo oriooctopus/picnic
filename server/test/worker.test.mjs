@@ -20,6 +20,7 @@ const {
   assertNoFriction,
   isPageClosedError,
   MAX_STEPS_PER_DATE,
+  MAX_TILE_OPEN_RETRIES,
   parseArgs,
   stealthDelayRange,
 } = await import('../worker.mjs');
@@ -706,4 +707,190 @@ test('--slow: parseArgs recognizes the flag, and stealthDelayRange restores the 
 
   assert.deepEqual(stealthDelayRange(500, 2000, false), [0, 0], 'default (fast): no jitter');
   assert.deepEqual(stealthDelayRange(500, 2000, true), [500, 2000], '--slow: original human-scale range restored');
+});
+
+
+// REGRESSION (live, 2026-09-01): the aria fast path's "scroll the date to
+// completion first" phase and the exhaustive walk shared one scrollAttempts
+// budget. The pre-scroll spent all MAX_SCROLL_ATTEMPTS_PER_DATE attempts, so
+// the walk's first "no unvisited tile rendered" check broke out immediately
+// and the date was reported EXHAUSTED with 25 of 27 tiles never opened --
+// photos silently left undeleted. The two phases need independent budgets.
+test('the exhaustive walk can still scroll after the aria pre-scroll spent its own budget', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+
+    // Enough batches that the pre-scroll consumes its whole budget, with the
+    // matching tile only reachable by a FURTHER scroll during the walk.
+    const batches = [];
+    const panelText = { 'Photo - Portrait - base': panelBlock('IMG_0000.HEIC', 1000, 1000) };
+    for (let i = 1; i <= 6; i++) {
+      const label = `Photo - Portrait - batch-${i}`;
+      batches.push([{ ariaLabel: label }]);
+      panelText[label] = panelBlock(`IMG_000${i}.HEIC`, 1000, 1000);
+    }
+    const matchLabel = 'Photo - Portrait - batch-7 (match, past the pre-scroll budget)';
+    batches.push([{ ariaLabel: matchLabel }]);
+    panelText[matchLabel] = IMG_1433_BLOCK;
+
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [{ ariaLabel: 'Photo - Portrait - base' }] },
+      scrollReveals: { 'August 5, 2026': batches },
+      panelTextByLabel: { 'August 5, 2026': panelText },
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    assert.equal(
+      stillUnmatched.length,
+      0,
+      'the walk must keep scrolling past the pre-scroll budget and reach the matching tile'
+    );
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.ok(page.log.includes(`tile-click:${matchLabel}`), 'the late-revealed matching tile must actually be opened');
+  });
+});
+
+// REGRESSION (diagnosed 2026-09-01, from live evidence): the exhaustive walk
+// judged "did this scroll find anything new?" by comparing on-screen tile
+// COUNTS before/after. That's wrong for a VIRTUALIZED grid -- Google's result
+// grid only ever renders the tiles currently in the viewport, so scrolling
+// mounts new tiles AND unmounts old ones, and the on-screen count can stay
+// flat (or even shrink) while the actual content moved on entirely. A live
+// run walked only 3 of 27 tiles before wrongly reporting EXHAUSTED.
+//
+// `windowSize` (see fakePage.mjs's windowedTiles()) models exactly that: only
+// the most-recently-revealed N tiles are ever "mounted" at once, unlike the
+// existing (additive-only) scrollReveals fixtures every other test above
+// uses, which can't express this bug at all -- their tile count only ever
+// grows.
+test('virtualized grid: the visible window moves as you scroll (tiles leave as others enter) -- a job in a late window must still be matched', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    // 8 tiles, revealed one scroll at a time, with only 3 ever mounted at
+    // once -- the on-screen tile count never exceeds 3 no matter how deep
+    // the walk goes, exactly the shape that broke the old count comparison.
+    const laterLabels = Array.from({ length: 8 }, (_, i) => `Photo - Portrait - window-${i + 1}`);
+    const panelText = {};
+    for (let i = 0; i < laterLabels.length - 1; i++) {
+      panelText[laterLabels[i]] = panelBlock(`IMG_920${i}.HEIC`, 1000, 1000);
+    }
+    const matchLabel = laterLabels[laterLabels.length - 1]; // deep: only mounted after 7 scrolls
+    panelText[matchLabel] = IMG_1433_BLOCK;
+
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [{ ariaLabel: 'Photo - Portrait - window-base' }] },
+      scrollReveals: { 'August 5, 2026': laterLabels.map((ariaLabel) => [{ ariaLabel }]) },
+      panelTextByLabel: { 'August 5, 2026': panelText },
+      windowSize: 3,
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'the deep, late-window match must still be found');
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    for (const label of laterLabels) {
+      assert.ok(page.log.includes(`tile-click:${label}`), `expected tile "${label}" to have been opened despite the moving window`);
+    }
+  });
+});
+
+// Minimal, sharpest form of the same bug: with only ONE tile ever mounted,
+// the on-screen tile COUNT is 1 before AND after every scroll for the whole
+// walk -- so a comparison of counts can never see progress, even though the
+// tile actually mounted is a completely different one each time. Only a
+// comparison of the underlying LABEL SET (this fix's `seen`/mergeSeen) can
+// tell "swapped for something new" apart from "genuinely found nothing".
+test('a scroll that swaps the one visible tile for a different one (same on-screen count) must not be treated as "nothing new"', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    // 3 scroll-revealed batches, not 1: the aria fast path's own pre-scroll
+    // loop (unchanged, out of scope for this fix) always spends its first
+    // scroll before the exhaustive walk below even starts -- with only ONE
+    // reveal batch, that pre-scroll alone would already land on the match
+    // and the exhaustive walk would never need to scroll at all, proving
+    // nothing about ITS count-vs-label-set logic. Three batches guarantees
+    // the walk still has real scrolling of its own left to do afterward.
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [{ ariaLabel: 'Photo - Portrait - swap-a' }] },
+      scrollReveals: {
+        'August 5, 2026': [
+          [{ ariaLabel: 'Photo - Portrait - swap-b' }],
+          [{ ariaLabel: 'Photo - Portrait - swap-c' }],
+          [{ ariaLabel: 'Photo - Portrait - swap-d (match)' }],
+        ],
+      },
+      panelTextByLabel: {
+        'August 5, 2026': {
+          'Photo - Portrait - swap-a': panelBlock('IMG_9500.HEIC', 1000, 1000),
+          'Photo - Portrait - swap-b': panelBlock('IMG_9501.HEIC', 1000, 1000),
+          'Photo - Portrait - swap-c': panelBlock('IMG_9502.HEIC', 1000, 1000),
+          'Photo - Portrait - swap-d (match)': IMG_1433_BLOCK,
+        },
+      },
+      windowSize: 1, // exactly one tile mounted, ever -- the on-screen count is 1 before, during, and after every scroll
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    assert.equal(
+      stillUnmatched.length,
+      0,
+      'the swapped-in tile several scrolls deep must be visited even though the on-screen tile count never changed'
+    );
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.ok(page.log.includes('tile-click:Photo - Portrait - swap-d (match)'));
+  });
+});
+
+// A tile the walk KNOWS about (collectResultTiles() saw it on-screen) but
+// which the grid genuinely never lets open -- distinct from one merely
+// scrolled out of the window (that case is the two tests above). The old
+// code marked a tile "visited" the instant it was CHOSEN to be opened, before
+// the open even attempted, so a tile that failed to open was silently
+// counted as walked and never retried. This must retry a bounded number of
+// times, then give up on that ONE tile (logged distinctly as UNREACHABLE)
+// without derailing the rest of the date, and without letting the date's
+// final summary claim the unreachable tile was "walked".
+test('unreachable tile: known but never openable is retried a bounded number of times, then recorded unreachable -- never silently counted as walked', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB); // nothing on this date will actually confirm it
+    const ghostLabel = 'Photo - Portrait - ghost (never mounts)';
+    const openLabel = 'Photo - Portrait - openable (no match)';
+    const page = createFakePage({
+      searchResults: {
+        'August 5, 2026': [{ ariaLabel: ghostLabel }, { ariaLabel: openLabel }],
+      },
+      panelTextByLabel: {
+        'August 5, 2026': { [openLabel]: panelBlock('IMG_0001.HEIC', 1000, 1000) },
+      },
+      unopenableLabels: [ghostLabel],
+    });
+
+    let result;
+    const logs = await captureLogs(async () => {
+      result = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+    });
+
+    assert.equal(result.stillUnmatched.length, 1, 'no tile on this date confirms the job -- it must remain unmatched');
+    assert.ok(
+      page.log.includes(`tile-click:${openLabel}`),
+      'the walk must still reach and open the OTHER tile, not get stuck retrying the ghost forever'
+    );
+    assert.ok(
+      !page.log.includes(`tile-click:${ghostLabel}`),
+      'the ghost tile must never actually be recorded as opened -- it never became actionable'
+    );
+    assert.ok(
+      logs.some((l) => l.includes('UNREACHABLE') && l.includes(ghostLabel) && l.includes(`after ${MAX_TILE_OPEN_RETRIES} attempt`)),
+      `expected a distinct UNREACHABLE log line bounded at ${MAX_TILE_OPEN_RETRIES} attempts, got: ${JSON.stringify(logs)}`
+    );
+    // The date-level summary must not claim the ghost was "walked" -- it was
+    // explicitly given up on, and EXHAUSTED must say so rather than imply
+    // every seen tile was successfully opened.
+    assert.ok(
+      logs.some((l) => l.includes('EXHAUSTED') && l.includes('unreachable') && !l.includes(`2 tile(s) opened`)),
+      `expected EXHAUSTED to distinguish opened-vs-unreachable rather than reporting a clean sweep, got: ${JSON.stringify(logs)}`
+    );
+  });
 });

@@ -109,6 +109,16 @@ export const MAX_STEPS_PER_DATE = 80;
 // above -- a date with a huge grid must not scroll forever trying to find
 // tiles that were never going to load.
 export const MAX_SCROLL_ATTEMPTS_PER_DATE = 6;
+// Bound how many times the exhaustive walk retries a SINGLE known tile that
+// keeps throwing StaleTileError before giving up on it specifically (see the
+// "UNREACHABLE" branch in processDateGroup below) -- distinct from
+// MAX_STEPS_PER_DATE (bounds the whole date's total attempts) and
+// MAX_SCROLL_ATTEMPTS_PER_DATE (bounds consecutive scrolls that find nothing
+// AT ALL on-screen). Small on purpose: a tile that still won't open after a
+// few scroll+retry rounds is not going to succeed on one more -- better to
+// record it and move on than burn the date's shared step budget hammering a
+// single broken tile forever.
+export const MAX_TILE_OPEN_RETRIES = 3;
 
 // CHANGE 2 (2026-09-01): Oliver has decided this worker does not need
 // bot-detection avoidance (he already bulk-deletes via a scripted browser
@@ -344,19 +354,29 @@ async function openTile(page, tile) {
   // click meant for a photo landed on the "Back to search" link at nth(48)
   // (it carries a ./search/ href too), and earlier on an "unlabeled person"
   // chip at nth(52). An identity-scoped locator cannot drift this way.
+  //
+  // tileLocatorFor also pins :visible, because a previous search's grid stays
+  // in the DOM collapsed to 0x0 and carries the SAME aria-labels -- .first()
+  // kept resolving to that dead copy, which can never become visible however
+  // much we scroll, so dates reported "EXHAUSTED" after a handful of tiles and
+  // silently left photos undeleted. :visible excludes a 0x0 element while
+  // still matching a real tile that is merely below the fold.
   const locator = tileLocatorFor(page, tile.ariaLabel);
   if ((await locator.count()) === 0) {
     throw new StaleTileError(`tile gone from the grid: "${tile.ariaLabel}"`);
   }
+  // Scroll BEFORE the final visibility assertion: the live grid is virtualized,
+  // so a genuine tile below the fold is not actionable until scrolled to.
+  await locator.first().scrollIntoViewIfNeeded().catch(() => {});
   if (!(await locator.first().isVisible().catch(() => false))) {
-    throw new StaleTileError(`tile no longer visible: "${tile.ariaLabel}"`);
+    throw new StaleTileError(`tile not actionable after scrolling: "${tile.ariaLabel}"`);
   }
-  await locator.first().scrollIntoViewIfNeeded();
   await stealthDelay(500, 2000); // pre-click jitter -- pure mimicry, off unless --slow
   await locator.first().click();
   await assertNoFriction(page);
   await stealthDelay(1000, 3000); // post-click settle jitter -- pure mimicry, off unless --slow
 }
+
 
 /**
  * A locator that finds a result tile by its aria-label rather than its index.
@@ -366,7 +386,7 @@ async function openTile(page, tile) {
  */
 function tileLocatorFor(page, ariaLabel) {
   const escaped = ariaLabel.replace(/["\\]/g, '\\$&');
-  return page.locator(`${RESULT_LINK_SELECTOR}[aria-label="${escaped}"]`);
+  return page.locator(`${RESULT_LINK_SELECTOR}[aria-label="${escaped}"]:visible`);
 }
 
 
@@ -618,9 +638,61 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
   }
 
   const visited = new Set();
+  // BUG FIX (2026-09-01, live): union of every real tile aria-label ever
+  // observed on this date, across every re-collection and scroll. Needed
+  // because Google's result grid is VIRTUALIZED -- collectResultTiles() only
+  // ever returns what's currently mounted/on-screen, never the whole date.
+  // The old exhaustive walk judged "did this scroll find anything new?" by
+  // comparing `tiles.length` before/after -- which is wrong for a
+  // virtualized grid: scrolling swaps the mounted WINDOW (old tiles unmount
+  // as new ones mount), so the on-screen COUNT can stay flat or even shrink
+  // while the CONTENT is entirely different. That false "nothing new" read
+  // is exactly what made a 27-tile day report EXHAUSTED after 3 tiles live.
+  // `seen` is the walk's memory of "what actually exists on this date",
+  // independent of what happens to be on-screen at any one instant --
+  // mergeSeen() below is the corrected comparison, done on the LABEL SET
+  // rather than a count.
+  const seen = new Map(); // ariaLabel -> tile, first-seen copy
+  // Tiles `seen` at some point but which never became actionable after
+  // MAX_TILE_OPEN_RETRIES scroll+retry attempts (see the StaleTileError
+  // branch below). Tracked separately from `visited` (which means "actually
+  // opened and its panel read") so a genuine EXHAUSTED report can mean what
+  // it says -- every seen label accounted for -- rather than silently
+  // dropping a tile the grid just wouldn't mount.
+  const unreachable = new Set();
+  const openAttempts = new Map(); // ariaLabel -> retry count so far, for the StaleTileError branch
   let steps = 0;
   let scrollAttempts = 0;
+  // Consecutive top-of-loop scroll rounds (see the "no candidate on-screen"
+  // branch below) that revealed no previously-unseen label. Reset by ANY
+  // progress -- a newly-seen label, or a tile actually opened -- so the walk
+  // only gives up after a genuine run of fruitless scrolling. This is a
+  // SEPARATE budget from the aria fast path's own pre-scroll loop above
+  // (see that loop's `scrollAttempts`) -- sharing one budget between the two
+  // phases meant the pre-scroll could spend the whole thing just loading the
+  // day, leaving the walk's very first "nothing on-screen" check to break
+  // immediately and report a date EXHAUSTED with 25 of 27 tiles never
+  // visited. Regression test 85 in worker.test.mjs proves this by mutation.
+  let walkScrollAttempts = 0;
   let boundHit = false;
+
+  /**
+   * Merge freshly-collected tiles into `seen`. Returns true iff at least one
+   * label was genuinely NEW. This is the corrected "did scrolling reveal
+   * anything" signal -- see the comment on `seen` above for why comparing
+   * label sets (not tile counts) is what actually detects progress on a
+   * virtualized grid.
+   */
+  const mergeSeen = (freshTiles) => {
+    let addedNew = false;
+    for (const t of freshTiles) {
+      if (!seen.has(t.ariaLabel)) {
+        seen.set(t.ariaLabel, t);
+        addedNew = true;
+      }
+    }
+    return addedNew;
+  };
 
   // --- CHANGE 1: aria fast path -------------------------------------------
   // Predict which tiles are worth opening from the grid's own aria-labels
@@ -646,6 +718,15 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
     }
     for (const [job, tile] of ariaPlan) {
       visited.add(tile.ariaLabel);
+      // Keep `seen` in sync with `visited` for aria-opened tiles too --
+      // otherwise a tile opened here (and, say, later trashed and dropped
+      // from the grid) never enters `seen` at all, and the exhaustive
+      // walk's end-of-date summary below can end up reporting more tiles
+      // "opened" than it ever "saw" (visited.size > seen.size), which is a
+      // nonsensical thing to print even though it doesn't affect
+      // correctness (visited/unreachable membership, not seen membership,
+      // drives candidate selection).
+      mergeSeen([tile]);
       steps += 1;
       try {
         await openTile(page, tile);
@@ -683,40 +764,94 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
     tiles = await collectResultTiles(page); // grid re-renders after trashing/closing
   }
 
-  // --- Exhaustive fallback (unchanged from before Change 1) --------------
+  mergeSeen(tiles); // seed `seen` with everything already known from the aria phase above
+
+  // --- Exhaustive fallback ------------------------------------------------
+  // Walks every tile this date has ever revealed (tracked in `seen`, not
+  // just what's on-screen right now) until every remaining job is matched,
+  // every seen tile is accounted for, or a bound is hit. See the comments on
+  // `seen`/`unreachable`/`mergeSeen` above for why this is no longer a
+  // straight "walk what's currently rendered" loop.
   while (remaining.length > 0) {
-    let tile = tiles.find((t) => !visited.has(t.ariaLabel));
+    // Prefer a tile that's on-screen RIGHT NOW (in this round's `tiles`
+    // snapshot) and neither already visited nor already given up on.
+    // openTile needs a real, actionable element -- a label merely present in
+    // `seen` but currently scrolled out of the mounted window isn't
+    // actionable until a scroll brings it back on-screen.
+    let tile = tiles.find((t) => !visited.has(t.ariaLabel) && !unreachable.has(t.ariaLabel));
 
     if (!tile) {
-      // No unvisited tile currently rendered. Before concluding the date is
-      // exhausted, scroll the grid (it's virtualized) and re-collect.
-      if (scrollAttempts >= MAX_SCROLL_ATTEMPTS_PER_DATE) break; // truly exhausted
-      const beforeCount = tiles.length;
+      // Nothing on-screen is both unvisited and not given up on. Before
+      // concluding the date is exhausted, scroll the grid and re-collect --
+      // it's virtualized, so unwalked tiles can exist off-screen even when
+      // the on-screen tile COUNT didn't grow (see mergeSeen's comment: a
+      // scroll that swaps the mounted window for an equally-sized one still
+      // reveals genuinely new content).
+      if (walkScrollAttempts >= MAX_SCROLL_ATTEMPTS_PER_DATE) break; // give up scrolling -- see EXHAUSTED-vs-ABANDONED reporting below
       await scrollResults(page);
-      scrollAttempts += 1;
-      tiles = await collectResultTiles(page);
-      if (tiles.length <= beforeCount) break; // scroll revealed nothing new
-      continue; // re-check the freshly-collected set for an unvisited tile
+      const fresh = await collectResultTiles(page);
+      tiles = fresh;
+      if (mergeSeen(fresh)) {
+        walkScrollAttempts = 0; // genuine progress -- keep scrolling as long as it keeps paying off
+      } else {
+        // A scroll that revealed nothing UNSEEN. Deliberately NOT the old
+        // `tiles.length <= beforeCount` check: that compares on-screen
+        // COUNTS, which stay flat across a virtualized window swap even
+        // though the labels underneath moved on entirely -- exactly the bug
+        // that made a 27-tile day report EXHAUSTED after 3 tiles live.
+        // Comparing against `seen`'s label set is what actually detects
+        // "this scroll genuinely found nothing new".
+        walkScrollAttempts += 1;
+      }
+      continue; // re-check the freshly-collected/merged set for a candidate
     }
 
     if (steps >= MAX_STEPS_PER_DATE) {
       boundHit = true;
       break;
     }
-
-    visited.add(tile.ariaLabel);
     steps += 1;
 
     try {
       await openTile(page, tile);
     } catch (err) {
       if (err instanceof StaleTileError) {
-        if (VERBOSE) console.log(`  [step ${steps}] ${err.message} — re-collecting`);
+        // A tile we KNOW exists (it was on-screen a moment ago) failed to
+        // open -- e.g. the grid re-virtualized it out between collecting and
+        // clicking. Retry a bounded number of times, scrolling in between in
+        // case that's what brings it back, before giving up on THIS tile
+        // specifically.
+        //
+        // Crucially this does NOT add the tile to `visited` on failure. The
+        // OLD code marked a tile visited BEFORE attempting to open it, so a
+        // tile that merely failed to open was silently counted as "walked"
+        // and never retried -- precisely how a date could report EXHAUSTED
+        // while most of it was never actually opened.
+        const attempts = (openAttempts.get(tile.ariaLabel) ?? 0) + 1;
+        openAttempts.set(tile.ariaLabel, attempts);
+        if (attempts >= MAX_TILE_OPEN_RETRIES) {
+          unreachable.add(tile.ariaLabel);
+          console.log(
+            `[date ${query}] UNREACHABLE: "${tile.ariaLabel}" never became actionable after ${attempts} attempt(s) — ` +
+              'giving up on this tile, NOT counting it as walked'
+          );
+        } else {
+          if (VERBOSE) console.log(`  [step ${steps}] ${err.message} — retry ${attempts}/${MAX_TILE_OPEN_RETRIES} after scrolling`);
+          await scrollResults(page);
+        }
         tiles = await collectResultTiles(page);
+        mergeSeen(tiles);
         continue;
       }
       throw err;
     }
+
+    // Only reaching here means the tile genuinely opened -- only NOW is it
+    // safe to count it as visited (see the StaleTileError comment above).
+    visited.add(tile.ariaLabel);
+    openAttempts.delete(tile.ariaLabel);
+    walkScrollAttempts = 0; // opening a tile is progress too
+
     await openInfoPanelOnce(page);
     const text = await readPanelText(page);
     const parsed = parsePanelText(text);
@@ -737,13 +872,38 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
 
     await closeAnyOpenPhoto(page);
     tiles = await collectResultTiles(page); // DOM re-renders on return to the grid
+    mergeSeen(tiles);
   }
 
   if (remaining.length > 0) {
-    if (boundHit) {
-      console.log(`[date ${query}] ABANDONED: MAX_STEPS_PER_DATE (${MAX_STEPS_PER_DATE}) reached, ${remaining.length} job(s) still unmatched`);
+    // EXHAUSTED means exactly what the brief requires it to mean: every
+    // tile this walk ever saw (`seen`) has either been opened (`visited`) or
+    // explicitly given up on after retries (`unreachable`) -- nothing was
+    // silently skipped. Classify on THAT invariant, not on which bound
+    // happened to fire the `break`: hitting the scroll-fruitless bound
+    // (walkScrollAttempts) only means the date is done in THIS walk's
+    // provable case, where the "no on-screen candidate" branch already
+    // established seen == visited ∪ unreachable before scrolling even
+    // started, so consecutive fruitless scrolls after that can never leave
+    // anything genuinely unwalked. `unwalked > 0` is the one case that would
+    // actually contradict that -- reserved for MAX_STEPS_PER_DATE cutting
+    // the walk off mid-day, or a future change that breaks the invariant.
+    const unwalked = seen.size - visited.size - unreachable.size;
+    if (boundHit || unwalked > 0) {
+      const why = boundHit ? `MAX_STEPS_PER_DATE (${MAX_STEPS_PER_DATE}) reached` : `${MAX_SCROLL_ATTEMPTS_PER_DATE} consecutive fruitless scroll(s)`;
+      console.log(
+        `[date ${query}] ABANDONED: ${why}, ${remaining.length} job(s) still unmatched` +
+          (unwalked > 0 ? `, ${unwalked} seen tile(s) never reached` : '')
+      );
     } else {
-      console.log(`[date ${query}] EXHAUSTED: all visible tiles walked, ${remaining.length} job(s) still unmatched`);
+      // Don't say "walked" for a tile that only ever got recorded
+      // unreachable -- it was explicitly given up on after retries, never
+      // actually opened, and EXHAUSTED must not imply otherwise (the
+      // per-tile UNREACHABLE line above already named it distinctly).
+      const unreachableNote = unreachable.size > 0 ? `, ${unreachable.size} unreachable (see UNREACHABLE above)` : '';
+      console.log(
+        `[date ${query}] EXHAUSTED: ${visited.size} tile(s) opened${unreachableNote} of ${seen.size} seen, ${remaining.length} job(s) still unmatched`
+      );
     }
   }
 
