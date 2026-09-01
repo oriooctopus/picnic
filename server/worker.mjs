@@ -338,19 +338,37 @@ export class StaleTileError extends Error {}
  */
 async function openTile(page, tile) {
   await page.bringToFront();
-  const labelNow = await tile.locator.getAttribute('aria-label').catch(() => null);
-  if (labelNow !== tile.ariaLabel) {
-    throw new StaleTileError(`tile moved: expected "${tile.ariaLabel}", found "${labelNow}"`);
+  // Address the tile by its aria-label, NOT by grid position. Playwright
+  // re-resolves a locator on EVERY call, so a positional locator from .all()
+  // is re-evaluated between the identity check and the click -- which is how a
+  // click meant for a photo landed on the "Back to search" link at nth(48)
+  // (it carries a ./search/ href too), and earlier on an "unlabeled person"
+  // chip at nth(52). An identity-scoped locator cannot drift this way.
+  const locator = tileLocatorFor(page, tile.ariaLabel);
+  if ((await locator.count()) === 0) {
+    throw new StaleTileError(`tile gone from the grid: "${tile.ariaLabel}"`);
   }
-  if (!(await tile.locator.isVisible().catch(() => false))) {
+  if (!(await locator.first().isVisible().catch(() => false))) {
     throw new StaleTileError(`tile no longer visible: "${tile.ariaLabel}"`);
   }
-  await tile.locator.scrollIntoViewIfNeeded();
-  await stealthDelay(500, 2000); // pre-click jitter — pure mimicry, off unless --slow
-  await tile.locator.click();
+  await locator.first().scrollIntoViewIfNeeded();
+  await stealthDelay(500, 2000); // pre-click jitter -- pure mimicry, off unless --slow
+  await locator.first().click();
   await assertNoFriction(page);
-  await stealthDelay(1000, 3000); // post-click settle jitter — pure mimicry, off unless --slow
+  await stealthDelay(1000, 3000); // post-click settle jitter -- pure mimicry, off unless --slow
 }
+
+/**
+ * A locator that finds a result tile by its aria-label rather than its index.
+ * aria-labels here look like `Photo - Portrait - Aug 5, 2026, 6:54:07 PM`;
+ * they contain commas and spaces but no double quotes, so they drop into an
+ * attribute selector as-is.
+ */
+function tileLocatorFor(page, ariaLabel) {
+  const escaped = ariaLabel.replace(/["\\]/g, '\\$&');
+  return page.locator(`${RESULT_LINK_SELECTOR}[aria-label="${escaped}"]`);
+}
+
 
 /**
  * Open the info panel once. Verified live 2026-09-01: the "Open info" BUTTON
@@ -373,6 +391,17 @@ async function openInfoPanelOnce(page) {
     await stealthDelay(400, 1200); // pure mimicry, off unless --slow
     return;
   }
+  // Wait for the photo view to actually exist before pressing anything. With
+  // the mimicry delays removed, 'i' was being pressed while the view was still
+  // opening, so the keystroke went nowhere and the poll below then waited the
+  // full 15s for a panel nobody had opened. This was the fast-mode failure:
+  // the same run passed with --slow purely because the jitter happened to
+  // cover the transition.
+  await page
+    .locator(TRASH_SELECTOR)
+    .first()
+    .waitFor({ state: 'attached', timeout: FAST_DELAYS ? 100 : 15000 })
+    .catch(() => {});
   await page.keyboard.press('i');
 
   // Real correctness wait: poll until the panel actually yields dimensions
@@ -380,12 +409,21 @@ async function openInfoPanelOnce(page) {
   // it's a local content check, not a network action Google could see the
   // cadence of.
   const deadline = Date.now() + (FAST_DELAYS ? 50 : 15000);
+  let attempts = 0;
   while (Date.now() < deadline) {
     await pollDelay();
     const text = await readPanelText(page);
     if (/\d{3,5}\s*[\u00d7x]\s*\d{3,5}/.test(text)) {
       await stealthDelay(800, 2000); // "dwell reading the panel" — pure mimicry, off unless --slow
       return;
+    }
+    // Re-press rather than trusting the single keystroke above: if it landed
+    // mid-transition it was simply lost, and polling forever for a panel that
+    // was never opened is the failure this replaces. Re-press on a slower
+    // cadence than the poll so we never toggle it shut again immediately.
+    attempts += 1;
+    if (attempts % 8 === 0) {
+      await page.keyboard.press('i');
     }
     // Second chance: a VISIBLE "Open info" button, if one is actually there.
     const button = page.locator(OPEN_INFO_SELECTOR).first();

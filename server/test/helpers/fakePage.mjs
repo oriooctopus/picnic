@@ -25,6 +25,73 @@
  * it.
  */
 
+
+/**
+ * The worker addresses tiles by identity now:
+ *   a[href^="./search/"][aria-label="Photo - Portrait - Aug 5, 2026, 6:54:07 PM"]
+ * Pull the label back out so the fake grid can resolve it the same way the
+ * real DOM would, rather than by array position.
+ */
+function ariaLabelFromSelector(selector) {
+  const m = /\[aria-label="((?:[^"\\]|\\.)*)"\]/.exec(selector || '');
+  return m ? m[1].replace(/\\(.)/g, '$1') : null;
+}
+
+/**
+ * True when `selector` is an identity-scoped result-link selector built by
+ * worker.mjs's tileLocatorFor (`a[href^="./search/"][aria-label="..."]`),
+ * as opposed to the plain `a[href^="./search/"]` selector .all() resolves
+ * against. Both contain the `./search/` substring, so this also requires an
+ * aria-label to be present, to avoid misrouting the plain selector's
+ * count/visible checks into the tile-lookup path.
+ */
+function isTileIdentitySelector(selector) {
+  return typeof selector === 'string' && selector.includes('./search/') && ariaLabelFromSelector(selector) != null;
+}
+
+/**
+ * All tiles currently "in the grid" for the active query: the base
+ * searchResults plus whatever scroll has revealed so far, minus anything
+ * already trashed. Shared by the identity-selector count/visible/click
+ * checks below and by FakeTileLink so both addressing paths (by position via
+ * .all(), by identity via tileLocatorFor) see the same grid.
+ */
+function tilesInGrid(page) {
+  const query = page.activeQuery;
+  const base = page.config.searchResults[query] ?? [];
+  const reveals = page.config.scrollReveals[query] ?? [];
+  const revealedBatches = reveals.slice(0, page.revealedCount).flat();
+  return [...base, ...revealedBatches].filter((tile) => {
+    const label = typeof tile === 'string' ? tile : tile.ariaLabel;
+    return !page.trashedLabels.has(label);
+  });
+}
+
+function findTileByLabel(page, label) {
+  return tilesInGrid(page).find((t) => (typeof t === 'string' ? t : t.ariaLabel) === label) ?? null;
+}
+
+/**
+ * Shared "a tile was opened" side effect: records the click in the log,
+ * points the (sticky) info panel at this tile, and simulates the browser
+ * tab closing after `closeAfterTiles` opens. Used by BOTH addressing paths --
+ * FakeTileLink.click() (tiles from .all(), positional) and FakeLocator.click()
+ * for an identity-scoped selector (worker.mjs's tileLocatorFor) -- so a real
+ * click has the same effect regardless of which selector shape found the
+ * tile, same as it would on the real DOM (it's the same element either way).
+ */
+function openTileInFake(page, ariaLabel) {
+  page.log.push(`tile-click:${ariaLabel}`);
+  page.openedAriaLabel = ariaLabel;
+  page.openedTileCount += 1;
+  // Simulates the browser tab disappearing right after this tile finished
+  // opening -- the NEXT guarded interaction (info panel, trash, escape...)
+  // is what throws, same shape as the live failure this models.
+  if (page.config.closeAfterTiles != null && page.openedTileCount >= page.config.closeAfterTiles) {
+    page._closed = true;
+  }
+}
+
 class FakeLocator {
   constructor(page, selector) {
     this.page = page;
@@ -39,6 +106,21 @@ class FakeLocator {
   async click() {
     this.page.guard();
     this.page.log.push(`click:${this.selector}`);
+    // worker.mjs's openTile() no longer clicks a positional locator from
+    // .all() -- it builds a fresh identity-scoped locator (tileLocatorFor)
+    // and clicks THAT. Without this branch the click resolves but never
+    // updates page.openedAriaLabel, so readPanelText() (keyed off
+    // openedAriaLabel) stays empty forever and openInfoPanelOnce() times out
+    // no matter what the panel fixture says -- this was the actual gap: the
+    // earlier version wired up count/visible for the new selector shape but
+    // not click, which is the one that matters for reaching the panel text.
+    if (isTileIdentitySelector(this.selector)) {
+      const label = ariaLabelFromSelector(this.selector);
+      if (findTileByLabel(this.page, label)) {
+        openTileInFake(this.page, label);
+        return;
+      }
+    }
     await this.page.onClick?.(this.selector);
   }
   async count() {
@@ -84,15 +166,21 @@ class FakeTileLink {
   }
   async click() {
     this.page.guard();
-    this.page.log.push(`tile-click:${this.ariaLabel}`);
-    this.page.openedAriaLabel = this.ariaLabel;
-    this.page.openedTileCount += 1;
-    // Simulates the browser tab disappearing right after this tile finished
-    // opening -- the NEXT guarded interaction (info panel, trash, escape...)
-    // is what throws, same shape as the live failure this models.
-    if (this.page.config.closeAfterTiles != null && this.page.openedTileCount >= this.page.config.closeAfterTiles) {
-      this.page._closed = true;
-    }
+    // Models the actual live bug (see worker.mjs's openTile comment): a
+    // POSITIONAL locator held from an earlier .all() call re-resolves the
+    // DOM on every call, so a re-render between "we decided to open this
+    // tile" and "we clicked it" can silently swap in a different element at
+    // the same spot -- observed live as a click meant for a photo landing on
+    // the "Back to search" link instead. `staleTileClickTargets` opts a
+    // fixture into that race (default: none, so every pre-existing test's
+    // FakeTileLink still opens exactly the tile it was built for). Only this
+    // POSITIONAL path can drift -- the identity-scoped locator worker.mjs's
+    // openTile actually uses now (tileLocatorFor, see FakeLocator.click()
+    // above) always resolves fresh by aria-label and is immune, which is
+    // the whole point of the fix and what the positional-drift regression
+    // test below proves by mutation.
+    const driftTarget = this.page.config.staleTileClickTargets?.[this.ariaLabel];
+    openTileInFake(this.page, driftTarget ?? this.ariaLabel);
   }
 }
 
@@ -114,6 +202,8 @@ function performTrash(page) {
  *   swallowTrashShortcut?: boolean,  // "#" keyboard fallback does nothing (models an unconfirmed trash)
  *   searchBoxHiddenUntilEscape?: boolean,
  *   closeAfterTiles?: number,        // browser tab "closes" right after this many tiles have been opened, across the whole run
+ *   staleTileClickTargets?: Record<string, string>, // ariaLabel -> ariaLabel a POSITIONAL tile.locator.click() actually lands on instead (models live re-render drift; the identity-scoped locator is immune -- see FakeTileLink.click())
+ *   swallowInfoPressesCount?: number, // first N "i" keypresses across the whole run are silently lost (models the keystroke landing mid-transition, before the photo view existed)
  * }}
  */
 export function createFakePage(config = {}) {
@@ -136,6 +226,7 @@ export function createFakePage(config = {}) {
     revealedCount: 0,
     recollectCount: {},
     escapePresses: 0,
+    infoPressesSwallowed: 0, // count of "i" presses dropped so far, capped by config.swallowInfoPressesCount
     _closed: false,
     isClosed() {
       return page._closed === true;
@@ -153,7 +244,20 @@ export function createFakePage(config = {}) {
           page.escapePresses += 1;
           page.openedAriaLabel = null;
         }
-        if (key === 'i') page.infoPanelOpen = !page.infoPanelOpen;
+        if (key === 'i') {
+          // Models the live-observed lost-keystroke bug: with the mimicry
+          // delays removed, "i" could be pressed while the photo view was
+          // still opening and simply go nowhere. A fixture opts a fixed
+          // number of LEADING presses into being swallowed this way; every
+          // press after that toggles normally, proving openInfoPanelOnce's
+          // re-press (every 8th poll) is what actually opens the panel.
+          const swallowLimit = page.config.swallowInfoPressesCount ?? 0;
+          if (page.infoPressesSwallowed < swallowLimit) {
+            page.infoPressesSwallowed += 1;
+          } else {
+            page.infoPanelOpen = !page.infoPanelOpen;
+          }
+        }
         if (key === '#' && !page.config.swallowTrashShortcut) performTrash(page);
         if (key === 'Enter') {
           page.activeQuery = page.pendingTypedText ?? null;
@@ -199,6 +303,14 @@ export function createFakePage(config = {}) {
       return page._url ?? 'https://photos.google.com';
     },
     countFor(selector) {
+      if (isTileIdentitySelector(selector)) {
+        // Must check the SAME grid (base + scroll-revealed, minus trashed)
+        // that .all() sees, not just the base searchResults -- otherwise a
+        // tile that only exists after a scroll reveal (see "scrolling
+        // reveals more tiles" in worker.test.mjs) would read as a
+        // StaleTileError even though it's genuinely there.
+        return findTileByLabel(page, ariaLabelFromSelector(selector)) ? 1 : 0;
+      }
       if (/aria-label="Open info"/i.test(selector)) {
         return page.config.infoButtonFound ? 1 : 0;
       }
@@ -215,15 +327,7 @@ export function createFakePage(config = {}) {
       const query = page.activeQuery;
       page.recollectCount[query] = (page.recollectCount[query] ?? 0) + 1;
 
-      const base = page.config.searchResults[query] ?? [];
-      const reveals = page.config.scrollReveals[query] ?? [];
-      const revealedBatches = reveals.slice(0, page.revealedCount).flat();
-      let all = [...base, ...revealedBatches];
-
-      all = all.filter((tile) => {
-        const label = typeof tile === 'string' ? tile : tile.ariaLabel;
-        return !page.trashedLabels.has(label);
-      });
+      let all = tilesInGrid(page);
 
       // Simulates the grid re-rendering tiles in a different order between
       // collections -- worker.mjs must dedupe/track by aria-label, not index.
@@ -249,6 +353,10 @@ export function createFakePage(config = {}) {
      * after walking a date the photo view covers the search box until Escape.
      */
     visibleFor(selector) {
+      if (isTileIdentitySelector(selector)) {
+        const hit = findTileByLabel(page, ariaLabelFromSelector(selector));
+        return hit ? (typeof hit === 'string' ? true : hit.hidden !== true) : false;
+      }
       if (/aria-label\*?="Search|placeholder\*?="Search/i.test(selector)) {
         if (!page.config.searchBoxHiddenUntilEscape) return true;
         return page.escapePresses > 0;

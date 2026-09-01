@@ -619,6 +619,87 @@ test('aria fast path: a predicted tile that does not confirm by filename is neve
   });
 });
 
+// -- Regression tests for the two live failures fixed 2026-09-01 -----------
+//
+// Both bugs were diagnosed from real runs (see worker.mjs's module header
+// and openTile/openInfoPanelOnce comments), not reproduced here against
+// live Google Photos -- these fixtures model the specific failure shape.
+
+test('positional-drift regression: a tile addressed by grid position can land on "Back to search" instead of the intended photo; identity addressing must not', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const label = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
+    const page = createFakePage({
+      // "Back to search" carries the same `./search/` href prefix as a real
+      // tile (RESULT_LINK_SELECTOR matches it) -- exactly the live collision:
+      // a click aimed at nth(48) in the real grid hit that link instead of a
+      // photo. isRealPhotoTile filters it out of the walkable tile queue
+      // (its aria-label doesn't start with "Photo -"/"Video -"), same as
+      // live, so with the fix it is never even a candidate to open.
+      searchResults: {
+        'August 5, 2026': [{ ariaLabel: 'Back to search' }, { ariaLabel: label }],
+      },
+      panelTextByLabel: {
+        'August 5, 2026': { [label]: IMG_1433_BLOCK },
+      },
+      // Models the grid re-rendering between "we decided to open this tile"
+      // and "we actually clicked it": a POSITIONAL locator (the pre-fix
+      // tile.locator.click()) held for `label` would silently resolve to
+      // "Back to search" by click time. The identity-scoped locator
+      // worker.mjs's openTile uses now (tileLocatorFor) looks the tile up by
+      // aria-label fresh on every call and cannot be fooled by this -- see
+      // FakeTileLink.click() / FakeLocator.click() in fakePage.mjs.
+      staleTileClickTargets: { [label]: 'Back to search' },
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'the intended tile must still be opened and matched despite the positional-drift fixture');
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.ok(page.log.includes(`tile-click:${label}`), 'must open the intended tile by identity');
+    assert.ok(!page.log.includes('tile-click:Back to search'), 'must NEVER open the "Back to search" link');
+  });
+});
+
+test('lost-keystroke regression: the info panel opens even when the first "i" press is lost, and openInfoPanelOnce still throws (never hangs) if the panel truly never opens', async () => {
+  await withTempQueue(async (queue) => {
+    // Case 1: the panel eventually opens, but only after openInfoPanelOnce
+    // re-presses "i" (its first press is dropped, modeling the keystroke
+    // landing mid-transition before the photo view existed -- see
+    // openInfoPanelOnce's comment on the re-press-every-8th-poll behaviour).
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const label = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [{ ariaLabel: label }] },
+      panelTextByLabel: { 'August 5, 2026': { [label]: IMG_1433_BLOCK } },
+      swallowInfoPressesCount: 1,
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'must still match once the re-press opens the panel');
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    const iPresses = page.log.filter((l) => l === 'key:i').length;
+    assert.ok(iPresses >= 2, `expected the first "i" press to be lost and a later re-press to succeed, got ${iPresses} press(es)`);
+
+    // Case 2: a photo view whose panel NEVER yields dimensions text (no
+    // panelTextByLabel entry at all) must still throw once the deadline
+    // elapses, rather than the re-press loop hanging forever.
+    const { job: neverJob } = queue.enqueue({ ...IMG_1441_JOB, filename: 'IMG_NEVER.HEIC' });
+    const neverLabel = 'Photo - Portrait - Aug 5, 2026, 8:00:00 PM';
+    const neverPage = createFakePage({
+      searchResults: { 'August 5, 2026': [{ ariaLabel: neverLabel }] },
+      panelTextByLabel: { 'August 5, 2026': {} }, // no entry for neverLabel -- panel content never arrives
+    });
+
+    await assert.rejects(
+      () => processDateGroup(neverPage, '2026-08-05', [neverJob], queue, { dryRun: false }),
+      /info panel never produced dimensions text/,
+      'must throw rather than hang when the panel genuinely never opens'
+    );
+  });
+});
+
 test('--slow: parseArgs recognizes the flag, and stealthDelayRange restores the long delays only when slow=true', () => {
   assert.equal(parseArgs([]).slow, false, 'off by default');
   assert.equal(parseArgs(['--dry-run', '--slow', '--cap', '10']).slow, true);
