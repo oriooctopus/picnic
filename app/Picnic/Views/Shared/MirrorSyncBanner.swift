@@ -9,11 +9,19 @@ struct MirrorSyncBanner: View {
         VStack {
             Spacer()
             if appState.mirrorQueue.pendingCount > 0 {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                    Text("\(appState.mirrorQueue.pendingCount) not yet mirrored")
+                VStack(spacing: 2) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                        Text("\(appState.mirrorQueue.pendingCount) not yet mirrored")
+                    }
+                    .font(.caption.bold())
+                    if let lastError = appState.mirrorQueue.lastError {
+                        Text(lastError.prefix(80))
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
-                .font(.caption.bold())
                 .foregroundStyle(.white)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)

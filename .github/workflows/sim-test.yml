@@ -32,6 +32,14 @@ jobs:
           cd app
           xcodegen generate
 
+      - name: Verify ATS exception reached the generated Info.plist
+        run: |
+          set -euo pipefail
+          PLIST="app/Picnic/Resources/Info.plist"
+          echo "Generated $PLIST:"
+          plutil -p "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :NSAppTransportSecurity:NSAllowsArbitraryLoads" "$PLIST"
+
       - name: Build for simulator
         run: |
           cd app

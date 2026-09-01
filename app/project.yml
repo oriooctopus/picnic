@@ -41,6 +41,16 @@ targets:
           - UIInterfaceOrientationPortrait
         NSPhotoLibraryUsageDescription: "Picnic reads your camera roll so you can swipe-sort it month by month."
         NSPhotoLibraryAddUsageDescription: "Picnic needs permission to delete and favorite photos you sort."
+        # The mirror server is reached over cleartext HTTP at a Tailscale IP
+        # baked in from a CI secret (PICNIC_MIRROR_HOST) — ATS blocks that by
+        # default. Use NSAllowsArbitraryLoads rather than an
+        # NSExceptionDomains entry: exception domains are for hostnames, and
+        # do not reliably cover bare IP literals like a Tailscale address.
+        # This is an ad-hoc personal build, never App Store, so arbitrary
+        # loads is acceptable — do NOT "tighten" this to exception domains,
+        # it will silently re-break the mirror POST.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.oliverullman.picnic
