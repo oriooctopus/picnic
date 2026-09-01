@@ -67,7 +67,6 @@ const OPEN_INFO_SELECTOR = '[aria-label="Open info" i]';
 // from "Open info" to "Close info". Panel TEXT is read by locating the
 // container that holds the dimensions string (see readPanelText).
 const INFO_PANEL_OPEN_SELECTOR = 'button[aria-label="Close info"]';
-const NEXT_PHOTO_SELECTOR = '[aria-label="View next photo" i]';
 // NOT scoped to <button>: these toolbar controls are not necessarily real
 // button elements, and a 'button[...]' selector silently matched nothing —
 // which sent moveToTrash down its keyboard fallback and deleted nothing at
@@ -82,6 +81,10 @@ const PACE_MS_MAX = 9000;
 // the next date attempt (or needs_review) once the cap is hit.
 let VERBOSE = false;
 export const MAX_STEPS_PER_DATE = 80;
+// Bound the "scroll for more tiles" loop separately from the tile-open bound
+// above -- a date with a huge grid must not scroll forever trying to find
+// tiles that were never going to load.
+export const MAX_SCROLL_ATTEMPTS_PER_DATE = 6;
 
 function parseArgs(argv) {
   const args = { cap: DEFAULT_CAP, dryRun: false };
@@ -320,30 +323,28 @@ async function readPanelText(page) {
   }).catch(() => '');
 }
 
-/** Step to the next photo in the day, keeping the info panel open. Returns false when there's no next photo. */
-async function viewNextPhoto(page, previousText) {
-  // The "View next photo" BUTTON is present but not reliably clickable in the
-  // search-context photo view (same hidden-duplicate problem as "Open info"),
-  // so the walk never advanced past the first photo. ArrowRight is Google
-  // Photos' own next-photo shortcut and works there. Verified live 2026-09-01.
-  await randomDelay(900, 2200);
-  const button = page.locator(NEXT_PHOTO_SELECTOR).first();
-  if (await button.isVisible().catch(() => false)) {
-    await button.click().catch(() => {});
-  } else {
-    await page.keyboard.press('ArrowRight');
-  }
-  await assertNoFriction(page);
+/**
+ * Scroll the results grid to load more of the day's tiles. `collectResultTiles`
+ * only sees what is currently rendered -- a big day's grid is virtualized, so
+ * concluding a date is exhausted just because no unvisited tile is on-screen
+ * would silently leave photos unwalked. Human-paced (a real wheel event, then
+ * a dwell), not a jump-to-bottom.
+ */
+async function scrollResults(page) {
+  await page.mouse.wheel(0, 600 + Math.random() * 400);
+  await randomDelay(1200, 2200);
+}
 
-  // Advancement is confirmed by the panel CONTENT changing, not by a click
-  // resolving: unchanged text after the dwell means we're at the last photo.
-  const deadline = Date.now() + (FAST_DELAYS ? 50 : 8000);
-  while (Date.now() < deadline) {
-    await randomDelay(700, 1400);
-    const text = await readPanelText(page);
-    if (text && text !== previousText) return true;
-  }
-  return false;
+/**
+ * True when `err` (or the page itself) indicates the tab/browser this worker
+ * was driving has gone away -- Oliver's real Chrome, which can close a tab
+ * out from under this run at any time (he uses the browser, or Chrome closes
+ * it). This is not a bug to retry past; it just means nothing further can be
+ * learned this run.
+ */
+export function isPageClosedError(page, err) {
+  if (page?.isClosed?.()) return true;
+  return /Target page, context or browser has been closed/i.test(String(err?.message || err || ''));
 }
 
 /**
@@ -401,28 +402,59 @@ async function moveToTrash(page, panelTextBefore) {
 }
 
 /**
- * Search one calendar date and walk its results, confirming and (live
- * only) trashing every still-unmatched job it can. Returns the jobs from
- * `unmatchedJobs` that remain unconfirmed after this date's walk.
+ * Search one calendar date and walk its results EXHAUSTIVELY -- every visible
+ * tile, not just those an accelerator like "next photo" happens to reach --
+ * confirming and (live only) trashing every still-unmatched job it can.
+ * Returns the jobs from `unmatchedJobs` that remain unconfirmed after this
+ * date's walk.
+ *
+ * Tiles are tracked as visited by `aria-label` (carries media type,
+ * orientation and capture time to the second -- see isRealPhotoTile /
+ * dedupeTilesByAriaLabel in lib/matcher.mjs), never by array index: the grid
+ * re-renders between tiles and indices shift.
  */
 export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun }) {
   let remaining = [...unmatchedJobs];
   if (remaining.length === 0) return { stillUnmatched: remaining };
 
   const query = await searchByDate(page, dateStr);
-  const tiles = await collectResultTiles(page);
+  let tiles = await collectResultTiles(page);
   if (VERBOSE) console.log(`[search ${query}] ${tiles.length} visible photo tile(s)`);
   if (tiles.length === 0) {
     console.log(`[search ${query}] no results`);
     return { stillUnmatched: remaining };
   }
 
-  await openTile(page, tiles[0]);
-  await openInfoPanelOnce(page);
-
+  const visited = new Set();
   let steps = 0;
-  let hasMore = true;
-  while (hasMore && remaining.length > 0 && steps < MAX_STEPS_PER_DATE) {
+  let scrollAttempts = 0;
+  let boundHit = false;
+
+  while (remaining.length > 0) {
+    let tile = tiles.find((t) => !visited.has(t.ariaLabel));
+
+    if (!tile) {
+      // No unvisited tile currently rendered. Before concluding the date is
+      // exhausted, scroll the grid (it's virtualized) and re-collect.
+      if (scrollAttempts >= MAX_SCROLL_ATTEMPTS_PER_DATE) break; // truly exhausted
+      const beforeCount = tiles.length;
+      await scrollResults(page);
+      scrollAttempts += 1;
+      tiles = await collectResultTiles(page);
+      if (tiles.length <= beforeCount) break; // scroll revealed nothing new
+      continue; // re-check the freshly-collected set for an unvisited tile
+    }
+
+    if (steps >= MAX_STEPS_PER_DATE) {
+      boundHit = true;
+      break;
+    }
+
+    visited.add(tile.ariaLabel);
+    steps += 1;
+
+    await openTile(page, tile);
+    await openInfoPanelOnce(page);
     const text = await readPanelText(page);
     const parsed = parsePanelText(text);
     if (VERBOSE) {
@@ -457,9 +489,19 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
       }
       remaining = remaining.filter((j) => j !== job);
     }
-    steps += 1;
+
     if (remaining.length === 0) break;
-    hasMore = await viewNextPhoto(page, text);
+
+    await closeAnyOpenPhoto(page);
+    tiles = await collectResultTiles(page); // DOM re-renders on return to the grid
+  }
+
+  if (remaining.length > 0) {
+    if (boundHit) {
+      console.log(`[date ${query}] ABANDONED: MAX_STEPS_PER_DATE (${MAX_STEPS_PER_DATE}) reached, ${remaining.length} job(s) still unmatched`);
+    } else {
+      console.log(`[date ${query}] EXHAUSTED: all visible tiles walked, ${remaining.length} job(s) still unmatched`);
+    }
   }
 
   return { stillUnmatched: remaining };
@@ -483,6 +525,19 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun }) {
         if (unmatched.length > 0) await randomDelay(PACE_MS_MIN, PACE_MS_MAX);
       }
     } catch (err) {
+      if (isPageClosedError(page, err)) {
+        // The tab this worker was driving is gone -- nothing was learned
+        // about any in-flight job, so nothing gets marked failed/needs_review;
+        // every job that never resolved to trashed/needs_review/error this
+        // run simply stays 'queued' for the next run.
+        const allIds = [...groupedJobs.values()].flat().map((j) => j.id);
+        const processed = allIds.filter((id) => queue.getById(id)?.status !== 'queued').length;
+        console.log(
+          `[worker] browser tab went away mid-run — ${processed} job(s) processed before that, ` +
+            `${allIds.length - processed} left queued for the next run.`
+        );
+        return; // end cleanly, no rethrow
+      }
       if (!dryRun) {
         for (const job of unmatched) {
           queue.update(job.id, { status: 'error', error: String(err.message || err), attempts: job.attempts + 1 });
