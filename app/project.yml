@@ -41,14 +41,20 @@ targets:
           - UIInterfaceOrientationPortrait
         NSPhotoLibraryUsageDescription: "Picnic reads your camera roll so you can swipe-sort it month by month."
         NSPhotoLibraryAddUsageDescription: "Picnic needs permission to delete and favorite photos you sort."
-        # The mirror server is reached over cleartext HTTP at a Tailscale IP
-        # baked in from a CI secret (PICNIC_MIRROR_HOST) — ATS blocks that by
-        # default. Use NSAllowsArbitraryLoads rather than an
-        # NSExceptionDomains entry: exception domains are for hostnames, and
-        # do not reliably cover bare IP literals like a Tailscale address.
-        # This is an ad-hoc personal build, never App Store, so arbitrary
-        # loads is acceptable — do NOT "tighten" this to exception domains,
-        # it will silently re-break the mirror POST.
+        # The mirror server is reached over cleartext HTTP at the host baked
+        # in from the PICNIC_MIRROR_HOST CI secret — ATS blocks cleartext by
+        # default, which silently killed every mirror POST until 2026-09-01
+        # (the queue file had been 0 bytes since the server was stood up).
+        # The baked host is a Tailscale MagicDNS name (verified: the shipped
+        # IPA's binary contains a *.ts.net string and neither placeholder),
+        # so an NSExceptionDomains entry could in principle scope this more
+        # tightly. It is deliberately not used: the host is a build-time
+        # secret, so naming it here would publish it in this public repo, and
+        # a mismatch between the secret and a hardcoded exception domain
+        # would fail exactly as silently as the bug this replaced. This is an
+        # ad-hoc personal build, never App Store, so arbitrary loads is the
+        # right trade. Note the POST also needs the phone on Tailscale with
+        # MagicDNS enabled for that hostname to resolve at all.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
     settings:
