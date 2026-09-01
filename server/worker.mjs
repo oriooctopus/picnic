@@ -61,7 +61,12 @@ const RESULT_LINK_SELECTOR = 'a[href^="./search/"]';
 // hits "Close info" and others (4 elements observed live) and .first()
 // on that times out. "Open info" is exact.
 const OPEN_INFO_SELECTOR = 'button[aria-label="Open info"]';
-const INFO_PANEL_SELECTOR = '[aria-label="Info"], [role="complementary"]';
+// The open panel has no stable container selector of its own — verified live
+// on 2026-09-01: '[aria-label="Info"]' / '[role="complementary"]' never match.
+// The reliable signal that the panel is open is the toolbar button flipping
+// from "Open info" to "Close info". Panel TEXT is read by locating the
+// container that holds the dimensions string (see readPanelText).
+const INFO_PANEL_OPEN_SELECTOR = 'button[aria-label="Close info"]';
 const NEXT_PHOTO_SELECTOR = 'button[aria-label="View next photo" i]';
 const TRASH_SELECTOR = 'button[aria-label="Move to trash" i]';
 // Randomized 4-9s between jobs (was a fixed 4000ms) — a constant interval is
@@ -71,6 +76,7 @@ const PACE_MS_MAX = 9000;
 // Bound the walk through a single day's search results so a huge day can't
 // loop forever. Unmatched jobs for that date attempt just fall through to
 // the next date attempt (or needs_review) once the cap is hit.
+let VERBOSE = false;
 export const MAX_STEPS_PER_DATE = 80;
 
 function parseArgs(argv) {
@@ -78,6 +84,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--cap') args.cap = Number(argv[++i]);
     if (argv[i] === '--dry-run') args.dryRun = true;
+    if (argv[i] === '--verbose') VERBOSE = true;
     if (argv[i] === '--help' || argv[i] === '-h') {
       console.log(
         'Usage: node worker.mjs [--dry-run] [--cap N]\n' +
@@ -174,6 +181,25 @@ async function openPhotosHome(page) {
 }
 
 /**
+ * Leave the photo detail view, if one is open, so the search box is reachable
+ * again. Verified live 2026-09-01: after walking a date's photos the detail
+ * view still covers the app, and the search input resolves but is NOT visible,
+ * so the next date's search dies with a click timeout. Escape is the app's own
+ * dismiss affordance (no goto/reload, per rules/playwright.md).
+ */
+async function closeAnyOpenPhoto(page) {
+  const searchBox = page.locator(SEARCH_BOX_SELECTOR).first();
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (await searchBox.isVisible().catch(() => false)) return;
+    await page.keyboard.press('Escape');
+    await randomDelay(900, 1800);
+  }
+  if (!(await searchBox.isVisible().catch(() => false))) {
+    throw new Error('search box still not reachable after 4 Escape presses — UI drift, stopping rather than forcing navigation');
+  }
+}
+
+/**
  * Search Google Photos by calendar date ("<Month> <D>, <YYYY>") using the
  * app's own search box (never goto()'ing a /search/<query> URL directly —
  * see module header). Types character-by-character with human-scale delay
@@ -182,6 +208,7 @@ async function openPhotosHome(page) {
  */
 async function searchByDate(page, dateStr) {
   const query = formatSearchDate(dateStr);
+  await closeAnyOpenPhoto(page);
   const searchBox = page.locator(SEARCH_BOX_SELECTOR).first();
   await searchBox.click();
   await randomDelay(1000, 4000);
@@ -206,9 +233,16 @@ async function collectResultTiles(page) {
   const withLabels = [];
   for (const link of links) {
     const ariaLabel = await link.getAttribute('aria-label').catch(() => null);
+    if (!isRealPhotoTile(ariaLabel)) continue;
+    // VERIFIED LIVE 2026-09-01: a previous search's result grid stays in the
+    // DOM after the next search, collapsed to a 0x0 box. Its tiles still match
+    // the selector and still carry aria-labels, so without a visibility filter
+    // the walk picks a stale hidden tile and openTile() dies in
+    // scrollIntoViewIfNeeded with "element is not visible".
+    if (!(await link.isVisible().catch(() => false))) continue;
     withLabels.push({ locator: link, ariaLabel });
   }
-  return dedupeTilesByAriaLabel(withLabels.filter((t) => isRealPhotoTile(t.ariaLabel)));
+  return dedupeTilesByAriaLabel(withLabels);
 }
 
 /** Open a tile. Requires bringToFront() first — see module header note. */
@@ -221,33 +255,91 @@ async function openTile(page, tile) {
   await randomDelay(1000, 3000);
 }
 
-/** Open the info panel once (button, falling back to the "i" shortcut). */
+/**
+ * Open the info panel once. Verified live 2026-09-01: the "Open info" BUTTON
+ * click is unreliable in the search-context photo view (the toolbar carries
+ * hidden duplicates, so a click on .first() times out), while the "i"
+ * keyboard shortcut works. And "Close info" is present-but-hidden even when
+ * the panel is shut, so its mere existence proves nothing.
+ *
+ * Readiness is therefore judged on CONTENT — poll until the panel actually
+ * yields a dimensions string — rather than on any selector being visible.
+ */
 async function openInfoPanelOnce(page) {
-  const infoButton = page.locator(OPEN_INFO_SELECTOR).first();
-  if (await infoButton.count()) {
-    await randomDelay(500, 2000);
-    await infoButton.click();
-  } else {
-    await page.keyboard.press('i');
+  await randomDelay(500, 1500);
+  // The panel is sticky: once opened it stays open as you move between photos
+  // and across searches. Pressing "i" when it is ALREADY open closes it, which
+  // is what broke the second date of the first successful walk. Only toggle it
+  // when it is genuinely shut. Verified live 2026-09-01.
+  const already = await readPanelText(page);
+  if (/\d{3,5}\s*[\u00d7x]\s*\d{3,5}/.test(already)) {
+    await randomDelay(400, 1200);
+    return;
   }
-  const panel = page.locator(INFO_PANEL_SELECTOR).first();
-  await panel.waitFor({ state: 'visible', timeout: 10000 });
-  await randomDelay(1000, 3000); // dwell reading the panel before extracting text
+  await page.keyboard.press('i');
+
+  const deadline = Date.now() + (FAST_DELAYS ? 50 : 15000);
+  while (Date.now() < deadline) {
+    await randomDelay(700, 1400);
+    const text = await readPanelText(page);
+    if (/\d{3,5}\s*[\u00d7x]\s*\d{3,5}/.test(text)) {
+      await randomDelay(800, 2000); // dwell reading the panel
+      return;
+    }
+    // Second chance: a VISIBLE "Open info" button, if one is actually there.
+    const button = page.locator(OPEN_INFO_SELECTOR).first();
+    if (await button.isVisible().catch(() => false)) {
+      await button.click().catch(() => {});
+    }
+  }
+  throw new Error('info panel never produced dimensions text after 15s — selector/UI drift, stopping rather than guessing');
 }
 
 async function readPanelText(page) {
-  return (await page.locator(INFO_PANEL_SELECTOR).first().textContent().catch(() => '')) ?? '';
+  // Verified live: the details block is an unlabelled div. Find it by content
+  // (it is the smallest element containing a "W x H" dimensions string) rather
+  // than by a selector, which Google does not give us a stable one for.
+  return await page.evaluate(() => {
+    const DIMS = /\d{3,5}\s*[\u00d7x]\s*\d{3,5}/;
+    const FILE = /[A-Za-z0-9._-]+\.(HEIC|JPG|JPEG|PNG|MOV|MP4)\b/i;
+    // Smallest element containing BOTH dimensions AND a filename. Taking the
+    // smallest element with dimensions alone (the earlier version) returned
+    // just "7.2MP2316 x 3088" — no filename — so every photo parsed as a
+    // non-match. Verified live 2026-09-01.
+    const hits = Array.from(document.querySelectorAll('div,c-wiz,aside'))
+      .filter((el) => {
+        const t = el.innerText || '';
+        return DIMS.test(t) && FILE.test(t);
+      })
+      .sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+    return hits.length ? hits[0].innerText : '';
+  }).catch(() => '');
 }
 
 /** Step to the next photo in the day, keeping the info panel open. Returns false when there's no next photo. */
-async function viewNextPhoto(page) {
-  const nextButton = page.locator(NEXT_PHOTO_SELECTOR).first();
-  if (!(await nextButton.count())) return false;
-  await randomDelay(1000, 3000);
-  await nextButton.click();
+async function viewNextPhoto(page, previousText) {
+  // The "View next photo" BUTTON is present but not reliably clickable in the
+  // search-context photo view (same hidden-duplicate problem as "Open info"),
+  // so the walk never advanced past the first photo. ArrowRight is Google
+  // Photos' own next-photo shortcut and works there. Verified live 2026-09-01.
+  await randomDelay(900, 2200);
+  const button = page.locator(NEXT_PHOTO_SELECTOR).first();
+  if (await button.isVisible().catch(() => false)) {
+    await button.click().catch(() => {});
+  } else {
+    await page.keyboard.press('ArrowRight');
+  }
   await assertNoFriction(page);
-  await randomDelay(1000, 3000); // dwell for the panel to update before reading it
-  return true;
+
+  // Advancement is confirmed by the panel CONTENT changing, not by a click
+  // resolving: unchanged text after the dwell means we're at the last photo.
+  const deadline = Date.now() + (FAST_DELAYS ? 50 : 8000);
+  while (Date.now() < deadline) {
+    await randomDelay(700, 1400);
+    const text = await readPanelText(page);
+    if (text && text !== previousText) return true;
+  }
+  return false;
 }
 
 /** Move the currently-open photo to trash via the UI. NEVER permanent-delete. */
@@ -268,6 +360,7 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
 
   const query = await searchByDate(page, dateStr);
   const tiles = await collectResultTiles(page);
+  if (VERBOSE) console.log(`[search ${query}] ${tiles.length} visible photo tile(s)`);
   if (tiles.length === 0) {
     console.log(`[search ${query}] no results`);
     return { stillUnmatched: remaining };
@@ -281,6 +374,13 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
   while (hasMore && remaining.length > 0 && steps < MAX_STEPS_PER_DATE) {
     const text = await readPanelText(page);
     const parsed = parsePanelText(text);
+    if (VERBOSE) {
+      console.log(
+        `  [step ${steps}] panel: filename=${parsed.filename ?? '(none)'} ` +
+          `dims=${parsed.pixelWidth ?? '?'}x${parsed.pixelHeight ?? '?'}` +
+          (parsed.filename ? '' : ` rawLen=${(text || '').length} raw="${(text || '').slice(0, 120)}"`)
+      );
+    }
     const job = findMatchingJob(remaining, parsed);
     if (job) {
       if (dryRun) {
@@ -298,7 +398,7 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
     }
     steps += 1;
     if (remaining.length === 0) break;
-    hasMore = await viewNextPhoto(page);
+    hasMore = await viewNextPhoto(page, text);
   }
 
   return { stillUnmatched: remaining };

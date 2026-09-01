@@ -53,10 +53,16 @@ class FakeLocator {
   async scrollIntoViewIfNeeded() {
     this.page.log.push(`scroll:${this.selector}`);
   }
+  async isVisible() {
+    return this.page.visibleFor(this.selector);
+  }
 }
 
 /** One result-grid tile, as returned by `.all()` on the result-link selector. */
 class FakeTileLink {
+  async isVisible() {
+    return this.hidden !== true;
+  }
   constructor(page, ariaLabel, index) {
     this.page = page;
     this.ariaLabel = ariaLabel;
@@ -99,6 +105,13 @@ export function createFakePage(config = {}) {
     keyboard: {
       async press(key) {
         page.log.push(`key:${key}`);
+        if (key === 'Escape') page.escapePresses = (page.escapePresses ?? 0) + 1;
+        if (key === 'ArrowRight') {
+          // Real UI: ArrowRight is what actually advances the photo (the
+          // "View next photo" button is present but not reliably clickable).
+          const seq = page.config.photoSequence[page.activeQuery] ?? [];
+          if (page.photoIndex + 1 < seq.length) page.photoIndex += 1;
+        }
         if (key === 'Enter') {
           page.activeQuery = page.pendingTypedText ?? null;
           page.photoIndex = 0;
@@ -124,6 +137,12 @@ export function createFakePage(config = {}) {
     async bringToFront() {
       page.log.push('bringToFront');
     },
+    async evaluate() {
+      // Mirrors readPanelText(): returns the current photo's info-panel text.
+      page.log.push('evaluate:panelText');
+      const seq = page.config.photoSequence[page.activeQuery] ?? [];
+      return seq[page.photoIndex] ?? '';
+    },
     async goBack() {
       page.goBackCalls = (page.goBackCalls ?? 0) + 1;
       page.log.push('goBack');
@@ -142,6 +161,10 @@ export function createFakePage(config = {}) {
       if (/aria-label="Move to trash"/i.test(selector)) {
         return 1;
       }
+      // The panel-open signal: present once the info panel has been opened.
+      if (/aria-label="Close info"/i.test(selector)) {
+        return page.config.infoButtonFound ? 1 : 0;
+      }
       return 0;
     },
     allFor(selector) {
@@ -156,6 +179,10 @@ export function createFakePage(config = {}) {
     },
     textFor(selector) {
       if (selector === 'body') return page.config.bodyText;
+      if (/aria-label="Close info"/i.test(selector)) {
+        const seq = page.config.photoSequence[page.activeQuery] ?? [];
+        return seq[page.photoIndex] ?? '';
+      }
       if (/aria-label="Info"|role="complementary"/i.test(selector)) {
         const seq = page.config.photoSequence[page.activeQuery] ?? [];
         return seq[page.photoIndex] ?? '';
@@ -163,6 +190,21 @@ export function createFakePage(config = {}) {
       return '';
     },
     shouldTimeout() {
+      return false;
+    },
+    /**
+     * Visibility, used by closeAnyOpenPhoto() and the info-panel fallback.
+     * `searchBoxHiddenUntilEscape` models the real behaviour the live run hit:
+     * after walking a date the photo view covers the search box until Escape.
+     */
+    visibleFor(selector) {
+      if (/aria-label\*?="Search|placeholder\*?="Search/i.test(selector)) {
+        if (!page.config.searchBoxHiddenUntilEscape) return true;
+        return page.escapePresses > 0;
+      }
+      if (/aria-label="Open info"/i.test(selector)) {
+        return Boolean(page.config.infoButtonVisible);
+      }
       return false;
     },
     async onClick(selector) {
