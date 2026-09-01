@@ -23,6 +23,20 @@
  * real, live-verified behaviour worker.mjs relies on: once opened it stays
  * open across tiles and across searches, and pressing "i" while open closes
  * it.
+ *
+ * The photo view's open/closed state is modelled by `page.openedAriaLabel`
+ * (non-null == a photo is open): set when a tile is clicked (openTileInFake),
+ * cleared by Escape and by a successful trash. Two selectors are gated on it
+ * (see photoOpen() below), matching the live DOM behaviour worker.mjs's
+ * closeAnyOpenPhoto fix depends on (2026-09-01): TRASH_SELECTOR is a
+ * photo-view-only control (visible ONLY while a photo is open, the sole
+ * signal closeAnyOpenPhoto now uses), and a result tile's IDENTITY-scoped
+ * locator (tileLocatorFor's `[aria-label="..."]:visible`, what openTile()
+ * actually clicks) resolves to nothing while a photo covers the grid. The
+ * SEARCH BOX is deliberately NOT gated this way by default -- matching the
+ * live trap the fix targets, it stays visible whether or not a photo is
+ * open, which is exactly why the OLD closeAnyOpenPhoto (search-box-only)
+ * never actually closed anything.
  */
 
 
@@ -120,6 +134,21 @@ function isUnopenable(page, label) {
   const set = page.config.unopenableLabels;
   if (!set) return false;
   return set instanceof Set ? set.has(label) : Array.isArray(set) && set.includes(label);
+}
+
+/**
+ * True while a photo is open in the fake -- worker.mjs has clicked a tile
+ * and not yet Escaped away from it (or trashed it) -- mirrors the real DOM
+ * signal worker.mjs's closeAnyOpenPhoto fix relies on: TRASH_SELECTOR is a
+ * photo-view-only control, and the grid's own result tiles are NOT :visible
+ * while a photo covers them (verified live 2026-09-01 -- see worker.mjs's
+ * TRASH_SELECTOR / closeAnyOpenPhoto comments). `page.openedAriaLabel` is
+ * already exactly this signal: set by openTileInFake when a tile is clicked,
+ * cleared by Escape and by a successful trash (see keyboard.press/performTrash
+ * below) and by starting a fresh search.
+ */
+function photoOpen(page) {
+  return page.openedAriaLabel != null;
 }
 
 /**
@@ -390,6 +419,16 @@ export function createFakePage(config = {}) {
     },
     countFor(selector) {
       if (isTileIdentitySelector(selector)) {
+        // A tile is only reachable via its identity-scoped `:visible`
+        // selector while the GRID is actually showing. While a photo is
+        // open the grid sits behind the photo view and this selector counts
+        // 0 -- this is the exact live mechanism openTile()'s `count()===0`
+        // check depends on to notice a tile it tried to open is gone (see
+        // StaleTileError), and it's what proves closeAnyOpenPhoto's fix:
+        // under the OLD (search-box-only) condition, a photo left open by a
+        // skipped Escape makes the NEXT tile's identity selector count 0 too
+        // -- "tile gone from the grid", the exact live failure this models.
+        if (photoOpen(page)) return 0;
         // Must check the SAME (possibly windowed) grid that .all() sees, not
         // just the base searchResults -- otherwise a tile that only exists
         // after a scroll reveal (see "scrolling reveals more tiles" in
@@ -444,12 +483,25 @@ export function createFakePage(config = {}) {
      */
     visibleFor(selector) {
       if (isTileIdentitySelector(selector)) {
+        // Same "grid is behind the photo view" gating as countFor's identity
+        // branch above -- openTile() also calls isVisible() after count(),
+        // and both must agree on the tile being unreachable while a photo
+        // covers the grid.
+        if (photoOpen(page)) return false;
         const label = ariaLabelFromSelector(selector);
         if (isUnopenable(page, label)) return false;
         const hit = findTileByLabel(page, label);
         return hit ? (typeof hit === 'string' ? true : hit.hidden !== true) : false;
       }
       if (/aria-label\*?="Search|placeholder\*?="Search/i.test(selector)) {
+        // THE LIVE TRAP (2026-09-01): the search box lives in the header and
+        // stays visible WHILE A PHOTO IS OPEN too -- default here (config
+        // omitted, as every pre-existing fixture does) is unconditionally
+        // visible regardless of photo state, exactly reproducing the bug
+        // that made the OLD closeAnyOpenPhoto return without ever pressing
+        // Escape. `searchBoxHiddenUntilEscape` remains available for a
+        // fixture that wants the OLDER (already-fixed-elsewhere) "hidden
+        // until Escape" shape instead.
         if (!page.config.searchBoxHiddenUntilEscape) return true;
         return page.escapePresses > 0;
       }
@@ -457,7 +509,15 @@ export function createFakePage(config = {}) {
         return Boolean(page.config.infoButtonVisible);
       }
       if (/aria-label="Move to trash"/i.test(selector)) {
-        return page.config.trashButtonVisible !== false;
+        // The trash control is a PHOTO-VIEW control, not a grid control --
+        // only present while a photo is actually open. This is the crux of
+        // the live bug closeAnyOpenPhoto's fix targets: the search box
+        // (above) stays visible the whole time and so can NEVER be used to
+        // detect "a photo is open"; TRASH_SELECTOR can. `trashButtonVisible`
+        // stays available as an AND-ed override for a fixture that wants to
+        // force it hidden even while a photo is open (e.g. a confirmation
+        // dialog covering the toolbar).
+        return photoOpen(page) && page.config.trashButtonVisible !== false;
       }
       return false;
     },

@@ -271,20 +271,50 @@ async function openPhotosHome(page) {
  * settles quickly and no less safe when it doesn't.
  */
 async function closeAnyOpenPhoto(page) {
-  const searchBox = page.locator(SEARCH_BOX_SELECTOR).first();
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (await searchBox.isVisible().catch(() => false)) return;
+  // "Back at the results grid" is NOT "the search box is visible". The search
+  // box lives in the header and stays visible WHILE a photo is open, so the
+  // previous version returned immediately without ever closing the photo --
+  // after which every tile lookup hit an empty grid and reported "tile gone
+  // from the grid", stranding most of a date's tiles as never-reached.
+  //
+  // The real signal is the photo view's own control disappearing. TRASH_SELECTOR
+  // ("Move to trash") is a PHOTO-VIEW-ONLY control -- verified live 2026-09-01
+  // (the photo view shows "Clear search query" alongside "Move to trash",
+  // "Open info", etc., so the search box tells us nothing, but the trash
+  // control does).
+  //
+  // AMENDED after writing this (2026-09-01, unit-test-driven, not re-verified
+  // live): the first version of this fix also required
+  // `RESULT_LINK_SELECTOR:visible` to be non-empty before considering us
+  // "back at the grid", reasoning that the trash control disappearing alone
+  // might be a transitional/animating moment before the grid genuinely
+  // re-renders. That is wrong for a date search that legitimately returns
+  // ZERO results (routine: the day-1/day+1 fallback dates in runDateGroups,
+  // or a job that never matches anything on any of its 3 date attempts) --
+  // there are zero result tiles on screen even though no photo is open and
+  // there is nothing to escape from, so requiring tiles>0 made every
+  // zero-result date's NEXT closeAnyOpenPhoto call spin through 5 Escapes and
+  // throw, which would have broken the ENTIRE needs_review path (a
+  // fixture-only regression the unit suite caught -- fakePage's
+  // `${RESULT_LINK_SELECTOR}:visible` count correctly returns 0 for a query
+  // whose searchResults are `[]`, exactly like the live "no results" case
+  // would). TRASH_SELECTOR's absence alone is the live-verified signal; drop
+  // the second condition rather than special-case "0 results" detection this
+  // function has no way to reason about anyway.
+  const photoOpen = async () => page.locator(TRASH_SELECTOR).first().isVisible().catch(() => false);
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (!(await photoOpen())) return;
     await page.keyboard.press('Escape');
-    const deadline = Date.now() + (FAST_DELAYS ? 20 : 2000);
+    const deadline = Date.now() + (FAST_DELAYS ? 20 : 3000);
     while (Date.now() < deadline) {
-      if (await searchBox.isVisible().catch(() => false)) return;
+      if (!(await photoOpen())) return;
       await pollDelay();
     }
   }
-  if (!(await searchBox.isVisible().catch(() => false))) {
-    throw new Error('search box still not reachable after 4 Escape presses — UI drift, stopping rather than forcing navigation');
-  }
+  throw new Error('could not confirm the photo view closed after 5 Escape presses — UI drift, stopping rather than forcing navigation');
 }
+
 
 /**
  * Search Google Photos by calendar date ("<Month> <D>, <YYYY>") using the

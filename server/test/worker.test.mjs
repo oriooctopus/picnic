@@ -701,6 +701,52 @@ test('lost-keystroke regression: the info panel opens even when the first "i" pr
   });
 });
 
+// REGRESSION (live, 2026-09-01): closeAnyOpenPhoto used to decide "back at
+// the grid" by checking ONLY whether the search box was visible. But Google
+// Photos' search box lives in the header and STAYS VISIBLE WHILE A PHOTO IS
+// OPEN (confirmed in live DOM dumps: the open photo view shows "Clear search
+// query" right alongside "Move to trash", "Open info", etc.) -- so the old
+// check returned true immediately, without ever pressing Escape, and every
+// subsequent tile lookup ran against a grid that was still covered by the
+// photo view. Live symptom: "tile gone from the grid: ... retry 1/3 after
+// scrolling", with only 3 of 8 tiles on a date ever reached.
+//
+// fakePage.mjs's default (searchBoxHiddenUntilEscape omitted, as here) is
+// exactly this trap: the search box reports visible unconditionally, whether
+// or not a photo is open (see photoOpen()'s comment in fakePage.mjs) -- so
+// this fixture needs no special config to reproduce it, just tiles that
+// don't confirm on the first open, forcing a genuine close-and-reopen cycle.
+test('closeAnyOpenPhoto regression: the search box staying visible while a photo is open must not be mistaken for "back at the grid" -- the walk must actually close tile 1 and go on to open tile 2', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB); // matches only tile 2's panel
+    const label1 = 'Photo - Portrait - Aug 5, 2026, 1:00:00 AM'; // opened first, no match -- must be genuinely closed before tile 2 can be reached
+    const label2 = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM'; // the match
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [{ ariaLabel: label1 }, { ariaLabel: label2 }] },
+      panelTextByLabel: {
+        'August 5, 2026': {
+          [label1]: panelBlock('IMG_0001.HEIC', 1000, 1000),
+          [label2]: IMG_1433_BLOCK,
+        },
+      },
+      // Explicit, though it's also the default: the search box is visible
+      // REGARDLESS of whether a photo is open -- the exact live trap.
+      searchBoxHiddenUntilEscape: false,
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'tile 2 must still be reached and matched after tile 1 is closed');
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.ok(page.log.includes(`tile-click:${label1}`), 'tile 1 must have been opened');
+    assert.ok(page.log.includes(`tile-click:${label2}`), 'tile 2 must have been opened -- proves the walk actually returned to the grid after tile 1, not just gave up');
+    assert.ok(
+      page.log.includes('key:Escape'),
+      'closeAnyOpenPhoto must have actually pressed Escape to close tile 1 -- under the old (search-box-only) condition it would return without ever escaping'
+    );
+  });
+});
+
 test('--slow: parseArgs recognizes the flag, and stealthDelayRange restores the long delays only when slow=true', () => {
   assert.equal(parseArgs([]).slow, false, 'off by default');
   assert.equal(parseArgs(['--dry-run', '--slow', '--cap', '10']).slow, true);
