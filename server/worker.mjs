@@ -32,6 +32,8 @@ import { decideMatch } from './lib/matcher.mjs';
 
 const QUEUE_PATH = process.env.PICNIC_QUEUE_PATH || join(homedir(), '.local/share/picnic/queue.jsonl');
 const DEFAULT_CAP = 50;
+const SEARCH_BOX_SELECTOR = 'input[aria-label*="Search" i], input[placeholder*="Search" i]';
+const TILE_SELECTOR = '[data-latest-bg], a[href^="./photo/"]';
 // Randomized 4-9s between jobs (was a fixed 4000ms) — a constant interval is
 // itself a bot signature per rules/social-media-browsing.md; jitter it.
 const PACE_MS_MIN = 4000;
@@ -134,8 +136,15 @@ export async function assertNoFriction(page) {
  * allowed top-level navigation.
  */
 async function openPhotosHome(page) {
-  await page.goto('https://photos.google.com', { waitUntil: 'networkidle' });
+  // NOT 'networkidle': Google Photos holds long-lived connections open, so
+  // the network never goes idle and the wait dies with "Target page,
+  // context or browser has been closed" instead of ever resolving (observed
+  // on the first live run, 2026-09-01). Wait for a real piece of the UI
+  // instead — that is what "loaded" actually means here.
+  await page.goto('https://photos.google.com', { waitUntil: 'domcontentloaded' });
   await assertNoFriction(page);
+  await page.locator(SEARCH_BOX_SELECTOR).first().waitFor({ state: 'visible', timeout: 30000 });
+  await randomDelay(1000, 3000); // dwell on the loaded page like a person
 }
 
 /**
@@ -146,19 +155,25 @@ async function openPhotosHome(page) {
  * well-known automation tell.
  */
 async function searchCandidates(page, filename) {
-  const searchBox = page.locator('input[aria-label*="Search" i], input[placeholder*="Search" i]').first();
+  const searchBox = page.locator(SEARCH_BOX_SELECTOR).first();
   await searchBox.click();
   await randomDelay(1000, 4000);
-  await searchBox.fill(''); // clear any prior query before typing the new one
+  // Clear any prior query with the keyboard rather than fill(): fill() pastes
+  // in a single DOM mutation, which rules/social-media-browsing.md calls out.
+  await page.keyboard.press('Control+A');
+  await page.keyboard.press('Delete');
   await page.keyboard.type(filename, { delay: 80 + Math.random() * 70 }); // 80-150ms/char
   await randomDelay(2000, 6000); // dwell before submitting, like a person re-reading the query
   await page.keyboard.press('Enter');
-  await page.waitForLoadState('networkidle');
+  // See openPhotosHome: networkidle never settles on this site. Wait for the
+  // results themselves, and treat "no tiles" as a real empty result rather
+  // than hanging.
+  await page.locator(TILE_SELECTOR).first().waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
   await assertNoFriction(page);
   await randomDelay(1500, 3500); // dwell on the results before acting on them
 
   // Photo tiles in Google Photos search results.
-  const tiles = await page.locator('[data-latest-bg], a[href^="./photo/"]').all();
+  const tiles = await page.locator(TILE_SELECTOR).all();
   return tiles;
 }
 
@@ -169,7 +184,6 @@ async function searchCandidates(page, filename) {
  */
 async function readCandidateInfo(page, tileLocator) {
   await tileLocator.click();
-  await page.waitForLoadState('networkidle');
   await assertNoFriction(page);
   await randomDelay(1000, 4000);
   // Open info panel (keyboard shortcut "i", matches Google Photos UI).
@@ -216,7 +230,7 @@ async function returnToResults(page) {
   if (await closeButton.count()) {
     await randomDelay(500, 2000);
     await closeButton.click();
-    await page.waitForLoadState('networkidle');
+    await page.locator(TILE_SELECTOR).first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
     await assertNoFriction(page);
     return;
   }
@@ -224,7 +238,7 @@ async function returnToResults(page) {
   // browser history nav rather than getting the whole job stuck — this is
   // exactly the goBack() the rules discourage, kept only as a last resort
   // until the real selector is confirmed against the live site.
-  await page.goBack({ waitUntil: 'networkidle' }).catch(() => {});
+  await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
   await assertNoFriction(page);
 }
 
