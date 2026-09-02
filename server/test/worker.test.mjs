@@ -21,6 +21,7 @@ const {
   isPageClosedError,
   MAX_STEPS_PER_DATE,
   MAX_TILE_OPEN_RETRIES,
+  EMPTY_SEARCH_RETRIES,
   parseArgs,
   stealthDelayRange,
 } = await import('../worker.mjs');
@@ -289,7 +290,19 @@ test('runDateGroups: unmatched after all three date attempts -> needs_review, ne
 
     await runDateGroups(page, groups, queue, { dryRun: false });
 
-    assert.deepEqual(page.searchLog, ['August 5, 2026', 'August 4, 2026', 'August 6, 2026']);
+    // Each empty date is re-searched before being believed (a live run got 0
+    // tiles for a date a probe had just returned 5 for), so every attempted
+    // date appears EMPTY_SEARCH_RETRIES + 1 times. What matters is that all
+    // three dates were attempted, in order, and none was skipped.
+    const distinctInOrder = page.searchLog.filter((q, i) => q !== page.searchLog[i - 1]);
+    assert.deepEqual(distinctInOrder, ['August 5, 2026', 'August 4, 2026', 'August 6, 2026']);
+    for (const date of distinctInOrder) {
+      assert.equal(
+        page.searchLog.filter((q) => q === date).length,
+        EMPTY_SEARCH_RETRIES + 1,
+        `an empty date must be retried before being written off: ${date}`
+      );
+    }
     assert.equal(queue.getById(job.id).status, 'needs_review');
     assert.ok(!page.log.some((l) => l.includes('Move to trash')));
   });

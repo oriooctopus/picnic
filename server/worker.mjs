@@ -120,6 +120,7 @@ const PACE_MS_MAX = 9000;
 // the next date attempt (or needs_review) once the cap is hit.
 let VERBOSE = false;
 const ARROW_RETRIES = 3;
+export const EMPTY_SEARCH_RETRIES = 2;
 export const MAX_STEPS_PER_DATE = 80;
 // Bound the "scroll for more tiles" loop separately from the tile-open bound
 // above -- a date with a huge grid must not scroll forever trying to find
@@ -876,11 +877,21 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
   let remaining = [...unmatchedJobs];
   if (remaining.length === 0) return { stillUnmatched: remaining };
 
-  const query = await searchByDate(page, dateStr);
+  // An empty result set is NOT reliable evidence that the date has no photos:
+  // "August 3, 2026" returned 0 tiles during a full run, while a probe of the
+  // exact same query minutes earlier returned 5. Treating that as "no results"
+  // wrote three jobs off to needs_review for a date that demonstrably has
+  // photos. Re-issue the search before believing an empty day.
+  let query = await searchByDate(page, dateStr);
   let tiles = await collectResultTiles(page);
+  for (let attempt = 1; attempt <= EMPTY_SEARCH_RETRIES && tiles.length === 0; attempt++) {
+    if (VERBOSE) console.log(`[search ${query}] 0 tiles — re-issuing the search (${attempt}/${EMPTY_SEARCH_RETRIES})`);
+    query = await searchByDate(page, dateStr);
+    tiles = await collectResultTiles(page);
+  }
   if (VERBOSE) console.log(`[search ${query}] ${tiles.length} visible photo tile(s)`);
   if (tiles.length === 0) {
-    console.log(`[search ${query}] no results`);
+    console.log(`[search ${query}] no results after ${EMPTY_SEARCH_RETRIES + 1} attempt(s)`);
     return { stillUnmatched: remaining };
   }
 
