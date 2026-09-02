@@ -275,12 +275,21 @@ export function createAutoDrain({
         retried,
       };
     } finally {
+      // The pendingFollowUp re-arm MUST live inside this finally, not after
+      // the try/finally: a throw from anywhere in the try (spawnWorker
+      // rejecting on a bad node binary/missing worker script, queue.loadAll()
+      // throwing on a corrupt JSONL line) used to skip straight to
+      // attemptRun()'s .catch(), which only logs -- leaving a job that
+      // arrived mid-run flagged pendingFollowUp with no timer left to ever
+      // drain it. armScheduling() (not attemptRun()) is deliberate here: it
+      // only arms the debounce/ceiling timers, it does not spawn immediately,
+      // so a spawn that fails instantly on every attempt still waits out a
+      // full debounce/ceiling window between attempts instead of hot-looping.
       running = false;
-    }
-
-    if (pendingFollowUp) {
-      pendingFollowUp = false;
-      armScheduling();
+      if (pendingFollowUp) {
+        pendingFollowUp = false;
+        armScheduling();
+      }
     }
   }
 
