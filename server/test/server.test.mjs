@@ -20,8 +20,26 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const { port } = server.address();
 const base = `http://127.0.0.1:${port}`;
 
+// A second app instance, wired to a fake autoDrain, purely to prove
+// queue-server.mjs actually CALLS notifyEnqueued() at the right spots
+// (POST /queue on success, POST /retry/:id on retry) and exposes its
+// getStatus() through GET /queue -- without ever starting a real timer
+// (createApp() with no autoDrain arg, used by `server` above, already
+// covers that createApp() itself is safe to import for tests).
+const fakeAutoDrainCalls = [];
+const fakeAutoDrain = {
+  notifyEnqueued: () => fakeAutoDrainCalls.push('notifyEnqueued'),
+  isRunning: () => false,
+  getStatus: () => ({ enabled: true, running: false, lastRun: { outcome: 'completed' } }),
+};
+const server2 = createApp({ autoDrain: fakeAutoDrain });
+await new Promise((resolve) => server2.listen(0, '127.0.0.1', resolve));
+const { port: port2 } = server2.address();
+const base2 = `http://127.0.0.1:${port2}`;
+
 test.after(() => {
   server.close();
+  server2.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -141,4 +159,69 @@ test('POST /retry/:id resets an errored job to queued', async () => {
 test('unknown route returns 404', async () => {
   const res = await get('/nope');
   assert.equal(res.status, 404);
+});
+
+async function post2(path, body) {
+  return fetch(`${base2}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify(body),
+  });
+}
+
+async function get2(path) {
+  return fetch(`${base2}${path}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+}
+
+test('POST /queue calls autoDrain.notifyEnqueued() on a successful enqueue', async () => {
+  const before = fakeAutoDrainCalls.length;
+  const res = await post2('/queue', {
+    filename: 'IMG_5000.HEIC',
+    creationDate: '2026-06-15T14:30:00.000Z',
+    pixelWidth: 4032,
+    pixelHeight: 3024,
+  });
+  assert.equal(res.status, 201);
+  assert.equal(fakeAutoDrainCalls.length, before + 1);
+});
+
+test('POST /queue with a validation failure does NOT call notifyEnqueued (no job stored, no run armed)', async () => {
+  const before = fakeAutoDrainCalls.length;
+  const res = await post2('/queue', { filename: 'IMG_5001.HEIC' }); // missing required fields
+  assert.equal(res.status, 400);
+  assert.equal(fakeAutoDrainCalls.length, before, 'a failed POST must not arm a run');
+});
+
+test('POST /retry/:id calls notifyEnqueued() and clears the autoDrainRetried marker', async () => {
+  const created = await post2('/queue', {
+    filename: 'IMG_5002.HEIC',
+    creationDate: '2026-06-15T14:30:00.000Z',
+    pixelWidth: 4032,
+    pixelHeight: 3024,
+  });
+  const { job } = await created.json();
+  const before = fakeAutoDrainCalls.length;
+  const res = await post2(`/retry/${job.id}`, {});
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.job.autoDrainRetried, false, 'a human retry must reset the one-shot marker');
+  assert.equal(fakeAutoDrainCalls.length, before + 1);
+});
+
+test('GET /queue includes the autoDrain status surface', async () => {
+  const res = await get2('/queue');
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.autoDrain.enabled, true);
+  assert.equal(body.autoDrain.running, false);
+  assert.equal(body.autoDrain.lastRun.outcome, 'completed');
+  assert.ok('oldestQueuedWaitMs' in body.autoDrain);
+});
+
+test('GET /queue on the default (no-op) autoDrain reports disabled/no run', async () => {
+  const res = await get('/queue');
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.autoDrain.enabled, false);
+  assert.equal(body.autoDrain.lastRun, null);
 });

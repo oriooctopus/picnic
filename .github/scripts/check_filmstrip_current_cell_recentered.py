@@ -188,16 +188,42 @@ def col_white_frac(px, x, y0, y1, margin=6):
 def find_current_cell(px, top, bottom, segs, label):
     """Returns (index, x0, x1) of the segment whose left AND right edge
     columns both read as the white strokeBorder, or None with a printed
-    diagnostic if that isn't exactly one segment."""
+    diagnostic if that isn't exactly one segment.
+
+    Also tracks segments with only ONE strong edge (>= threshold on left XOR
+    right, not both) — a real, previously-observed signature of this exact
+    bug (CI run 33587477661, with the identity-only onChange reinstated):
+    when the stale scroll offset leaves the current cell sitting right at
+    the trailing edge of whatever's still visible, that cell's OUTER border
+    renders while its INNER border falls past the ScrollView's clip
+    boundary, so only one edge column reads white. That's distinct from
+    "detector broken" (0 matches, nothing even partial) and worth calling
+    out by name rather than folding into a generic "found 0" message."""
     matches = []
+    partial = []
     for i, (x0, x1) in enumerate(segs):
         left = col_white_frac(px, x0 + 2, top, bottom)
         right = col_white_frac(px, x1 - 2, top, bottom)
         print(f"  [{label}] seg[{i}] x=[{x0},{x1}] left_white={left:.2f} right_white={right:.2f}")
-        if left >= MIN_EDGE_WHITE_FRAC and right >= MIN_EDGE_WHITE_FRAC:
+        left_hit = left >= MIN_EDGE_WHITE_FRAC
+        right_hit = right >= MIN_EDGE_WHITE_FRAC
+        if left_hit and right_hit:
             matches.append(i)
+        elif left_hit or right_hit:
+            partial.append((i, x0, x1, left, right))
     if len(matches) != 1:
         print(f"FAIL: expected exactly one current (white-bordered) cell in {label}, found {len(matches)} {matches}")
+        if partial:
+            edge_hint = ", ".join(
+                f"seg[{i}] x=[{x0},{x1}] (left={l:.2f}, right={r:.2f})" for i, x0, x1, l, r in partial
+            )
+            at_strip_edge = any(i == 0 or i == len(segs) - 1 for i, *_ in partial)
+            print(f"  {len(partial)} segment(s) matched only ONE edge, not both: {edge_hint}"
+                  + (" — sitting at the strip's own leading/trailing edge, consistent with the current "
+                     "cell being clipped by the ScrollView's own boundary rather than genuinely centered "
+                     "(the real symptom this test chases: a stale scroll offset leaving the current photo "
+                     "cut off at the edge of whatever's still visible instead of scrolled into view)"
+                     if at_strip_edge else ""))
         return None
     i = matches[0]
     x0, x1 = segs[i]
