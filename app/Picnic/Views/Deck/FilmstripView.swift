@@ -8,11 +8,23 @@ struct FilmstripView: View {
     let isKept: (PHAsset) -> Bool
     let onSelect: (Int) -> Void
 
-    /// nil when `currentIndex` is out of range (e.g. the deck just emptied).
-    /// See the `.onChange(of: currentAssetID)` below for why this is keyed
-    /// on identity rather than the raw index.
-    private var currentAssetID: String? {
-        assets.indices.contains(currentIndex) ? assets[currentIndex].localIdentifier : nil
+    /// What the strip's scroll position has to follow: WHICH photo is
+    /// current, and HOW MANY cells the strip is made of. Both halves matter
+    /// and neither implies the other — see the `.onChange(of: scrollAnchor)`
+    /// below.
+    ///
+    /// `assetID` is nil when `currentIndex` is out of range (e.g. the deck
+    /// just emptied).
+    private struct ScrollAnchor: Equatable {
+        let assetID: String?
+        let count: Int
+    }
+
+    private var scrollAnchor: ScrollAnchor {
+        ScrollAnchor(
+            assetID: assets.indices.contains(currentIndex) ? assets[currentIndex].localIdentifier : nil,
+            count: assets.count
+        )
     }
 
     var body: some View {
@@ -74,25 +86,48 @@ struct FilmstripView: View {
                     proxy.scrollTo(assets[currentIndex].localIdentifier, anchor: .center)
                 }
             }
-            // Keyed on the current asset's IDENTITY, not its numeric index.
-            // DEVICE-ONLY BUG (see DeckView.loadCurrentImage's doc comment
-            // for the sibling half of this same report): under hideSorted,
-            // the swiped asset is removed from `assets` and the NEXT asset
-            // slides into the same numeric slot, so `currentIndex` itself
-            // often never changes value across an entire sorting session —
-            // this `.onChange(of: currentIndex)` then never fires at all,
-            // and `proxy.scrollTo` never runs again after the very first
+            // Keyed on the current asset's IDENTITY, not its numeric index,
+            // AND on the strip's length. Each half fixes a distinct way the
+            // scroll offset used to be left stranded:
+            //
+            // IDENTITY (device-only bug; see DeckView.loadCurrentImage's doc
+            // comment for the sibling half of this same report): under
+            // hideSorted, the swiped asset is removed from `assets` and the
+            // NEXT asset slides into the same numeric slot, so `currentIndex`
+            // itself often never changes value across an entire sorting
+            // session — an `.onChange(of: currentIndex)` then never fires at
+            // all, and `proxy.scrollTo` never runs again after the very first
             // `.onAppear` scroll. Meanwhile every cell after the removed one
             // shifts one slot left (still keyed by asset id — see the
             // ForEach's own doc comment above) while the scroll offset stays
             // put, so the current-cell border visibly walks toward the
             // leading edge, one cell per swipe, for the rest of the session.
-            // `currentAssetID` changes on every swipe regardless of whether
-            // the numeric index moved, so this fires every time and keeps
-            // re-centering — the same recipe `.onAppear` below already uses.
-            .onChange(of: currentAssetID) { _, newValue in
-                guard let newValue else { return }
-                withAnimation { proxy.scrollTo(newValue, anchor: .center) }
+            //
+            // COUNT: the exact mirror image, and the owner's "unhiding sends
+            // the bar back to the beginning" report. Toggling hideSorted OFF
+            // deliberately keeps the deck on the same photo
+            // (DeckViewModel.reanchorCurrentIndex), so `assetID` alone does
+            // NOT change — while every previously-filtered sorted photo is
+            // re-inserted around it, most of them BEFORE it. The identity
+            // half stays silent, the stale content offset survives, and
+            // because the list grew ahead of the current cell that offset now
+            // points near the strip's start instead of at the current photo.
+            // `count` changes on any such re-composition, so this fires and
+            // re-centers.
+            //
+            // Animated only when the current photo actually changed (a
+            // navigation — a swipe or a filmstrip tap, including the
+            // hideSorted swipes where the count moves too). A pure
+            // re-composition under a stationary photo is a filter toggle:
+            // there the strip should just already be where it belongs, so it
+            // re-centers without animating rather than visibly sliding.
+            .onChange(of: scrollAnchor) { oldValue, newValue in
+                guard let assetID = newValue.assetID else { return }
+                if oldValue.assetID != newValue.assetID {
+                    withAnimation { proxy.scrollTo(assetID, anchor: .center) }
+                } else {
+                    proxy.scrollTo(assetID, anchor: .center)
+                }
             }
         }
     }

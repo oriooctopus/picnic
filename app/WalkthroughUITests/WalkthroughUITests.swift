@@ -1493,6 +1493,128 @@ final class WalkthroughUITests: XCTestCase {
         capture("31-filmstrip-after-scale-swipes", delay: 0.5)
     }
 
+    /// Regression test for the owner's real-device report: "when I unhide
+    /// sorted pics it currently has the bar at the beginning, but it should
+    /// actually keep the bar where it was." Root cause (see FilmstripView's
+    /// `scrollAnchor` / `.onChange(of: scrollAnchor)` doc comments): toggling
+    /// hideSorted OFF deliberately keeps the deck on the SAME photo
+    /// (DeckViewModel.reanchorCurrentIndex), so the OLD onChange — keyed on
+    /// the current asset's identity alone — never fired even though every
+    /// previously-hidden sorted photo was re-inserted around the current
+    /// one, most of them BEFORE it. The stale scroll offset survived that
+    /// re-composition, so the strip visibly snapped toward its leading edge
+    /// instead of staying on the current photo.
+    ///
+    /// Same "assert on real pixels, not the accessibility tree" rule as every
+    /// other filmstrip test here (see check_filmstrip_overlap.py's doc
+    /// comment for why) —
+    /// check_filmstrip_current_cell_recentered.py locates the current cell
+    /// by its white `strokeBorder` (FilmstripThumbnail's `.overlay`) and
+    /// measures its rendered x-position against the filmstrip viewport's
+    /// horizontal center in both screenshots below.
+    ///
+    /// hideSorted is turned ON before swiping (matching the owner's actual
+    /// workflow — turn it on, then keep sorting), which means every
+    /// predecessor of the current photo in the FILTERED list is, by
+    /// construction, exactly what was just swiped away — advance() never
+    /// fires while hideSorted is on (see markKept()/markForDelete()'s own
+    /// comments), so the current photo is always whatever slides into the
+    /// filtered list's leading slot. That makes the "before" shot
+    /// ("46-...") legitimately show the current cell pinned at the filtered
+    /// strip's leading edge no matter how correct the scroll-follow code
+    /// is — confirmed empirically against a real screenshot of this exact
+    /// shape (30-filmstrip-before-scale-swipes, CI run 31822841184: 5
+    /// sequential hideSorted-on swipes from a fresh month land the current
+    /// cell at the image's very first segment). Asserting "centered" there
+    /// would fail even on genuinely-fixed code, so the checker only gates on
+    /// the "after" shot ("47-...") — the real regression, and the only place
+    /// "did the strip actually re-center" is a meaningful question: once
+    /// hideSorted is off, both the swiped-away predecessors and the
+    /// never-touched successors are back in the strip, giving the current
+    /// photo real room on both sides.
+    func test40FilmstripRecentersOnCurrentPhotoAfterUnhideAtScale() throws {
+        relaunch(withExtraArguments: ["--seed-large-month", "--reset-hide-sorted", "--reset-sort-state"])
+        XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 30), "My life header should appear")
+        let largeMonth = app.descendants(matching: .any)["monthCard.2026-06"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(largeMonth, initialTimeout: 120),
+                      "The large seeded month (2026-06) should appear in the grid")
+        largeMonth.tap()
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 60), "Deck should open on the large month")
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+        XCTAssertEqual(totalCount(fromPosition: position.label), Self.largeMonthCount,
+                       "Opened deck should hold every seeded asset — got '\(position.label)'")
+
+        app.buttons["deck.filter"].tap()
+        let sortedPicsToggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should offer the 'Sorted pics' toggle")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        // A silently-missed toggle tap already wasted CI runs elsewhere in
+        // this file (see test31's doc comment) — retry once, then assert the
+        // toggle really reads "on" before trusting anything below.
+        if sortedPicsToggle.exists, sortedPicsToggle.value as? String != "on" {
+            sortedPicsToggle.tap()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        XCTAssertEqual(sortedPicsToggle.value as? String, "on",
+                       "Hide-sorted toggle did not turn on — every assertion below would measure the wrong mode")
+        tapOutside()
+
+        // 12 swipes: enough that once hideSorted is toggled back off, the
+        // current photo has real room on BOTH sides (12 swiped-away
+        // predecessors, ~276 untouched successors) — that's what makes
+        // "does the strip re-center" a meaningful question on the
+        // after-unhide shot below, rather than a trivially-clamped one.
+        let swipeCount = 12
+        for i in 0..<swipeCount {
+            let goingLeft = i % 2 == 0
+            let fromX: CGFloat = goingLeft ? 0.8 : 0.2
+            let toX: CGFloat = goingLeft ? 0.05 : 0.95
+            deckCard.coordinate(withNormalizedOffset: CGVector(dx: fromX, dy: 0.5))
+                .press(forDuration: 0.1,
+                       thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: toX, dy: 0.5)),
+                       withVelocity: .default,
+                       thenHoldForDuration: 0.1)
+            Thread.sleep(forTimeInterval: 0.6)
+        }
+
+        let hiddenTotal = totalCount(fromPosition: position.label)
+        XCTAssertEqual(hiddenTotal, Self.largeMonthCount - swipeCount,
+                       "hideSorted should have hidden exactly the \(swipeCount) just-swiped photos (got '\(position.label)')")
+
+        capture("46-filmstrip-hidden-before-unhide", delay: 0.5)
+
+        // Toggle back off — same reopen-with-retry pattern as test24's
+        // unhide step: re-tapping deck.filter in the same instant
+        // tapOutside's dismiss animation is still resolving showHidePopover
+        // back to false has been seen in CI to occasionally race the
+        // popover binding and never reopen it.
+        Thread.sleep(forTimeInterval: 0.5)
+        app.buttons["deck.filter"].tap()
+        if !sortedPicsToggle.waitForExistence(timeout: 3) {
+            app.buttons["deck.filter"].tap()
+        }
+        XCTAssertTrue(sortedPicsToggle.waitForExistence(timeout: 5), "Hide-sorted popover should reopen with the same toggle")
+        sortedPicsToggle.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        if sortedPicsToggle.exists, sortedPicsToggle.value as? String != "off" {
+            sortedPicsToggle.tap()
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        XCTAssertEqual(sortedPicsToggle.value as? String, "off",
+                       "Hide-sorted toggle did not turn off — the strip below would still be measuring the filtered (hidden) state")
+        tapOutside()
+
+        let restoredTotal = totalCount(fromPosition: position.label)
+        XCTAssertEqual(restoredTotal, Self.largeMonthCount,
+                       "Toggling hideSorted off should restore the full count (expected \(Self.largeMonthCount), got '\(position.label)')")
+
+        capture("47-filmstrip-recentered-after-unhide", delay: 0.5)
+    }
+
     /// Reads the deck's pending-delete badge, treating its absence as 0 — the
     /// badge view is only rendered `if viewModel.pendingDeleteIDs.count > 0`
     /// (DeckView.swift), so "not present" and "present showing 0" are the

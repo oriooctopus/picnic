@@ -38,7 +38,7 @@ PIXEL_THRESH = 24
 
 # Whole-band MIN_CHANGED_FRACTION alone is satisfiable even when the ACTUAL
 # regression this test chases (see FilmstripView's `.onChange(of:
-# currentAssetID)` doc comment) is present: every cell keeps its identity
+# scrollAnchor)` doc comment) is present: every cell keeps its identity
 # keying (asset localIdentifier, not array index — see FilmstripView's
 # ForEach comment), so removing a swiped asset always shifts later cells'
 # CONTENT left by one slot regardless of whether the scroll offset ever
@@ -183,7 +183,7 @@ def main():
                          f"barely changed ({center_frac:.1%}, need >= {CENTER_MIN_CHANGED_FRACTION:.0%}) — "
                          f"cells can shift content at the leading edge from array removal alone even when "
                          f"the strip never re-scrolls to follow the current photo (see FilmstripView's "
-                         f"`.onChange(of: currentAssetID)` doc comment); this is what actually catches that")
+                         f"`.onChange(of: scrollAnchor)` doc comment); this is what actually catches that")
 
     if failures:
         print("FAIL: strip is not genuinely visually updating, matching the owner's real-device report:")

@@ -362,6 +362,36 @@ jobs:
           python3 -m pip install --quiet --break-system-packages pillow
           python3 .github/scripts/check_compare_start_index.py "$FIRST" "$SECOND" "$COMPARE"
 
+      # Real assertion for test40FilmstripRecentersOnCurrentPhotoAfterUnhideAtScale
+      # (the owner's real-device report: "when I unhide sorted pics it
+      # currently has the bar at the beginning, but it should actually keep
+      # the bar where it was"). Locates the current photo's white-bordered
+      # cell by real pixels in both screenshots and asserts it sits near the
+      # filmstrip viewport's horizontal center in the AFTER shot — the
+      # before shot's current cell is legitimately pinned at the filtered
+      # strip's leading edge by construction (see the checker script's own
+      # doc comment for why that's not itself a failure) and is only
+      # measured for context.
+      - name: Check filmstrip re-centers on current photo after unhide (pixel measurement)
+        if: always()
+        run: |
+          BEFORE="screenshots/46-filmstrip-hidden-before-unhide.png"
+          AFTER="screenshots/47-filmstrip-recentered-after-unhide.png"
+          if [ ! -f "$BEFORE" ] || [ ! -f "$AFTER" ]; then
+            echo "Missing $BEFORE or $AFTER (likely an only_testing run that excluded test40FilmstripRecentersOnCurrentPhotoAfterUnhideAtScale) — skipping."
+            # A missing screenshot is only benign when the dispatch narrowed the
+            # test list. In a full-suite run it means the test was renamed, its
+            # capture name drifted, or the attachment export broke — and this
+            # pixel check would otherwise pass forever without ever running.
+            if [ -z "${{ github.event.inputs.only_testing }}" ]; then
+              echo "::error::full-suite run, but the screenshot this check needs was never produced"
+              exit 1
+            fi
+            exit 0
+          fi
+          python3 -m pip install --quiet --break-system-packages pillow
+          python3 .github/scripts/check_filmstrip_current_cell_recentered.py "$BEFORE" "$AFTER"
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
