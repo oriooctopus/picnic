@@ -8,17 +8,23 @@ struct FilmstripView: View {
     let isKept: (PHAsset) -> Bool
     let onSelect: (Int) -> Void
 
-    /// nil when `currentIndex` is out of range (e.g. the deck just emptied).
-    /// See the `.onChange(of: currentAssetID)` below for why this is keyed
-    /// on identity rather than the raw index.
+    /// What the strip's scroll position has to follow: WHICH photo is
+    /// current, and HOW MANY cells the strip is made of. Both halves matter
+    /// and neither implies the other — see the `.onChange(of: scrollAnchor)`
+    /// below.
     ///
-    /// DELIBERATELY REINSTATED BUG (identity-only, no count) for CI run #2
-    /// of the test40FilmstripRecentersOnCurrentPhotoAfterUnhideAtScale
-    /// regression proof — see the fixed version kept at
-    /// /tmp/FilmstripView.swift.fixed on the implementer's machine. Restore
-    /// the fixed version before this is done.
-    private var currentAssetID: String? {
-        assets.indices.contains(currentIndex) ? assets[currentIndex].localIdentifier : nil
+    /// `assetID` is nil when `currentIndex` is out of range (e.g. the deck
+    /// just emptied).
+    private struct ScrollAnchor: Equatable {
+        let assetID: String?
+        let count: Int
+    }
+
+    private var scrollAnchor: ScrollAnchor {
+        ScrollAnchor(
+            assetID: assets.indices.contains(currentIndex) ? assets[currentIndex].localIdentifier : nil,
+            count: assets.count
+        )
     }
 
     var body: some View {
@@ -115,9 +121,13 @@ struct FilmstripView: View {
             // re-composition under a stationary photo is a filter toggle:
             // there the strip should just already be where it belongs, so it
             // re-centers without animating rather than visibly sliding.
-            .onChange(of: currentAssetID) { _, newValue in
-                guard let newValue else { return }
-                withAnimation { proxy.scrollTo(newValue, anchor: .center) }
+            .onChange(of: scrollAnchor) { oldValue, newValue in
+                guard let assetID = newValue.assetID else { return }
+                if oldValue.assetID != newValue.assetID {
+                    withAnimation { proxy.scrollTo(assetID, anchor: .center) }
+                } else {
+                    proxy.scrollTo(assetID, anchor: .center)
+                }
             }
         }
     }
