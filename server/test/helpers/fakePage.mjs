@@ -24,6 +24,13 @@
  * open across tiles and across searches, and pressing "i" while open closes
  * it.
  *
+ * ArrowRight (2026-09-01 traversal rewrite) advances the open photo to the
+ * next tile in the date's FULL underlying order (fullOrderedTiles below),
+ * not just what's currently "mounted" -- see that function's comment for
+ * why. Trashing the current photo can also auto-advance by itself
+ * (performTrash), which is why worker.mjs's walkPhotoView checks for that
+ * before ever pressing ArrowRight after a trash.
+ *
  * The photo view's open/closed state is modelled by `page.openedAriaLabel`
  * (non-null == a photo is open): set when a tile is clicked (openTileInFake),
  * cleared by Escape and by a successful trash. Two selectors are gated on it
@@ -264,9 +271,65 @@ class FakeTileLink {
   }
 }
 
+/**
+ * The FULL underlying order of a date's tiles for the active query -- base
+ * searchResults followed by every scrollReveals batch, regardless of
+ * revealedCount/windowStart (unlike tilesInGrid/windowedTiles above, which
+ * only see what's currently "mounted"). Models the live fact worker.mjs's
+ * traversal rewrite (2026-09-01) depends on: ArrowRight ("View next photo")
+ * pages through Google's own underlying search-result order, not through
+ * whatever the grid happens to have mounted -- the early working version of
+ * this worker walked 27 photos on one date via ArrowRight alone, with no
+ * scrolling at all. Trashed labels are excluded (a deleted photo is gone
+ * from the results, never revisited).
+ */
+function fullOrderedTiles(page) {
+  const query = page.activeQuery;
+  const base = page.config.searchResults[query] ?? [];
+  const reveals = (page.config.scrollReveals[query] ?? []).flat();
+  return [...base, ...reveals]
+    .map((t) => (typeof t === 'string' ? t : t.ariaLabel))
+    .filter((label) => !page.trashedLabels.has(label));
+}
+
+/**
+ * Trashing the CURRENT photo removes it from the results and -- modelled
+ * here to match the live behaviour worker.mjs's traversal rewrite handles
+ * explicitly (see walkPhotoView's `advancedByDelete`) -- the view can
+ * auto-advance to the next photo in the day BY ITSELF, without any
+ * ArrowRight press. The next-tile lookup must run BEFORE marking the current
+ * label trashed: fullOrderedTiles() filters trashed labels out, so computing
+ * "what comes after me" AFTER the filter would never find the current label
+ * at all (indexOf returns -1). If there's no next tile (this was the day's
+ * last one), the view closes instead -- openedAriaLabel goes null, same as
+ * an ordinary close, which moveToTrash's settled() check already handles
+ * (`!now && panelTextBefore` reads as "settled").
+ */
 function performTrash(page) {
-  if (page.openedAriaLabel != null) page.trashedLabels.add(page.openedAriaLabel);
-  page.openedAriaLabel = null;
+  const label = page.openedAriaLabel;
+  if (label == null) return;
+  const ordered = fullOrderedTiles(page);
+  const idx = ordered.indexOf(label);
+  page.trashedLabels.add(label);
+  page.openedAriaLabel = idx !== -1 && idx + 1 < ordered.length ? ordered[idx + 1] : null;
+}
+
+/**
+ * Advance the open photo to the next one in the date's full underlying order
+ * (see fullOrderedTiles above) -- models worker.mjs's ArrowRight navigation.
+ * No next tile (already at the last one, or nothing open) leaves
+ * openedAriaLabel unchanged, which is exactly the live signal
+ * waitForPanelChange relies on: the panel keeps reading the same content, so
+ * polling for a CHANGE times out and the walk correctly concludes "end of
+ * the day's results" rather than hanging or guessing.
+ */
+function advanceToNextTile(page) {
+  const label = page.openedAriaLabel;
+  if (label == null) return;
+  const ordered = fullOrderedTiles(page);
+  const idx = ordered.indexOf(label);
+  if (idx === -1 || idx + 1 >= ordered.length) return; // unknown position, or already the last tile -- no next photo
+  page.openedAriaLabel = ordered[idx + 1];
 }
 
 /**
@@ -342,6 +405,7 @@ export function createFakePage(config = {}) {
           }
         }
         if (key === '#' && !page.config.swallowTrashShortcut) performTrash(page);
+        if (key === 'ArrowRight') advanceToNextTile(page);
         if (key === 'Enter') {
           page.activeQuery = page.pendingTypedText ?? null;
           page.openedAriaLabel = null;

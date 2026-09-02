@@ -114,18 +114,31 @@ test('N jobs on the same date produce exactly ONE search, not N', async () => {
   });
 });
 
+// REWRITTEN 2026-09-01 for the in-photo-view traversal (see worker.mjs's
+// module header + walkPhotoView): the exhaustive fallback no longer returns
+// to the grid between photos, so it never issues a distinct 'tile-click' per
+// photo the way the old grid-return walk did -- only the FIRST photo of a
+// date is ever grid-clicked; every photo after that is reached by pressing
+// ArrowRight while staying inside the photo view. This test's fingerprint
+// updates to match: exactly ONE tile-click, and the rest walked by
+// ArrowRight. It still fails exactly the way the brief requires against a
+// tiles[0]-only implementation -- one that opens the first tile and never
+// arrows would read tile 0's (non-matching) panel forever and leave the job
+// unmatched -- proven by mutation, see report.
 test('every visible tile is walked: a job whose photo is at the LAST tile is still matched', async () => {
   await withTempQueue(async (queue) => {
-    // The regression this guards against: the old walk opened only tiles[0]
-    // and relied on an accelerator that didn't reliably reach the rest of
-    // the day. 6 tiles here; only the 6th (last) one matches.
+    // Deliberately more tiles than any single "window" a virtualized grid
+    // might mount -- there is no grid-mounting concern left for this walk at
+    // all (see module header), but a generous count still proves the walk
+    // reaches deep into the day rather than stopping early for any reason.
+    const TILE_COUNT = 20;
     const { job } = queue.enqueue(IMG_1433_JOB);
-    const labels = Array.from({ length: 6 }, (_, i) => `Photo - Portrait - Aug 5, 2026, ${i}:00:00 AM`);
+    const labels = Array.from({ length: TILE_COUNT }, (_, i) => `Photo - Portrait - tile-${i}`);
     const panelTextByLabel = { 'August 5, 2026': {} };
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < TILE_COUNT - 1; i++) {
       panelTextByLabel['August 5, 2026'][labels[i]] = panelBlock(`IMG_900${i}.HEIC`, 1000, 1000);
     }
-    panelTextByLabel['August 5, 2026'][labels[5]] = IMG_1433_BLOCK; // the match, last tile
+    panelTextByLabel['August 5, 2026'][labels[TILE_COUNT - 1]] = IMG_1433_BLOCK; // the match, LAST tile
 
     const page = createFakePage({
       searchResults: { 'August 5, 2026': labels.map((ariaLabel) => ({ ariaLabel })) },
@@ -136,13 +149,18 @@ test('every visible tile is walked: a job whose photo is at the LAST tile is sti
 
     assert.equal(stillUnmatched.length, 0, 'job at the last tile must still be matched');
     assert.equal(queue.getById(job.id).status, 'trashed');
-    for (const label of labels) {
-      assert.ok(page.log.includes(`tile-click:${label}`), `expected tile "${label}" to have been opened`);
-    }
+    const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
+    assert.equal(tileClicks.length, 1, `expected exactly ONE grid tile-click (the first tile), got: ${JSON.stringify(tileClicks)}`);
+    assert.equal(tileClicks[0], `tile-click:${labels[0]}`, 'the ONE grid click must be the date\'s first tile');
+    const arrowPresses = page.log.filter((l) => l === 'key:ArrowRight').length;
+    assert.equal(arrowPresses, TILE_COUNT - 1, `expected ${TILE_COUNT - 1} ArrowRight presses to walk from tile 0 to the last tile, got ${arrowPresses}`);
   });
 });
 
-test('the walk stops as soon as every job is matched, without opening remaining tiles', async () => {
+// REWRITTEN 2026-09-01: same fingerprint update as above -- "stop once
+// matched" now means "stop pressing ArrowRight once matched", not "stop
+// grid-clicking tiles".
+test('the walk stops as soon as every job is matched, without walking past it', async () => {
   await withTempQueue(async (queue) => {
     const { job } = queue.enqueue(IMG_1433_JOB);
     const labels = [
@@ -166,10 +184,10 @@ test('the walk stops as soon as every job is matched, without opening remaining 
     const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
 
     assert.equal(stillUnmatched.length, 0);
-    assert.ok(page.log.includes(`tile-click:${labels[0]}`));
-    assert.ok(page.log.includes(`tile-click:${labels[1]}`));
-    assert.ok(!page.log.includes(`tile-click:${labels[2]}`), 'must stop once the job is matched');
-    assert.ok(!page.log.includes(`tile-click:${labels[3]}`), 'must stop once the job is matched');
+    const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
+    assert.deepEqual(tileClicks, [`tile-click:${labels[0]}`], 'only the first tile is ever grid-clicked');
+    const arrowPresses = page.log.filter((l) => l === 'key:ArrowRight').length;
+    assert.equal(arrowPresses, 1, 'must ArrowRight exactly once (A -> B, the match) and stop -- never walk on to C or D');
   });
 });
 
@@ -202,34 +220,6 @@ test('tiles are not re-visited when the grid re-renders and returns them in a di
     assert.deepEqual(page.searchLog, ['August 5, 2026'], 'still exactly one search');
     const noneClicks = page.log.filter((l) => l === `tile-click:${labels.none}`);
     assert.equal(noneClicks.length, 1, 'the no-match tile must be opened exactly once, never re-opened after reordering');
-  });
-});
-
-test('scrolling reveals more tiles, and the newly-revealed tiles are visited', async () => {
-  await withTempQueue(async (queue) => {
-    const { job } = queue.enqueue(IMG_1433_JOB);
-    const page = createFakePage({
-      searchResults: {
-        'August 5, 2026': [{ ariaLabel: 'Photo - Portrait - tile-1' }, { ariaLabel: 'Photo - Portrait - tile-2' }],
-      },
-      scrollReveals: {
-        'August 5, 2026': [[{ ariaLabel: 'Photo - Portrait - tile-3 (match, revealed by scroll)' }]],
-      },
-      panelTextByLabel: {
-        'August 5, 2026': {
-          'Photo - Portrait - tile-1': panelBlock('IMG_0001.HEIC', 1000, 1000),
-          'Photo - Portrait - tile-2': panelBlock('IMG_0002.HEIC', 1000, 1000),
-          'Photo - Portrait - tile-3 (match, revealed by scroll)': IMG_1433_BLOCK,
-        },
-      },
-    });
-
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
-
-    assert.equal(stillUnmatched.length, 0, 'the scroll-revealed tile must be visited and matched');
-    assert.equal(queue.getById(job.id).status, 'trashed');
-    assert.ok(page.log.includes('wheel'), 'must have scrolled to look for more tiles');
-    assert.ok(page.log.includes('tile-click:Photo - Portrait - tile-3 (match, revealed by scroll)'));
   });
 });
 
@@ -376,10 +366,15 @@ test('a trash action that does not take is recorded as needs_review, never trash
   });
 });
 
+// REWRITTEN 2026-09-01 for the in-photo-view traversal: "how many tiles were
+// opened" is no longer the right fingerprint (only the first tile is ever
+// grid-clicked -- see the two tests above), so this now checks how many
+// photos the ArrowRight loop actually stepped through instead.
 test('hitting MAX_STEPS_PER_DATE is logged as ABANDONED, distinct from a genuinely EXHAUSTED date', async () => {
   await withTempQueue(async (queue) => {
-    // Case 1: a huge day (more tiles than the cap), nothing ever matches ->
-    // the walk must stop at the cap and say so distinctly.
+    // Case 1: a huge day (more photos than the cap), nothing ever matches ->
+    // the walk must stop at the cap and say so distinctly, never reaching
+    // the (nonexistent) end of the day's results.
     const { job: bigJob } = queue.enqueue({ ...IMG_1433_JOB, filename: 'IMG_NOMATCH.HEIC' });
     const bigLabels = Array.from({ length: MAX_STEPS_PER_DATE + 10 }, (_, i) => `Photo - Portrait - tile-${i}`);
     const bigPanels = {};
@@ -391,14 +386,21 @@ test('hitting MAX_STEPS_PER_DATE is logged as ABANDONED, distinct from a genuine
 
     const boundLogs = await captureLogs(() => processDateGroup(bigPage, '2026-08-05', [bigJob], queue, { dryRun: true }));
     const boundClicks = bigPage.log.filter((l) => l.startsWith('tile-click:'));
-    assert.equal(boundClicks.length, MAX_STEPS_PER_DATE, `expected exactly ${MAX_STEPS_PER_DATE} tiles opened before the bound stopped the walk`);
+    assert.equal(boundClicks.length, 1, 'only the first tile is ever grid-clicked, even on a huge day');
+    const arrowPresses = bigPage.log.filter((l) => l === 'key:ArrowRight').length;
+    // Each of the MAX_STEPS_PER_DATE panel-reads that fit under the bound is
+    // followed by one ArrowRight press (to reach the NEXT one) before the
+    // bound check on the following iteration stops the walk -- so the count
+    // is exactly the bound itself, not one less.
+    assert.equal(arrowPresses, MAX_STEPS_PER_DATE, `expected exactly ${MAX_STEPS_PER_DATE} ArrowRight presses before the bound stopped the walk, got ${arrowPresses}`);
     assert.ok(
       boundLogs.some((l) => l.includes('ABANDONED') && l.includes('MAX_STEPS_PER_DATE')),
       `expected an ABANDONED/MAX_STEPS_PER_DATE log line, got: ${JSON.stringify(boundLogs)}`
     );
 
-    // Case 2: a small day (fewer tiles than the cap), nothing matches -> the
-    // walk exhausts every tile and must say EXHAUSTED, never ABANDONED.
+    // Case 2: a small day (fewer photos than the cap), nothing matches -> the
+    // walk reaches the genuine end of the day (panel stops changing) and
+    // must say EXHAUSTED, never ABANDONED.
     const { job: smallJob } = queue.enqueue({ ...IMG_1433_JOB, filename: 'IMG_ALSO_NOMATCH.HEIC' });
     const smallLabels = ['Photo - Portrait - tile-a', 'Photo - Portrait - tile-b', 'Photo - Portrait - tile-c'];
     const smallPanels = {};
@@ -412,7 +414,9 @@ test('hitting MAX_STEPS_PER_DATE is logged as ABANDONED, distinct from a genuine
       processDateGroup(smallPage, '2026-08-06', [smallJob], queue, { dryRun: true })
     );
     const exhaustedClicks = smallPage.log.filter((l) => l.startsWith('tile-click:'));
-    assert.equal(exhaustedClicks.length, smallLabels.length, 'every tile on the small day must have been opened');
+    assert.equal(exhaustedClicks.length, 1, 'only the first tile is ever grid-clicked');
+    const smallArrowPresses = smallPage.log.filter((l) => l === 'key:ArrowRight').length;
+    assert.equal(smallArrowPresses, smallLabels.length, `expected ${smallLabels.length} ArrowRight presses (the last one finding no next photo), got ${smallArrowPresses}`);
     assert.ok(
       exhaustedLogs.some((l) => l.includes('EXHAUSTED') && !l.includes('ABANDONED')),
       `expected an EXHAUSTED log line, got: ${JSON.stringify(exhaustedLogs)}`
@@ -545,6 +549,14 @@ test('aria fast path: with many tiles on the date but few jobs, only the matched
   });
 });
 
+// REWRITTEN 2026-09-01: the exhaustive fallback no longer opens tiles
+// individually from the grid (see module header / walkPhotoView) -- it
+// grid-clicks only the date's first tile, then reaches everything else with
+// ArrowRight, so "opened the colliding tile" is no longer a 'tile-click' log
+// entry. The safety property under test (never guess between two tiles at
+// the same predicted second) is unchanged; only the fingerprint that proves
+// the fallback engaged is updated: exactly ONE grid click, everything else
+// via traversal.
 test('aria fast path: two tiles sharing the same predicted second fall back to the exhaustive walk, never a guess', async () => {
   await withTempQueue(async (queue) => {
     const { job: job1 } = queue.enqueue(IMG_1433_JOB); // Aug 5, 12:54:07Z -> local 6:54:07 PM at +6h
@@ -553,12 +565,7 @@ test('aria fast path: two tiles sharing the same predicted second fall back to t
     const label2 = 'Photo - Portrait - Aug 5, 2026, 7:31:07 PM';
     // A second tile at job2's exact predicted second+mediaType -- a genuine
     // burst-shot collision. planAriaMatches must refuse the WHOLE date
-    // rather than guess between label2 and this one. Placed BEFORE label2
-    // in tile order so the exhaustive walk's in-order scan necessarily opens
-    // it before reaching job2's real match -- if the code had instead
-    // trusted a 2-tile aria plan (label1, label2), this tile would never be
-    // opened at all, so its presence in the open log is the fallback's
-    // fingerprint.
+    // rather than guess between label2 and this one.
     const collidingLabel = 'Photo - Landscape - Aug 5, 2026, 7:31:07 PM';
     const labels = [label1, collidingLabel, label2];
     const page = createFakePage({
@@ -577,13 +584,17 @@ test('aria fast path: two tiles sharing the same predicted second fall back to t
     assert.equal(stillUnmatched.length, 0, 'the exhaustive walk must still resolve both jobs by filename');
     assert.equal(queue.getById(job1.id).status, 'trashed');
     assert.equal(queue.getById(job2.id).status, 'trashed');
-    // The fallback signature: the walk opened the COLLIDING tile too (it sits
-    // between label1 and label2 in the grid), proving it walked every tile in
-    // order rather than trusting a 2-tile aria plan that would have skipped it.
+    // The fallback's fingerprint: exactly one grid tile-click (the date's
+    // first tile, label1) -- if the code had instead trusted a false 2-tile
+    // aria plan (label1, label2), it would open label2 as a SECOND grid
+    // click and never step through collidingLabel at all.
     const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
-    for (const label of labels) {
-      assert.ok(tileClicks.includes(`tile-click:${label}`), `expected exhaustive walk to open "${label}"`);
-    }
+    assert.deepEqual(tileClicks, [`tile-click:${label1}`], 'the exhaustive walk grid-clicks only the date\'s first tile');
+    // The walk still has to STEP PAST collidingLabel to reach job2 -- proven
+    // by requiring 2 ArrowRight presses (label1->colliding, colliding->label2)
+    // rather than a single jump straight to label2.
+    const arrowPresses = page.log.filter((l) => l === 'key:ArrowRight').length;
+    assert.equal(arrowPresses, 1, 'label1\'s trash auto-advances onto collidingLabel; exactly one more ArrowRight reaches label2');
   });
 });
 
@@ -701,51 +712,16 @@ test('lost-keystroke regression: the info panel opens even when the first "i" pr
   });
 });
 
-// REGRESSION (live, 2026-09-01): closeAnyOpenPhoto used to decide "back at
-// the grid" by checking ONLY whether the search box was visible. But Google
-// Photos' search box lives in the header and STAYS VISIBLE WHILE A PHOTO IS
-// OPEN (confirmed in live DOM dumps: the open photo view shows "Clear search
-// query" right alongside "Move to trash", "Open info", etc.) -- so the old
-// check returned true immediately, without ever pressing Escape, and every
-// subsequent tile lookup ran against a grid that was still covered by the
-// photo view. Live symptom: "tile gone from the grid: ... retry 1/3 after
-// scrolling", with only 3 of 8 tiles on a date ever reached.
-//
-// fakePage.mjs's default (searchBoxHiddenUntilEscape omitted, as here) is
-// exactly this trap: the search box reports visible unconditionally, whether
-// or not a photo is open (see photoOpen()'s comment in fakePage.mjs) -- so
-// this fixture needs no special config to reproduce it, just tiles that
-// don't confirm on the first open, forcing a genuine close-and-reopen cycle.
-test('closeAnyOpenPhoto regression: the search box staying visible while a photo is open must not be mistaken for "back at the grid" -- the walk must actually close tile 1 and go on to open tile 2', async () => {
-  await withTempQueue(async (queue) => {
-    const { job } = queue.enqueue(IMG_1433_JOB); // matches only tile 2's panel
-    const label1 = 'Photo - Portrait - Aug 5, 2026, 1:00:00 AM'; // opened first, no match -- must be genuinely closed before tile 2 can be reached
-    const label2 = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM'; // the match
-    const page = createFakePage({
-      searchResults: { 'August 5, 2026': [{ ariaLabel: label1 }, { ariaLabel: label2 }] },
-      panelTextByLabel: {
-        'August 5, 2026': {
-          [label1]: panelBlock('IMG_0001.HEIC', 1000, 1000),
-          [label2]: IMG_1433_BLOCK,
-        },
-      },
-      // Explicit, though it's also the default: the search box is visible
-      // REGARDLESS of whether a photo is open -- the exact live trap.
-      searchBoxHiddenUntilEscape: false,
-    });
-
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
-
-    assert.equal(stillUnmatched.length, 0, 'tile 2 must still be reached and matched after tile 1 is closed');
-    assert.equal(queue.getById(job.id).status, 'trashed');
-    assert.ok(page.log.includes(`tile-click:${label1}`), 'tile 1 must have been opened');
-    assert.ok(page.log.includes(`tile-click:${label2}`), 'tile 2 must have been opened -- proves the walk actually returned to the grid after tile 1, not just gave up');
-    assert.ok(
-      page.log.includes('key:Escape'),
-      'closeAnyOpenPhoto must have actually pressed Escape to close tile 1 -- under the old (search-box-only) condition it would return without ever escaping'
-    );
-  });
-});
+// DELETED 2026-09-01 (was: 'closeAnyOpenPhoto regression: the search box
+// staying visible while a photo is open must not be mistaken for "back at
+// the grid"...'). It exercised the OLD exhaustive walk's specific
+// tile-1-opened/closed-via-closeAnyOpenPhoto/tile-2-opened cycle, which no
+// longer exists: the new in-photo-view traversal never calls
+// closeAnyOpenPhoto mid-date at all (only between DATES, in searchByDate).
+// closeAnyOpenPhoto's own Escape-detection logic (the live bug it fixes)
+// remains covered end-to-end by 'aria fast path: with many tiles on the
+// date but few jobs...' above, which opens two DISTINCT tiles via the aria
+// loop and must closeAnyOpenPhoto genuinely between them.
 
 test('--slow: parseArgs recognizes the flag, and stealthDelayRange restores the long delays only when slow=true', () => {
   assert.equal(parseArgs([]).slow, false, 'off by default');
@@ -756,193 +732,8 @@ test('--slow: parseArgs recognizes the flag, and stealthDelayRange restores the 
 });
 
 
-// REGRESSION (live, 2026-09-01): the aria fast path's "scroll the date to
-// completion first" phase and the exhaustive walk shared one scrollAttempts
-// budget. The pre-scroll spent all MAX_SCROLL_ATTEMPTS_PER_DATE attempts, so
-// the walk's first "no unvisited tile rendered" check broke out immediately
-// and the date was reported EXHAUSTED with 25 of 27 tiles never opened --
-// photos silently left undeleted. The two phases need independent budgets.
-test('the exhaustive walk can still scroll after the aria pre-scroll spent its own budget', async () => {
-  await withTempQueue(async (queue) => {
-    const { job } = queue.enqueue(IMG_1433_JOB);
-
-    // Enough batches that the pre-scroll consumes its whole budget, with the
-    // matching tile only reachable by a FURTHER scroll during the walk.
-    const batches = [];
-    const panelText = { 'Photo - Portrait - base': panelBlock('IMG_0000.HEIC', 1000, 1000) };
-    for (let i = 1; i <= 6; i++) {
-      const label = `Photo - Portrait - batch-${i}`;
-      batches.push([{ ariaLabel: label }]);
-      panelText[label] = panelBlock(`IMG_000${i}.HEIC`, 1000, 1000);
-    }
-    const matchLabel = 'Photo - Portrait - batch-7 (match, past the pre-scroll budget)';
-    batches.push([{ ariaLabel: matchLabel }]);
-    panelText[matchLabel] = IMG_1433_BLOCK;
-
-    const page = createFakePage({
-      searchResults: { 'August 5, 2026': [{ ariaLabel: 'Photo - Portrait - base' }] },
-      scrollReveals: { 'August 5, 2026': batches },
-      panelTextByLabel: { 'August 5, 2026': panelText },
-    });
-
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
-
-    assert.equal(
-      stillUnmatched.length,
-      0,
-      'the walk must keep scrolling past the pre-scroll budget and reach the matching tile'
-    );
-    assert.equal(queue.getById(job.id).status, 'trashed');
-    assert.ok(page.log.includes(`tile-click:${matchLabel}`), 'the late-revealed matching tile must actually be opened');
-  });
-});
-
-// REGRESSION (diagnosed 2026-09-01, from live evidence): the exhaustive walk
-// judged "did this scroll find anything new?" by comparing on-screen tile
-// COUNTS before/after. That's wrong for a VIRTUALIZED grid -- Google's result
-// grid only ever renders the tiles currently in the viewport, so scrolling
-// mounts new tiles AND unmounts old ones, and the on-screen count can stay
-// flat (or even shrink) while the actual content moved on entirely. A live
-// run walked only 3 of 27 tiles before wrongly reporting EXHAUSTED.
-//
-// `windowSize` (see fakePage.mjs's windowedTiles()) models exactly that: only
-// the most-recently-revealed N tiles are ever "mounted" at once, unlike the
-// existing (additive-only) scrollReveals fixtures every other test above
-// uses, which can't express this bug at all -- their tile count only ever
-// grows.
-test('virtualized grid: the visible window moves as you scroll (tiles leave as others enter) -- a job in a late window must still be matched', async () => {
-  await withTempQueue(async (queue) => {
-    const { job } = queue.enqueue(IMG_1433_JOB);
-    // 8 tiles, revealed one scroll at a time, with only 3 ever mounted at
-    // once -- the on-screen tile count never exceeds 3 no matter how deep
-    // the walk goes, exactly the shape that broke the old count comparison.
-    const laterLabels = Array.from({ length: 8 }, (_, i) => `Photo - Portrait - window-${i + 1}`);
-    const panelText = {};
-    for (let i = 0; i < laterLabels.length - 1; i++) {
-      panelText[laterLabels[i]] = panelBlock(`IMG_920${i}.HEIC`, 1000, 1000);
-    }
-    const matchLabel = laterLabels[laterLabels.length - 1]; // deep: only mounted after 7 scrolls
-    panelText[matchLabel] = IMG_1433_BLOCK;
-
-    const page = createFakePage({
-      searchResults: { 'August 5, 2026': [{ ariaLabel: 'Photo - Portrait - window-base' }] },
-      scrollReveals: { 'August 5, 2026': laterLabels.map((ariaLabel) => [{ ariaLabel }]) },
-      panelTextByLabel: { 'August 5, 2026': panelText },
-      windowSize: 3,
-    });
-
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
-
-    assert.equal(stillUnmatched.length, 0, 'the deep, late-window match must still be found');
-    assert.equal(queue.getById(job.id).status, 'trashed');
-    for (const label of laterLabels) {
-      assert.ok(page.log.includes(`tile-click:${label}`), `expected tile "${label}" to have been opened despite the moving window`);
-    }
-  });
-});
-
-// Minimal, sharpest form of the same bug: with only ONE tile ever mounted,
-// the on-screen tile COUNT is 1 before AND after every scroll for the whole
-// walk -- so a comparison of counts can never see progress, even though the
-// tile actually mounted is a completely different one each time. Only a
-// comparison of the underlying LABEL SET (this fix's `seen`/mergeSeen) can
-// tell "swapped for something new" apart from "genuinely found nothing".
-test('a scroll that swaps the one visible tile for a different one (same on-screen count) must not be treated as "nothing new"', async () => {
-  await withTempQueue(async (queue) => {
-    const { job } = queue.enqueue(IMG_1433_JOB);
-    // 3 scroll-revealed batches, not 1: the aria fast path's own pre-scroll
-    // loop (unchanged, out of scope for this fix) always spends its first
-    // scroll before the exhaustive walk below even starts -- with only ONE
-    // reveal batch, that pre-scroll alone would already land on the match
-    // and the exhaustive walk would never need to scroll at all, proving
-    // nothing about ITS count-vs-label-set logic. Three batches guarantees
-    // the walk still has real scrolling of its own left to do afterward.
-    const page = createFakePage({
-      searchResults: { 'August 5, 2026': [{ ariaLabel: 'Photo - Portrait - swap-a' }] },
-      scrollReveals: {
-        'August 5, 2026': [
-          [{ ariaLabel: 'Photo - Portrait - swap-b' }],
-          [{ ariaLabel: 'Photo - Portrait - swap-c' }],
-          [{ ariaLabel: 'Photo - Portrait - swap-d (match)' }],
-        ],
-      },
-      panelTextByLabel: {
-        'August 5, 2026': {
-          'Photo - Portrait - swap-a': panelBlock('IMG_9500.HEIC', 1000, 1000),
-          'Photo - Portrait - swap-b': panelBlock('IMG_9501.HEIC', 1000, 1000),
-          'Photo - Portrait - swap-c': panelBlock('IMG_9502.HEIC', 1000, 1000),
-          'Photo - Portrait - swap-d (match)': IMG_1433_BLOCK,
-        },
-      },
-      windowSize: 1, // exactly one tile mounted, ever -- the on-screen count is 1 before, during, and after every scroll
-    });
-
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
-
-    assert.equal(
-      stillUnmatched.length,
-      0,
-      'the swapped-in tile several scrolls deep must be visited even though the on-screen tile count never changed'
-    );
-    assert.equal(queue.getById(job.id).status, 'trashed');
-    assert.ok(page.log.includes('tile-click:Photo - Portrait - swap-d (match)'));
-  });
-});
-
-// A tile the walk KNOWS about (collectResultTiles() saw it on-screen) but
-// which the grid genuinely never lets open -- distinct from one merely
-// scrolled out of the window (that case is the two tests above). The old
-// code marked a tile "visited" the instant it was CHOSEN to be opened, before
-// the open even attempted, so a tile that failed to open was silently
-// counted as walked and never retried. This must retry a bounded number of
-// times, then give up on that ONE tile (logged distinctly as UNREACHABLE)
-// without derailing the rest of the date, and without letting the date's
-// final summary claim the unreachable tile was "walked".
-test('unreachable tile: known but never openable is retried a bounded number of times, then recorded unreachable -- never silently counted as walked', async () => {
-  await withTempQueue(async (queue) => {
-    const { job } = queue.enqueue(IMG_1433_JOB); // nothing on this date will actually confirm it
-    const ghostLabel = 'Photo - Portrait - ghost (never mounts)';
-    const openLabel = 'Photo - Portrait - openable (no match)';
-    const page = createFakePage({
-      searchResults: {
-        'August 5, 2026': [{ ariaLabel: ghostLabel }, { ariaLabel: openLabel }],
-      },
-      panelTextByLabel: {
-        'August 5, 2026': { [openLabel]: panelBlock('IMG_0001.HEIC', 1000, 1000) },
-      },
-      unopenableLabels: [ghostLabel],
-    });
-
-    let result;
-    const logs = await captureLogs(async () => {
-      result = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
-    });
-
-    assert.equal(result.stillUnmatched.length, 1, 'no tile on this date confirms the job -- it must remain unmatched');
-    assert.ok(
-      page.log.includes(`tile-click:${openLabel}`),
-      'the walk must still reach and open the OTHER tile, not get stuck retrying the ghost forever'
-    );
-    assert.ok(
-      !page.log.includes(`tile-click:${ghostLabel}`),
-      'the ghost tile must never actually be recorded as opened -- it never became actionable'
-    );
-    assert.ok(
-      logs.some((l) => l.includes('UNREACHABLE') && l.includes(ghostLabel) && l.includes(`after ${MAX_TILE_OPEN_RETRIES} attempt`)),
-      `expected a distinct UNREACHABLE log line bounded at ${MAX_TILE_OPEN_RETRIES} attempts, got: ${JSON.stringify(logs)}`
-    );
-    // The date-level summary must not claim the ghost was "walked" -- it was
-    // explicitly given up on, and EXHAUSTED must say so rather than imply
-    // every seen tile was successfully opened.
-    assert.ok(
-      logs.some((l) => l.includes('EXHAUSTED') && l.includes('unreachable') && !l.includes(`2 tile(s) opened`)),
-      `expected EXHAUSTED to distinguish opened-vs-unreachable rather than reporting a clean sweep, got: ${JSON.stringify(logs)}`
-    );
-  });
-});
-
-// -- CHANGE 2 (2026-09-01): aria pre-scroll cumulative-set fix, upward
-// recovery, and the ambiguity-safety risk that motivated both -----------
+// -- CHANGE 2 (2026-09-01): aria pre-scroll cumulative-set fix, and the
+// ambiguity-safety risk that motivated it --------------------------------
 //
 // The aria fast path's OWN pre-scroll loop had the exact count-based bug
 // already fixed in the exhaustive walk above: it judged "did that scroll
@@ -1007,43 +798,16 @@ test('pre-scroll accumulates across windows, so planAriaMatches sees the full cu
   });
 });
 
-// REGRESSION (2026-09-01): reachable ONLY via upward recovery -- the tile
-// that resolves the job is revealed FIRST, then scrolled out of the mounted
-// window by later filler before the exhaustive walk ever starts (the aria
-// fast path never fires here: none of these labels are date-format, so
-// planAriaMatches bails out immediately and the whole date runs through the
-// walk). Down-only scrolling can never bring it back -- there's nothing
-// further to reveal once all 4 filler batches are loaded -- so this is
-// exactly the scenario that made the "virtualized grid" test above fail
-// under my first (recovery-less) attempt at the pre-scroll fix.
-test('upward recovery: a tile scrolled out of the window by the pre-scroll is still reached and matched', async () => {
-  await withTempQueue(async (queue) => {
-    const { job } = queue.enqueue(IMG_1433_JOB);
-    const matchLabel = 'Photo - Portrait - recovery-match (revealed first, buried by later filler)';
-    const padLabels = ['Photo - Portrait - recovery-pad-a', 'Photo - Portrait - recovery-pad-b', 'Photo - Portrait - recovery-pad-c', 'Photo - Portrait - recovery-pad-d'];
-    const panelText = { [matchLabel]: IMG_1433_BLOCK };
-    for (const [i, label] of padLabels.entries()) panelText[label] = panelBlock(`IMG_930${i}.HEIC`, 1000, 1000);
-
-    const page = createFakePage({
-      searchResults: { 'August 5, 2026': [{ ariaLabel: matchLabel }] }, // on-screen before any scroll
-      scrollReveals: { 'August 5, 2026': padLabels.map((ariaLabel) => [{ ariaLabel }]) }, // 4 batches of filler, pushing matchLabel out
-      panelTextByLabel: { 'August 5, 2026': panelText },
-      windowSize: 3, // matchLabel falls out of the window after the 3rd filler batch loads, well before the pre-scroll (budget 6) stops
-    });
-
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
-
-    assert.equal(stillUnmatched.length, 0, 'the buried tile must still be reached and matched');
-    assert.equal(queue.getById(job.id).status, 'trashed');
-    assert.ok(page.log.includes(`tile-click:${matchLabel}`), 'the buried tile must actually have been opened');
-    // The mechanism, not just the outcome: an upward ('wheel:up') scroll must
-    // have happened -- down-only scrolling cannot express this recovery at
-    // all (there's nothing further to reveal once all 4 filler batches have
-    // loaded), so without it the walk would exhaust its scroll budget and
-    // report the date ABANDONED with the job still unmatched.
-    assert.ok(page.log.includes('wheel:up'), 'expected an upward recovery scroll, got: ' + JSON.stringify(page.log.filter((l) => l.startsWith('wheel'))));
-  });
-});
+// DELETED 2026-09-01 (was: 'upward recovery: a tile scrolled out of the
+// window by the pre-scroll is still reached and matched'). It proved the
+// OLD exhaustive walk's own up/down scroll-recovery mechanism, which no
+// longer exists: the new walk never scrolls or re-collects the grid at all
+// -- it captures the date's first tile BEFORE the aria pre-scroll runs
+// (processDateGroup's `dateFirstTile`) and then reaches everything else
+// with ArrowRight, which pages through the app's own full result order
+// regardless of what the grid has mounted (see the module header's "27
+// photos in one run" note, and fakePage.mjs's fullOrderedTiles). There is
+// no virtualization concern left for this walk to recover from.
 
 // AMBIGUITY SAFETY (2026-09-01): the specific correctness risk problem A
 // describes -- a burst-shot duplicate (same predicted second, different
@@ -1087,19 +851,96 @@ test('ambiguity safety: a duplicate tile visible only in an early window still m
     assert.equal(stillUnmatched.length, 0, 'the exhaustive walk must still resolve both jobs by filename');
     assert.equal(queue.getById(job1.id).status, 'trashed');
     assert.equal(queue.getById(job2.id).status, 'trashed');
-    // The fallback's fingerprint: decoyA (which no aria plan would ever open
-    // -- it doesn't match either job's predicted second) gets opened, proving
-    // the WHOLE date fell through to the exhaustive walk rather than the
-    // fast path trusting a falsely-unique match for job1. With the count-
-    // based pre-scroll bug, dupLabel is invisible to planAriaMatches, job1's
-    // slot looks uniquely resolved, and the fast path opens ONLY label1 and
-    // label2 -- decoyA (and dupLabel) never opened at all.
+    // The fallback's fingerprint, updated 2026-09-01 for the in-photo-view
+    // traversal: the aria fast path grid-clicks EVERY tile in its plan
+    // directly (one 'tile-click' per job -- see the aria-path tests above),
+    // so if the count-based pre-scroll bug reappeared (dupLabel invisible to
+    // planAriaMatches, job1's slot falsely looking unique), this would show
+    // exactly 2 grid clicks (label1, label2). The exhaustive walk, by
+    // contrast, only ever grid-clicks the date's STARTING tile once and
+    // reaches everything else -- including stepping past the ambiguous
+    // dupLabel -- via ArrowRight. Exactly one grid click is therefore the
+    // fast-path-declined signature.
     const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
-    assert.ok(
-      tileClicks.includes(`tile-click:${decoyA}`),
-      `expected the exhaustive walk to fire (proving the fast path declined the ambiguous match), got: ${JSON.stringify(tileClicks)}`
+    assert.equal(
+      tileClicks.length,
+      1,
+      `expected the exhaustive walk to fire with a single grid click (proving the fast path declined the ambiguous match), got: ${JSON.stringify(tileClicks)}`
     );
-    assert.ok(tileClicks.includes(`tile-click:${label1}`));
-    assert.ok(tileClicks.includes(`tile-click:${label2}`));
+  });
+});
+
+// -- In-photo-view traversal (2026-09-01 rewrite): auto-advance-after-trash
+// and the "info panel opened once, not per photo" invariant -----------------
+
+// REGRESSION-SHAPED (2026-09-01): a trashed photo disappears from the day's
+// results, and fakePage's performTrash (matching the live behaviour the
+// module header describes) auto-advances the view straight onto the NEXT
+// photo by itself. walkPhotoView must detect that (by the panel content
+// having already moved on) and NOT blindly press ArrowRight afterward -- a
+// blind press here would skip the very photo the auto-advance just landed
+// on. Two adjacent jobs (B's tile immediately follows A's) makes this
+// concrete: if the code ever presses ArrowRight unconditionally after every
+// trash, it walks A -> (auto-advance) -> B -> (blind ArrowRight) -> C,
+// reading C instead of B and leaving job B permanently unmatched.
+test('after a successful trash, traversal does not skip the following photo (the auto-advance case)', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: jobA } = queue.enqueue(IMG_1433_JOB);
+    const { job: jobB } = queue.enqueue(IMG_1441_JOB);
+    const labels = [
+      'Photo - Portrait - tile-A (match A)',
+      'Photo - Portrait - tile-B (match B, right after A)',
+      'Photo - Portrait - tile-C (no match)',
+    ];
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': labels.map((ariaLabel) => ({ ariaLabel })) },
+      panelTextByLabel: {
+        'August 5, 2026': {
+          [labels[0]]: IMG_1433_BLOCK,
+          [labels[1]]: IMG_1441_BLOCK,
+          [labels[2]]: panelBlock('IMG_9999.HEIC', 1000, 1000),
+        },
+      },
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [jobA, jobB], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'job B must not be skipped by a blind ArrowRight after job A auto-advances onto it');
+    assert.equal(queue.getById(jobA.id).status, 'trashed');
+    assert.equal(queue.getById(jobB.id).status, 'trashed');
+    // The fingerprint: trashing A auto-advances the view straight onto B, and
+    // trashing B auto-advances onto C -- so reaching and confirming BOTH
+    // matches costs ZERO ArrowRight presses.
+    const arrowPresses = page.log.filter((l) => l === 'key:ArrowRight').length;
+    assert.equal(arrowPresses, 0, 'job A auto-advances directly onto job B, and job B onto C; no ArrowRight is ever needed');
+  });
+});
+
+// The info panel is STICKY (opened once, stays open across photos -- see
+// openInfoPanelOnce's header) and pressing "i" while it's already open
+// CLOSES it. walkPhotoView must therefore call openInfoPanelOnce exactly
+// ONCE for the whole date, before the ArrowRight loop starts, never again
+// per photo.
+test('the info panel is opened ONCE per date, not once per photo', async () => {
+  await withTempQueue(async (queue) => {
+    const PHOTO_COUNT = 6;
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const labels = Array.from({ length: PHOTO_COUNT }, (_, i) => `Photo - Portrait - tile-${i}`);
+    const panelTextByLabel = { 'August 5, 2026': {} };
+    for (let i = 0; i < PHOTO_COUNT - 1; i++) {
+      panelTextByLabel['August 5, 2026'][labels[i]] = panelBlock(`IMG_90${i}.HEIC`, 1000, 1000);
+    }
+    panelTextByLabel['August 5, 2026'][labels[PHOTO_COUNT - 1]] = IMG_1433_BLOCK; // match, last photo
+
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': labels.map((ariaLabel) => ({ ariaLabel })) },
+      panelTextByLabel,
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0);
+    const iPresses = page.log.filter((l) => l === 'key:i').length;
+    assert.equal(iPresses, 1, `expected exactly one "i" press across all ${PHOTO_COUNT} photos walked, got ${iPresses}`);
   });
 });

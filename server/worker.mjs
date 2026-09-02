@@ -21,9 +21,19 @@
  *      instead of ~700 across ~30 dates). When it returns null (offset
  *      didn't calibrate, or any job's predicted tile is ambiguous), fall
  *      straight through to step 5 unchanged — the exhaustive walk.
- *   5. Exhaustive fallback: open the first unvisited tile, open the info
- *      panel once, then step through the day's tiles, reading + parsing
- *      the panel per photo (lib/matcher.mjs's parsePanelText).
+ *   5. Exhaustive fallback (REWRITTEN 2026-09-01 -- see processDateGroup /
+ *      walkPhotoView): the original design opened a tile, read the panel,
+ *      returned to the results GRID, then found the next tile there -- that
+ *      grid-return step failed live for five distinct reasons across many
+ *      rounds (stale positional locators, a dead 0x0 duplicate grid, a
+ *      shared scroll budget, virtualized re-collection, an Escape loop that
+ *      navigated out of the results entirely), topping out at 2 of 27 tiles
+ *      on the last measured run. It never returns to the grid mid-date now:
+ *      open the date's FIRST tile once, open the info panel once, then step
+ *      through the day entirely INSIDE the photo view with ArrowRight
+ *      ("View next photo"'s keyboard equivalent), reading + parsing the
+ *      panel at each stop. An early version of this worker did exactly this
+ *      and walked 27 photos on one date in a single live run.
  *   6. A photo confirms a job when filename matches exactly AND dimensions
  *      agree (either orientation) — lib/matcher.mjs's findMatchingJob. This
  *      is the ONLY thing that ever authorises a trash — the aria pre-filter
@@ -109,15 +119,16 @@ export const MAX_STEPS_PER_DATE = 80;
 // above -- a date with a huge grid must not scroll forever trying to find
 // tiles that were never going to load.
 export const MAX_SCROLL_ATTEMPTS_PER_DATE = 6;
-// Bound how many times the exhaustive walk retries a SINGLE known tile that
-// keeps throwing StaleTileError before giving up on it specifically (see the
-// "UNREACHABLE" branch in processDateGroup below) -- distinct from
-// MAX_STEPS_PER_DATE (bounds the whole date's total attempts) and
-// MAX_SCROLL_ATTEMPTS_PER_DATE (bounds consecutive scrolls that find nothing
-// AT ALL on-screen). Small on purpose: a tile that still won't open after a
-// few scroll+retry rounds is not going to succeed on one more -- better to
-// record it and move on than burn the date's shared step budget hammering a
-// single broken tile forever.
+// Bound how many times openFirstTile() re-collects and retries opening the
+// EXHAUSTIVE fallback's starting tile after a StaleTileError (the held
+// reference -- captured before the aria pre-scroll even runs, see
+// processDateGroup's `dateFirstTile` -- turned out to already be gone, e.g.
+// trashed by the aria phase, or the grid re-rendered under us). Distinct
+// from MAX_STEPS_PER_DATE, which bounds the whole date's traversal once
+// we're actually in the photo view. Small on purpose: a starting tile that
+// still won't open after a few re-collect+retry rounds is not going to
+// succeed on one more -- better to report the date EXHAUSTED with nothing
+// walked than loop forever on a broken reference.
 export const MAX_TILE_OPEN_RETRIES = 3;
 
 // CHANGE 2 (2026-09-01): Oliver has decided this worker does not need
@@ -271,49 +282,47 @@ async function openPhotosHome(page) {
  * settles quickly and no less safe when it doesn't.
  */
 async function closeAnyOpenPhoto(page) {
-  // "Back at the results grid" is NOT "the search box is visible". The search
-  // box lives in the header and stays visible WHILE a photo is open, so the
-  // previous version returned immediately without ever closing the photo --
-  // after which every tile lookup hit an empty grid and reported "tile gone
-  // from the grid", stranding most of a date's tiles as never-reached.
+  // Measured live 2026-09-01, pressing Escape from an open photo in a date's
+  // search results:
   //
-  // The real signal is the photo view's own control disappearing. TRASH_SELECTOR
-  // ("Move to trash") is a PHOTO-VIEW-ONLY control -- verified live 2026-09-01
-  // (the photo view shows "Clear search query" alongside "Move to trash",
-  // "Open info", etc., so the search box tells us nothing, but the trash
-  // control does).
+  //   after search     search=true  trash=false  photoTiles=34
+  //   photo open       search=false trash=true   photoTiles=0
+  //   after Escape #1  search=true  trash=false  photoTiles=34  <- at the grid
+  //   after Escape #2  search=true  trash=false  photoTiles=0   <- LEFT the
+  //                                                                results for
+  //                                                                the library
   //
-  // AMENDED after writing this (2026-09-01, unit-test-driven, not re-verified
-  // live): the first version of this fix also required
-  // `RESULT_LINK_SELECTOR:visible` to be non-empty before considering us
-  // "back at the grid", reasoning that the trash control disappearing alone
-  // might be a transitional/animating moment before the grid genuinely
-  // re-renders. That is wrong for a date search that legitimately returns
-  // ZERO results (routine: the day-1/day+1 fallback dates in runDateGroups,
-  // or a job that never matches anything on any of its 3 date attempts) --
-  // there are zero result tiles on screen even though no photo is open and
-  // there is nothing to escape from, so requiring tiles>0 made every
-  // zero-result date's NEXT closeAnyOpenPhoto call spin through 5 Escapes and
-  // throw, which would have broken the ENTIRE needs_review path (a
-  // fixture-only regression the unit suite caught -- fakePage's
-  // `${RESULT_LINK_SELECTOR}:visible` count correctly returns 0 for a query
-  // whose searchResults are `[]`, exactly like the live "no results" case
-  // would). TRASH_SELECTOR's absence alone is the live-verified signal; drop
-  // the second condition rather than special-case "0 results" detection this
-  // function has no way to reason about anyway.
-  const photoOpen = async () => page.locator(TRASH_SELECTOR).first().isVisible().catch(() => false);
+  // Two lessons, both learned the hard way:
+  //  1. ONE Escape is correct and a SECOND navigates out of the search results
+  //     entirely. Looping "press Escape until <condition>" destroyed the grid,
+  //     which is why tiles then read as "gone from the grid" and the next
+  //     date's search found no search box.
+  //  2. Neither signal identifies the grid alone. The search box is hidden
+  //     while a photo is open (so it cannot be the only check), and the trash
+  //     control is absent both at the grid AND after we have navigated away
+  //     (so it cannot be either). "At the grid" is search box visible AND
+  //     trash control not visible -- which is also true, correctly, for a
+  //     zero-result date where no photo was ever opened, so this returns
+  //     immediately there without pressing anything.
+  const atGrid = async () => {
+    const searchVisible = await page.locator(SEARCH_BOX_SELECTOR).first().isVisible().catch(() => false);
+    if (!searchVisible) return false;
+    return !(await page.locator(TRASH_SELECTOR).first().isVisible().catch(() => false));
+  };
 
-  for (let attempt = 0; attempt < 5; attempt++) {
-    if (!(await photoOpen())) return;
+  // Deliberately few attempts: an extra Escape is not harmless here.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (await atGrid()) return;
     await page.keyboard.press('Escape');
     const deadline = Date.now() + (FAST_DELAYS ? 20 : 3000);
     while (Date.now() < deadline) {
-      if (!(await photoOpen())) return;
+      if (await atGrid()) return;
       await pollDelay();
     }
   }
-  throw new Error('could not confirm the photo view closed after 5 Escape presses — UI drift, stopping rather than forcing navigation');
+  throw new Error('could not get back to the results grid after 2 Escape presses — UI drift, stopping rather than pressing Escape again (a third would leave the search results)');
 }
+
 
 
 /**
@@ -520,34 +529,6 @@ async function scrollResults(page) {
 }
 
 /**
- * Scroll the results grid back UP -- toward tiles this worker already knows
- * about (tracked in `seen`, see processDateGroup) but that scrolled out of
- * the mounted window as later content loaded.
- *
- * VERIFIED LIVE 2026-09-01: a single collectResultTiles() call returned 27
- * mounted tiles for one date, all reporting visible, so the live grid may
- * not aggressively unmount tiles at all -- but where it does (or on a
- * slower render, or a future Google change), a virtualized grid only ever
- * mounts a WINDOW, and this worker's own pre-scroll can run that window
- * well past an early tile before the exhaustive walk even starts (a live
- * failure I hit and reverted -- see the module header). Scrolling DOWN can
- * never recover such a tile: there's nothing further to reveal, and the
- * window only ever follows the tail forward once new content loads. This is
- * therefore the ONLY path back to a tile that fell behind -- used by the
- * walk's StaleTileError retry (below) whenever the failing tile came from
- * `seen` rather than being freshly on-screen.
- *
- * A negative wheel delta is Google Photos' own "scroll up" gesture. Same
- * real-correctness settle wait as scrollResults -- the grid needs a moment
- * to re-render the newly-scrolled-into-view tiles -- not human mimicry, so
- * it stays short and fixed regardless of --slow.
- */
-async function scrollResultsUp(page) {
-  await page.mouse.wheel(0, -(600 + Math.random() * 400));
-  await sleep(FAST_DELAYS ? 0 : 500);
-}
-
-/**
  * True when `err` (or the page itself) indicates the tab/browser this worker
  * was driving has gone away -- Oliver's real Chrome, which can close a tab
  * out from under this run at any time (he uses the browser, or Chrome closes
@@ -637,19 +618,6 @@ async function moveToTrash(page, panelTextBefore) {
 
 
 /**
- * Search one calendar date and walk its results EXHAUSTIVELY -- every visible
- * tile, not just those an accelerator like "next photo" happens to reach --
- * confirming and (live only) trashing every still-unmatched job it can.
- * Returns the jobs from `unmatchedJobs` that remain unconfirmed after this
- * date's walk.
- *
- * Tiles are tracked as visited by `aria-label` (carries media type,
- * orientation and capture time to the second -- see isRealPhotoTile /
- * dedupeTilesByAriaLabel in lib/matcher.mjs), never by array index: the grid
- * re-renders between tiles and indices shift.
- */
-
-/**
  * Shared by the aria fast path and the exhaustive walk below: the currently
  * open photo's panel has just been read and parsed, and (by exact filename +
  * dimensions -- lib/matcher.mjs's findMatchingJob, already checked by the
@@ -683,6 +651,146 @@ async function confirmAndTrash(page, job, parsed, text, query, queue, dryRun) {
   }
 }
 
+/**
+ * Bounded attempt to get INTO the photo view for a date, starting from
+ * `candidateTile` (the date's first tile, captured by processDateGroup
+ * BEFORE the aria phase's own pre-scroll runs -- see `dateFirstTile` there).
+ * A held tile reference can go stale the same way any tile locator can (the
+ * aria phase trashed it, or the grid re-rendered under us) -- openTile()
+ * throws StaleTileError exactly as it does everywhere else it's called.
+ * Re-collect fresh and retry rather than giving up on the whole date over
+ * one stale reference; MAX_TILE_OPEN_RETRIES bounds it so a genuinely broken
+ * date can't loop forever. Returns the tile actually opened, or null if
+ * nothing on this date could be opened at all (e.g. the aria phase's own
+ * trashes consumed every tile it had).
+ */
+async function openFirstTile(page, candidateTile) {
+  let tile = candidateTile;
+  for (let attempt = 0; attempt < MAX_TILE_OPEN_RETRIES; attempt++) {
+    if (!tile) {
+      const fresh = await collectResultTiles(page);
+      tile = fresh[0] ?? null;
+    }
+    if (!tile) return null; // nothing left to open on this date at all
+    try {
+      await openTile(page, tile);
+      return tile;
+    } catch (err) {
+      if (!(err instanceof StaleTileError)) throw err;
+      tile = null; // force a fresh re-collect on the next attempt
+    }
+  }
+  return null;
+}
+
+/**
+ * Poll readPanelText() until it differs from `previousText`, or give up
+ * after a real (if short) timeout. This is the ONLY way the traversal below
+ * can tell "moved to the next photo" from "there is no next photo" --
+ * ArrowRight is a keypress with no return value, and per the module header,
+ * advancement must be confirmed by PANEL CONTENT changing, never by the
+ * keypress merely resolving. An unchanged panel after the deadline means the
+ * end of the day's results -- a normal, expected outcome -- so this returns
+ * null rather than throwing (contrast openInfoPanelOnce, whose timeout IS a
+ * genuine UI-drift error: the panel not opening AT ALL is never expected).
+ */
+async function waitForPanelChange(page, previousText) {
+  const deadline = Date.now() + (FAST_DELAYS ? 30 : 8000);
+  while (Date.now() < deadline) {
+    await pollDelay();
+    const text = await readPanelText(page);
+    if (text && text !== previousText) return text;
+  }
+  return null;
+}
+
+/**
+ * The exhaustive fallback (REWRITTEN 2026-09-01, see module header for the
+ * five live failures that killed the old grid-return design). Opens the
+ * date's first tile ONCE, opens the info panel ONCE, then steps forward with
+ * ArrowRight -- never returning to the results grid mid-date -- reading and
+ * confirming the panel at each stop until every job is matched, the panel
+ * stops changing (genuinely reached the end of the day), or
+ * MAX_STEPS_PER_DATE is hit.
+ *
+ * `dateFirstTile` is the tile processDateGroup captured from the very FIRST
+ * collectResultTiles() call, before the aria phase's own pre-scroll could
+ * run the mounted window past it -- so this never depends on where the grid
+ * happens to be scrolled to when the aria phase hands off.
+ */
+async function walkPhotoView(page, dateFirstTile, unmatchedJobs, query, queue, dryRun) {
+  let remaining = unmatchedJobs;
+  if (remaining.length === 0) return { stillUnmatched: remaining };
+
+  const tile = await openFirstTile(page, dateFirstTile);
+  if (!tile) {
+    // Nothing openable at all -- e.g. the aria phase's own trashes consumed
+    // every tile this date ever had. Not a bug, just nothing left to walk.
+    console.log(`[date ${query}] EXHAUSTED: 0 photo(s) visited (nothing left to open), ${remaining.length} job(s) still unmatched`);
+    return { stillUnmatched: remaining };
+  }
+
+  // Opened ONCE for the whole date -- the panel is sticky and stays open as
+  // ArrowRight steps through the rest of the day (see openInfoPanelOnce's
+  // header and the module header). Never called again per-photo below:
+  // pressing "i" while it's already open CLOSES it.
+  await openInfoPanelOnce(page);
+
+  let steps = 0;
+  let boundHit = false;
+  let text = await readPanelText(page);
+
+  while (remaining.length > 0) {
+    if (steps >= MAX_STEPS_PER_DATE) {
+      boundHit = true;
+      break;
+    }
+    steps += 1;
+
+    const parsed = parsePanelText(text);
+    const job = findMatchingJob(remaining, parsed);
+    let advancedByDelete = false;
+
+    if (job) {
+      await confirmAndTrash(page, job, parsed, text, query, queue, dryRun);
+      remaining = remaining.filter((j) => j !== job);
+      if (!dryRun) {
+        // A trashed photo disappears from the results, and the view can
+        // auto-advance to the next one BY ITSELF -- the same thing
+        // moveToTrash's own settled() check already has to detect (a panel
+        // that moved on from `panelTextBefore` counts as settled). Check for
+        // it here too: if the panel already moved on, do NOT blindly
+        // ArrowRight below, or we'd skip the very photo the auto-advance
+        // just landed on.
+        const afterTrash = await readPanelText(page);
+        if (afterTrash && afterTrash !== text) {
+          text = afterTrash;
+          advancedByDelete = true;
+        }
+      }
+    }
+
+    if (remaining.length === 0) break;
+
+    if (!advancedByDelete) {
+      await page.keyboard.press('ArrowRight');
+      const next = await waitForPanelChange(page, text);
+      if (next == null) break; // end of the day's results -- EXHAUSTED below
+      text = next;
+    }
+  }
+
+  if (remaining.length > 0) {
+    if (boundHit) {
+      console.log(`[date ${query}] ABANDONED: MAX_STEPS_PER_DATE (${MAX_STEPS_PER_DATE}) reached, ${remaining.length} job(s) still unmatched`);
+    } else {
+      console.log(`[date ${query}] EXHAUSTED: ${steps} photo(s) visited, ${remaining.length} job(s) still unmatched`);
+    }
+  }
+
+  return { stillUnmatched: remaining };
+}
+
 export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun }) {
   let remaining = [...unmatchedJobs];
   if (remaining.length === 0) return { stillUnmatched: remaining };
@@ -695,60 +803,29 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
     return { stillUnmatched: remaining };
   }
 
-  const visited = new Set();
-  // BUG FIX (2026-09-01, live): union of every real tile aria-label ever
-  // observed on this date, across every re-collection and scroll. Needed
-  // because Google's result grid is VIRTUALIZED -- collectResultTiles() only
-  // ever returns what's currently mounted/on-screen, never the whole date.
-  // The old exhaustive walk judged "did this scroll find anything new?" by
-  // comparing `tiles.length` before/after -- which is wrong for a
-  // virtualized grid: scrolling swaps the mounted WINDOW (old tiles unmount
-  // as new ones mount), so the on-screen COUNT can stay flat or even shrink
-  // while the CONTENT is entirely different. That false "nothing new" read
-  // is exactly what made a 27-tile day report EXHAUSTED after 3 tiles live.
-  // `seen` is the walk's memory of "what actually exists on this date",
-  // independent of what happens to be on-screen at any one instant --
-  // mergeSeen() below is the corrected comparison, done on the LABEL SET
-  // rather than a count.
-  const seen = new Map(); // ariaLabel -> tile, first-seen copy
-  // Tiles `seen` at some point but which never became actionable after
-  // MAX_TILE_OPEN_RETRIES scroll+retry attempts (see the StaleTileError
-  // branch below). Tracked separately from `visited` (which means "actually
-  // opened and its panel read") so a genuine EXHAUSTED report can mean what
-  // it says -- every seen label accounted for -- rather than silently
-  // dropping a tile the grid just wouldn't mount.
-  const unreachable = new Set();
-  const openAttempts = new Map(); // ariaLabel -> retry count so far, for the StaleTileError branch
-  let steps = 0;
-  let scrollAttempts = 0;
-  // Consecutive top-of-loop scroll rounds (see the "no candidate on-screen"
-  // branch below) that revealed no previously-unseen label. Reset by ANY
-  // progress -- a newly-seen label, or a tile actually opened -- so the walk
-  // only gives up after a genuine run of fruitless scrolling. This is a
-  // SEPARATE budget from the aria fast path's own pre-scroll loop above
-  // (see that loop's `scrollAttempts`) -- sharing one budget between the two
-  // phases meant the pre-scroll could spend the whole thing just loading the
-  // day, leaving the walk's very first "nothing on-screen" check to break
-  // immediately and report a date EXHAUSTED with 25 of 27 tiles never
-  // visited. Regression test 85 in worker.test.mjs proves this by mutation.
-  let walkScrollAttempts = 0;
-  let boundHit = false;
-  // UPWARD RECOVERY (2026-09-01): which direction the "no on-screen
-  // candidate" branch below tried LAST time it made real progress -- 'up'
-  // | 'down' | null (never yet). Used to ALTERNATE the preferred direction
-  // each time, rather than always trying the same one first -- see that
-  // branch's comment for why (proven necessary by mutation against the
-  // "virtualized grid" regression test: always-up-first re-covers the same
-  // recovered ground forever and never reaches genuinely new content).
-  let lastRecoveryDirection = null;
+  // Captured BEFORE the aria pre-scroll below runs, so the exhaustive
+  // fallback always has a genuine "date's first tile" to start from even if
+  // that pre-scroll later moves the mounted window well past it -- see
+  // walkPhotoView's header. A plain reference, not re-derived from `seen`,
+  // so its identity survives however `seen`/`tiles` get mutated below.
+  const dateFirstTile = tiles[0];
 
-  /**
-   * Merge freshly-collected tiles into `seen`. Returns true iff at least one
-   * label was genuinely NEW. This is the corrected "did scrolling reveal
-   * anything" signal -- see the comment on `seen` above for why comparing
-   * label sets (not tile counts) is what actually detects progress on a
-   * virtualized grid.
-   */
+  // `seen` is the aria fast path's OWN memory of "every tile this date has
+  // ever shown us" (see mergeSeen below), needed because Google's result
+  // grid is VIRTUALIZED -- collectResultTiles() only ever returns what's
+  // currently mounted/on-screen. planAriaMatches() needs the FULL set to
+  // judge ambiguity safely (a duplicate that hasn't loaded yet could be the
+  // thing that makes a seemingly-unique match actually ambiguous), so the
+  // pre-scroll below accumulates by LABEL SET, not by comparing on-screen
+  // tile COUNTS -- a windowed swap can hold the count flat while the labels
+  // underneath move on entirely, which is a correctness risk here (a missed
+  // duplicate turns a genuinely ambiguous match into a FALSELY CONFIDENT
+  // one), not just a coverage one. The exhaustive fallback below (walkPhoto-
+  // View) needs none of this: it never re-collects or scrolls the grid at
+  // all, see its header for why.
+  const seen = new Map(); // ariaLabel -> tile, first-seen copy
+  let scrollAttempts = 0;
+
   const mergeSeen = (freshTiles) => {
     let addedNew = false;
     for (const t of freshTiles) {
@@ -760,31 +837,10 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
     return addedNew;
   };
 
-  // --- CHANGE 1: aria fast path -------------------------------------------
+  // --- CHANGE 1: aria fast path (unchanged -- verified live, matched 3/3
+  // and 2/2 on real dates, filename-confirmed) -----------------------------
   // Predict which tiles are worth opening from the grid's own aria-labels
-  // (capture time to the SECOND) before falling back to opening every tile.
-  // planAriaMatches() needs the date's FULL tile set to judge safety -- a
-  // tile that hasn't loaded yet could be the duplicate that makes a
-  // seemingly-unique match actually ambiguous -- so scroll to completion
-  // first.
-  //
-  // BUG FIX (2026-09-01, live): this used to judge "did that scroll load
-  // anything new" by comparing on-screen tile COUNTS before/after -- exactly
-  // the virtualized-grid bug fixed in the exhaustive walk below (see `seen`'s
-  // comment further down): a windowed swap can hold the on-screen COUNT flat
-  // (or shrink it) while the labels underneath move on entirely, so a tile
-  // that only ever appeared in an EARLIER window silently never reaches
-  // planAriaMatches. That's a correctness risk, not just a coverage one --
-  // planAriaMatches uses the full tile set specifically to judge whether a
-  // predicted match is AMBIGUOUS (a burst-shot duplicate landing on the same
-  // predicted second), so a duplicate dropped by this comparison could turn
-  // a genuinely ambiguous match into a FALSELY CONFIDENT one, which is worse
-  // than never fast-pathing at all. Fixed the same way as the walk:
-  // accumulate into `seen` (a label-SET comparison, not a count) and hand
-  // planAriaMatches the CUMULATIVE set, never just the last on-screen
-  // snapshot. `seen`/mergeSeen are defined above (used by the walk too), so
-  // this loop and the walk share one memory of "everything this date has
-  // ever shown us" from the very first collection onward.
+  // (capture time to the SECOND) before falling back to the exhaustive walk.
   mergeSeen(tiles); // seed `seen` with whatever was on-screen before any pre-scroll happened
   while (scrollAttempts < MAX_SCROLL_ATTEMPTS_PER_DATE) {
     await scrollResults(page);
@@ -802,39 +858,18 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
       // Keep `seen` in sync for aria-considered tiles too -- it's a real,
       // known tile regardless of whether opening it below succeeds.
       mergeSeen([tile]);
-      steps += 1;
       try {
         await openTile(page, tile);
       } catch (err) {
         if (err instanceof StaleTileError) {
-          // Grid shifted under us since planAriaMatches ran -- expected now
-          // that planAriaMatches sees the CUMULATIVE tile set (2026-09-01
-          // fix above), which can legitimately include a tile that's no
-          // longer on-screen. Don't guess -- leave this job for the
-          // exhaustive walk below, which re-collects tiles fresh (and can
-          // scroll back up) and will still reach it if it's there.
-          //
-          // BUG FIX (2026-09-01): this used to mark the tile `visited`
-          // UNCONDITIONALLY, before the attempt above -- so a StaleTileError
-          // here silently and PERMANENTLY dropped the job: `visited`
-          // already contained the label, so the exhaustive walk's own
-          // candidate search (which filters out anything in `visited`)
-          // would never try it again, contradicting this very comment's
-          // claim that the walk "will still reach it if it's there." Same
-          // failure class as the exhaustive walk's own StaleTileError
-          // handling above (see its comment) -- only mark a tile visited
-          // once it has genuinely been opened, never on a failed attempt.
-          // Regression test "pre-scroll accumulates..." in worker.test.mjs
-          // proves this by mutation (moving `visited.add` back above the
-          // try block reproduces job1 going permanently unmatched).
+          // Grid shifted under us since planAriaMatches ran. Don't guess --
+          // leave this job for the exhaustive walk below, which starts fresh
+          // from the date's first tile and will still reach it if it's there.
           if (VERBOSE) console.log(`  [aria] ${err.message} — leaving for the exhaustive walk`);
           continue;
         }
         throw err;
       }
-      // Only reaching here means the tile genuinely opened -- see the
-      // comment above for why marking it visited any earlier is a bug.
-      visited.add(tile.ariaLabel);
       await openInfoPanelOnce(page);
       const text = await readPanelText(page);
       const parsed = parsePanelText(text);
@@ -856,202 +891,10 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
       await closeAnyOpenPhoto(page);
     }
     if (remaining.length === 0) return { stillUnmatched: remaining };
-    tiles = await collectResultTiles(page); // grid re-renders after trashing/closing
   }
 
-  mergeSeen(tiles); // seed `seen` with everything already known from the aria phase above
-
-  // --- Exhaustive fallback ------------------------------------------------
-  // Walks every tile this date has ever revealed (tracked in `seen`, not
-  // just what's on-screen right now) until every remaining job is matched,
-  // every seen tile is accounted for, or a bound is hit. See the comments on
-  // `seen`/`unreachable`/`mergeSeen` above for why this is no longer a
-  // straight "walk what's currently rendered" loop.
-  while (remaining.length > 0) {
-    // Prefer a tile that's on-screen RIGHT NOW (in this round's `tiles`
-    // snapshot) and neither already visited nor already given up on.
-    // openTile needs a real, actionable element -- a label merely present in
-    // `seen` but currently scrolled out of the mounted window isn't
-    // actionable until a scroll brings it back on-screen.
-    let tile = tiles.find((t) => !visited.has(t.ariaLabel) && !unreachable.has(t.ariaLabel));
-
-    if (!tile) {
-      // Nothing on-screen is both unvisited and not given up on. Before
-      // concluding the date is exhausted, scroll and re-collect.
-      //
-      // UPWARD RECOVERY (2026-09-01): this used to only ever scroll DOWN,
-      // which finds genuinely NEW content but can never recover a tile the
-      // window has already moved PAST -- e.g. the aria fast path's own
-      // pre-scroll (above) can run the window all the way to the tail
-      // before this walk even starts, stranding an early tile above the
-      // viewport with nothing further to reveal below it (a live failure I
-      // hit and reverted -- see the module header, and scrollResultsUp's
-      // comment for why down-only scrolling can't fix this). So: try BOTH
-      // directions here, not just down.
-      //
-      // Direction is chosen by ALTERNATION, not "always up then down": a
-      // direction that just paid off tends to keep re-covering the SAME
-      // ground (scrolling up repeatedly just re-mounts tiles already
-      // opened during the last up-scroll), so once a direction succeeds,
-      // the next attempt prefers the OTHER one first -- proven necessary by
-      // mutation against the "virtualized grid" regression test (always
-      // preferring up first eventually reaches all the way back to the
-      // very first tile ever seen, before down-scrolling ever gets a
-      // chance to reveal the tile that would have resolved the date and
-      // ended the walk). If the preferred direction genuinely finds
-      // nothing usable, the OTHER direction is tried immediately, in the
-      // SAME event -- so a single "nothing on-screen" moment costs at most
-      // one wasted scroll, never a whole budget slot, keeping the common
-      // (non-virtualized, or not-yet-scrolled-past) case just as cheap as
-      // before this fix.
-      if (walkScrollAttempts >= MAX_SCROLL_ATTEMPTS_PER_DATE) break; // give up scrolling -- see EXHAUSTED-vs-ABANDONED reporting below
-
-      const tryDirection = async (direction) => {
-        if (direction === 'down') await scrollResults(page);
-        else await scrollResultsUp(page);
-        const fresh = await collectResultTiles(page);
-        // "Progress" covers BOTH senses scrolling can help: a genuinely NEW
-        // label (down's original case, mergeSeen) OR an already-known
-        // label that's simply back on-screen and still actionable (up's
-        // recovery case -- mergeSeen alone would say "nothing new" for a
-        // tile already in `seen`, which is exactly wrong here).
-        const newlySeen = mergeSeen(fresh);
-        const recoveredKnown = fresh.some((t) => !visited.has(t.ariaLabel) && !unreachable.has(t.ariaLabel));
-        return { fresh, progressed: newlySeen || recoveredKnown };
-      };
-
-      const preferred = lastRecoveryDirection === 'up' ? 'down' : 'up';
-      let outcome = await tryDirection(preferred);
-      let directionUsed = preferred;
-      if (!outcome.progressed) {
-        directionUsed = preferred === 'up' ? 'down' : 'up';
-        outcome = await tryDirection(directionUsed);
-      }
-
-      tiles = outcome.fresh;
-      if (outcome.progressed) {
-        walkScrollAttempts = 0; // genuine progress -- keep scrolling as long as it keeps paying off
-        lastRecoveryDirection = directionUsed;
-      } else {
-        // Neither direction revealed anything new or brought back an
-        // unvisited/reachable known tile. Deliberately NOT the old
-        // `tiles.length <= beforeCount` count check: that compares
-        // on-screen COUNTS, which stay flat across a virtualized window
-        // swap even though the labels underneath moved on entirely --
-        // exactly the bug that made a 27-tile day report EXHAUSTED after 3
-        // tiles live. Comparing against `seen`'s label set (and against
-        // visited/unreachable for the recovery case) is what actually
-        // detects "this scroll genuinely found nothing new".
-        walkScrollAttempts += 1;
-      }
-      continue; // re-check the freshly-collected/merged set for a candidate
-    }
-
-    if (steps >= MAX_STEPS_PER_DATE) {
-      boundHit = true;
-      break;
-    }
-    steps += 1;
-
-    try {
-      await openTile(page, tile);
-    } catch (err) {
-      if (err instanceof StaleTileError) {
-        // A tile we KNOW exists (it was on-screen a moment ago) failed to
-        // open -- e.g. the grid re-virtualized it out between collecting and
-        // clicking. Retry a bounded number of times, scrolling in between in
-        // case that's what brings it back, before giving up on THIS tile
-        // specifically. Always down here: `tile` came from the on-screen
-        // `tiles` snapshot just above, so it was mounted a moment ago --
-        // the window-moved-past case is handled by the "nothing on-screen"
-        // branch's own up/down alternation, not this per-tile retry.
-        //
-        // Crucially this does NOT add the tile to `visited` on failure. The
-        // OLD code marked a tile visited BEFORE attempting to open it, so a
-        // tile that merely failed to open was silently counted as "walked"
-        // and never retried -- precisely how a date could report EXHAUSTED
-        // while most of it was never actually opened.
-        const attempts = (openAttempts.get(tile.ariaLabel) ?? 0) + 1;
-        openAttempts.set(tile.ariaLabel, attempts);
-        if (attempts >= MAX_TILE_OPEN_RETRIES) {
-          unreachable.add(tile.ariaLabel);
-          console.log(
-            `[date ${query}] UNREACHABLE: "${tile.ariaLabel}" never became actionable after ${attempts} attempt(s) — ` +
-              'giving up on this tile, NOT counting it as walked'
-          );
-        } else {
-          if (VERBOSE) console.log(`  [step ${steps}] ${err.message} — retry ${attempts}/${MAX_TILE_OPEN_RETRIES} after scrolling`);
-          await scrollResults(page);
-        }
-        tiles = await collectResultTiles(page);
-        mergeSeen(tiles);
-        continue;
-      }
-      throw err;
-    }
-
-    // Only reaching here means the tile genuinely opened -- only NOW is it
-    // safe to count it as visited (see the StaleTileError comment above).
-    visited.add(tile.ariaLabel);
-    openAttempts.delete(tile.ariaLabel);
-    walkScrollAttempts = 0; // opening a tile is progress too
-
-    await openInfoPanelOnce(page);
-    const text = await readPanelText(page);
-    const parsed = parsePanelText(text);
-    if (VERBOSE) {
-      console.log(
-        `  [step ${steps}] panel: filename=${parsed.filename ?? '(none)'} ` +
-          `dims=${parsed.pixelWidth ?? '?'}x${parsed.pixelHeight ?? '?'}` +
-          (parsed.filename ? '' : ` rawLen=${(text || '').length} raw="${(text || '').slice(0, 120)}"`)
-      );
-    }
-    const job = findMatchingJob(remaining, parsed);
-    if (job) {
-      await confirmAndTrash(page, job, parsed, text, query, queue, dryRun);
-      remaining = remaining.filter((j) => j !== job);
-    }
-
-    if (remaining.length === 0) break;
-
-    await closeAnyOpenPhoto(page);
-    tiles = await collectResultTiles(page); // DOM re-renders on return to the grid
-    mergeSeen(tiles);
-  }
-
-  if (remaining.length > 0) {
-    // EXHAUSTED means exactly what the brief requires it to mean: every
-    // tile this walk ever saw (`seen`) has either been opened (`visited`) or
-    // explicitly given up on after retries (`unreachable`) -- nothing was
-    // silently skipped. Classify on THAT invariant, not on which bound
-    // happened to fire the `break`: hitting the scroll-fruitless bound
-    // (walkScrollAttempts) only means the date is done in THIS walk's
-    // provable case, where the "no on-screen candidate" branch already
-    // established seen == visited ∪ unreachable before scrolling even
-    // started, so consecutive fruitless scrolls after that can never leave
-    // anything genuinely unwalked. `unwalked > 0` is the one case that would
-    // actually contradict that -- reserved for MAX_STEPS_PER_DATE cutting
-    // the walk off mid-day, or a future change that breaks the invariant.
-    const unwalked = seen.size - visited.size - unreachable.size;
-    if (boundHit || unwalked > 0) {
-      const why = boundHit ? `MAX_STEPS_PER_DATE (${MAX_STEPS_PER_DATE}) reached` : `${MAX_SCROLL_ATTEMPTS_PER_DATE} consecutive fruitless scroll(s)`;
-      console.log(
-        `[date ${query}] ABANDONED: ${why}, ${remaining.length} job(s) still unmatched` +
-          (unwalked > 0 ? `, ${unwalked} seen tile(s) never reached` : '')
-      );
-    } else {
-      // Don't say "walked" for a tile that only ever got recorded
-      // unreachable -- it was explicitly given up on after retries, never
-      // actually opened, and EXHAUSTED must not imply otherwise (the
-      // per-tile UNREACHABLE line above already named it distinctly).
-      const unreachableNote = unreachable.size > 0 ? `, ${unreachable.size} unreachable (see UNREACHABLE above)` : '';
-      console.log(
-        `[date ${query}] EXHAUSTED: ${visited.size} tile(s) opened${unreachableNote} of ${seen.size} seen, ${remaining.length} job(s) still unmatched`
-      );
-    }
-  }
-
-  return { stillUnmatched: remaining };
+  // --- Exhaustive fallback: in-photo-view traversal (see walkPhotoView) --
+  return await walkPhotoView(page, dateFirstTile, remaining, query, queue, dryRun);
 }
 
 /**
