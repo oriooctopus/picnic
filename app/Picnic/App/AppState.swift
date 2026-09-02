@@ -86,6 +86,10 @@ final class AppState: ObservableObject {
                 modelContext.delete(resolution)
             }
             try? modelContext.save()
+            // Simulator UserDefaults survive relaunch() same as hideSorted's key
+            // above — an earlier test's swipe would otherwise pin later tests'
+            // auto-open to a stale month instead of the calendar-latest one.
+            UserDefaults.standard.removeObject(forKey: SortStore.lastSwipedMonthKeyDefaultsKey)
         }
         #else
         isSeeding = false

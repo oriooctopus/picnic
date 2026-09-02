@@ -18,6 +18,16 @@ final class SortStore: ObservableObject {
     private var stateCache: [String: SortState] = [:]
     private var resolvedGroupCache: Set<String> = []
 
+    /// UserDefaults, not SwiftData: this is a single "where was I" pointer,
+    /// not sort-of-record data, so it doesn't need a model/migration. Read by
+    /// AppState on cold launch to reopen the month the user was actually
+    /// swiping in, instead of always the calendar-latest one.
+    static let lastSwipedMonthKeyDefaultsKey = "SortStore.lastSwipedMonthKey"
+
+    var lastSwipedMonthKey: String? {
+        UserDefaults.standard.string(forKey: Self.lastSwipedMonthKeyDefaultsKey)
+    }
+
     init(context: ModelContext) {
         self.context = context
         streakCount = (try? fetchOrCreateStreak())?.count ?? 0
@@ -82,6 +92,7 @@ final class SortStore: ObservableObject {
         }
         try? context.save()
         stateCache[asset.localIdentifier] = state
+        UserDefaults.standard.set(monthKey, forKey: Self.lastSwipedMonthKeyDefaultsKey)
         if state != .unsorted { recordActivity() }
     }
 

@@ -134,19 +134,23 @@ struct MyLifeView: View {
         .background(Color.black.ignoresSafeArea())
     }
 
-    /// Cold launch opens straight into the newest month's deck (monthBuckets
-    /// is already newest-first). Waits for seeding to finish so CI doesn't
-    /// open whichever stock simulator month PhotoKit reported first.
+    /// Cold launch reopens whichever month the user last swiped in (so
+    /// picking up a half-sorted month resumes it), falling back to the
+    /// newest month (monthBuckets is already newest-first) the first time
+    /// there's no swipe history yet. Waits for seeding to finish so CI
+    /// doesn't open whichever stock simulator month PhotoKit reported first.
     private func autoOpenLatestMonthIfNeeded() {
         guard !appState.hasAutoOpenedLatestMonth,
               !appState.skipAutoOpenDeck,
               !appState.isSeeding,
               let latest = appState.monthBuckets.first else { return }
+        let resumeMonth = appState.sortStore.lastSwipedMonthKey
+            .flatMap { key in appState.monthBuckets.first { $0.key == key } } ?? latest
         appState.hasAutoOpenedLatestMonth = true
         // No slide-up: the deck should read as the screen the app opened on.
         var transaction = Transaction()
         transaction.disablesAnimations = true
-        withTransaction(transaction) { selectedMonth = latest }
+        withTransaction(transaction) { selectedMonth = resumeMonth }
     }
 
     private var header: some View {
