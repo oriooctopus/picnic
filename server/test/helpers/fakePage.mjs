@@ -323,6 +323,23 @@ function performTrash(page) {
  * polling for a CHANGE times out and the walk correctly concludes "end of
  * the day's results" rather than hanging or guessing.
  */
+/**
+ * Is there a photo after the currently-open one in this date's order?
+ *
+ * worker.mjs now treats the ABSENCE of the "View next photo" control as the
+ * authoritative end-of-day signal, because a panel-change timeout cannot be
+ * trusted for that: live, ArrowRight intermittently fails to register (the
+ * same date walked 7 photos on one run and 1 on the next), so a timeout means
+ * "did not advance", which is NOT the same as "no more photos".
+ */
+function hasNextPhoto(page) {
+  const label = page.openedAriaLabel;
+  if (label == null) return false;
+  const ordered = fullOrderedTiles(page);
+  const idx = ordered.indexOf(label);
+  return idx !== -1 && idx + 1 < ordered.length;
+}
+
 function advanceToNextTile(page) {
   const label = page.openedAriaLabel;
   if (label == null) return;
@@ -509,6 +526,9 @@ export function createFakePage(config = {}) {
       }
       if (/aria-label="Move to trash"/i.test(selector)) {
         return 1;
+      }
+      if (/aria-label="View next photo"/i.test(selector)) {
+        return hasNextPhoto(page) ? 1 : 0;
       }
       if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) {
         return 0; // no confirmation dialog in the fake UI

@@ -104,6 +104,11 @@ const INFO_PANEL_OPEN_SELECTOR = 'button[aria-label="Close info"]';
 // button elements, and a 'button[...]' selector silently matched nothing —
 // which sent moveToTrash down its keyboard fallback and deleted nothing at
 // all, twice. Match on the aria-label alone. Verified live 2026-09-01.
+// Presence of this control is the authoritative "there is another photo in
+// this date" signal. A panel-change timeout is NOT: ArrowRight intermittently
+// fails to register, and treating that as end-of-day silently abandoned most
+// of a date's photos.
+const NEXT_PHOTO_SELECTOR = '[aria-label="View next photo" i]';
 const TRASH_SELECTOR = '[aria-label="Move to trash" i]';
 // Only meaningful under --slow (see stealthDelay below) -- the pacing
 // between date-group attempts and between jobs, restored for anyone who
@@ -114,6 +119,7 @@ const PACE_MS_MAX = 9000;
 // loop forever. Unmatched jobs for that date attempt just fall through to
 // the next date attempt (or needs_review) once the cap is hit.
 let VERBOSE = false;
+const ARROW_RETRIES = 3;
 export const MAX_STEPS_PER_DATE = 80;
 // Bound the "scroll for more tiles" loop separately from the tile-open bound
 // above -- a date with a huge grid must not scroll forever trying to find
@@ -694,6 +700,25 @@ async function openFirstTile(page, candidateTile) {
  * null rather than throwing (contrast openInfoPanelOnce, whose timeout IS a
  * genuine UI-drift error: the panel not opening AT ALL is never expected).
  */
+/**
+ * Drop focus before sending a photo-view shortcut.
+ *
+ * Measured live 2026-09-01: after opening a photo and its info panel, focus
+ * sits on whichever control was last interacted with -- observed as
+ * BUTTON[Open info] and A[Back to search]. Those swallow ArrowRight, so the
+ * traversal advanced zero photos and every date reported EXHAUSTED after one.
+ * Blurring lets the key reach the document, where Google's own handler picks
+ * it up.
+ */
+async function releaseFocus(page) {
+  await page
+    .evaluate(() => {
+      const el = document.activeElement;
+      if (el && typeof el.blur === 'function' && el !== document.body) el.blur();
+    })
+    .catch(() => {});
+}
+
 async function waitForPanelChange(page, previousText) {
   const deadline = Date.now() + (FAST_DELAYS ? 30 : 8000);
   while (Date.now() < deadline) {
@@ -748,6 +773,13 @@ async function walkPhotoView(page, dateFirstTile, unmatchedJobs, query, queue, d
     steps += 1;
 
     const parsed = parsePanelText(text);
+    if (VERBOSE) {
+      console.log(
+        `  [photo ${steps}] filename=${parsed.filename ?? '(none)'} ` +
+          `dims=${parsed.pixelWidth ?? '?'}x${parsed.pixelHeight ?? '?'}` +
+          (parsed.filename ? '' : ` rawLen=${(text || '').length} raw="${(text || '').slice(0, 100)}"`)
+      );
+    }
     const job = findMatchingJob(remaining, parsed);
     let advancedByDelete = false;
 
@@ -773,9 +805,58 @@ async function walkPhotoView(page, dateFirstTile, unmatchedJobs, query, queue, d
     if (remaining.length === 0) break;
 
     if (!advancedByDelete) {
-      await page.keyboard.press('ArrowRight');
-      const next = await waitForPanelChange(page, text);
-      if (next == null) break; // end of the day's results -- EXHAUSTED below
+      // ArrowRight does not always register: with identical code this date
+      // walked 7 photos on one run and 1 on the next. A timeout therefore
+      // cannot be read as "end of the day" -- that inference is what silently
+      // abandoned most of a date. Retry the press, and treat the absence of
+      // the next-photo control as the AUTHORITATIVE end-of-day signal instead
+      // of a timeout.
+      // Advancing by KEY is unreliable: ArrowRight is intermittently swallowed
+      // even with focus on BODY and the next-photo control present, and some
+      // photos never advanced across three retries. Prefer CLICKING the
+      // next-photo control, picking the genuinely visible match out of its
+      // several same-labelled elements (the same hidden-duplicate trap that
+      // made the trash button silently do nothing). Keep the key as fallback.
+      let next = null;
+      for (let attempt = 0; attempt < ARROW_RETRIES && next == null; attempt++) {
+        const candidates = await page.locator(NEXT_PHOTO_SELECTOR).all();
+        let clicked = false;
+        for (const candidate of candidates) {
+          if (await candidate.isVisible().catch(() => false)) {
+            await candidate.click().catch(() => {});
+            clicked = true;
+            break;
+          }
+        }
+        if (!clicked) {
+          await releaseFocus(page);
+          await page.keyboard.press('ArrowRight');
+        }
+        next = await waitForPanelChange(page, text);
+        if (next != null) break;
+        if (candidates.length === 0) break; // genuinely the last photo of the day
+        if (VERBOSE) {
+          console.log(
+            `  [photo ${steps}] advance did not register via ${clicked ? 'click' : 'ArrowRight'}, retrying (${attempt + 1}/${ARROW_RETRIES})`
+          );
+        }
+      }
+      if (next == null) {
+        // Either genuinely the last photo of the day, or ArrowRight did not
+        // take (e.g. focus sitting somewhere that swallows it). Those look
+        // identical from here, so say so rather than silently calling the
+        // date done.
+        if (VERBOSE) {
+          const focus = await page
+            .evaluate(() => {
+              const a = document.activeElement;
+              return a ? `${a.tagName}[${(a.getAttribute('aria-label') || a.className || '').toString().slice(0, 40)}]` : 'none';
+            })
+            .catch(() => 'unknown');
+          console.log(`  [photo ${steps}] ArrowRight produced no panel change (end of day, or the key was swallowed). activeElement=${focus}`);
+        }
+        break;
+      }
       text = next;
     }
   }
