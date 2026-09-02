@@ -64,9 +64,19 @@
  * gateway, port 9251. Per ~/.claude/rules/playwright.md: any CDP/selector
  * failure is surfaced loudly and the run stops (no silent retry loops).
  *
- * Run: node worker.mjs --dry-run [--cap 50]   (safe: never trashes anything)
- *      node worker.mjs --cap 50               (live: trashes matched photos)
- *      node worker.mjs --cap 50 --slow        (live, with human-scale pacing restored)
+ * Run: node worker.mjs --dry-run [--cap 50]         (safe: never trashes anything)
+ *      node worker.mjs --cap 50                     (live: trashes matched photos)
+ *      node worker.mjs --cap 50 --slow              (live, with human-scale pacing restored)
+ *      node worker.mjs --cap 50 --walk=grid         (live, exhaustive fallback via the grid walk instead of in-photo)
+ *
+ * --walk (2026-09-01): the exhaustive fallback (step 5 above) has TWO
+ * selectable traversal strategies, kept side by side so they can be A/B'd
+ * live rather than assumed -- see walkPhotoView's and walkGrid's own headers
+ * for the full history of why neither has been trusted alone. `photo`
+ * (default) steps through the open photo view with ArrowRight; `grid` opens
+ * each tile directly from the results grid and returns to it between tiles.
+ * Both share the exact same matching/deletion path (confirmAndTrash) and
+ * only ever differ in HOW a tile gets opened and read.
  */
 import { execSync } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -147,19 +157,40 @@ export const MAX_TILE_OPEN_RETRIES = 3;
 // directly-testable function of an explicit boolean.
 let SLOW = false;
 
+// The exhaustive fallback's traversal strategy, once (2026-09-01) rewritten
+// unconditionally to walk INSIDE the photo view via ArrowRight (see module
+// header) -- disproven live on the same day: 64 "advance did not register"
+// events and dates with many photos left mostly unwalked (EXHAUSTED with a
+// handful of tiles visited out of dozens). The ORIGINAL grid-return walk
+// (open a tile, read the panel, back to the grid via closeAnyOpenPhoto, open
+// the next tile) was abandoned earlier for the same reason -- but its actual
+// root cause (closeAnyOpenPhoto pressing Escape twice, leaving the search
+// results) was found and fixed AFTER the grid walk was already deleted, so
+// the fix was never tested against it. Rather than assume either strategy
+// is now reliable, both are kept selectable so they can be A/B'd live --
+// `photo` (walkPhotoView) stays the default so nothing changes unless asked.
 export function parseArgs(argv) {
-  const args = { cap: DEFAULT_CAP, dryRun: false, slow: false };
+  const args = { cap: DEFAULT_CAP, dryRun: false, slow: false, walk: 'photo' };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--cap') args.cap = Number(argv[++i]);
     if (argv[i] === '--dry-run') args.dryRun = true;
     if (argv[i] === '--verbose') VERBOSE = true;
     if (argv[i] === '--slow') args.slow = true;
+    if (argv[i].startsWith('--walk=')) {
+      const value = argv[i].slice('--walk='.length);
+      if (value !== 'photo' && value !== 'grid') {
+        throw new Error(`--walk must be "photo" or "grid", got "${value}"`);
+      }
+      args.walk = value;
+    }
     if (argv[i] === '--help' || argv[i] === '-h') {
       console.log(
-        'Usage: node worker.mjs [--dry-run] [--cap N] [--slow]\n' +
-          '  --dry-run  Search + read candidate info + decide, but never trash. Safe default for a first run.\n' +
-          '  --cap N    Max queued jobs to process this run (default 50).\n' +
-          '  --slow     Restore human-scale pacing (inter-click jitter, dwell, per-character typing). Off by default.'
+        'Usage: node worker.mjs [--dry-run] [--cap N] [--slow] [--walk=photo|grid]\n' +
+          '  --dry-run    Search + read candidate info + decide, but never trash. Safe default for a first run.\n' +
+          '  --cap N      Max queued jobs to process this run (default 50).\n' +
+          '  --slow       Restore human-scale pacing (inter-click jitter, dwell, per-character typing). Off by default.\n' +
+          '  --walk=MODE  Exhaustive-fallback traversal strategy: "photo" (default, steps through the photo\n' +
+          '               view with ArrowRight) or "grid" (opens each tile from the results grid directly).'
       );
       process.exit(0);
     }
@@ -536,6 +567,28 @@ async function scrollResults(page) {
 }
 
 /**
+ * Scroll the results grid back UP -- toward tiles the `grid` walk strategy
+ * already knows about (tracked in its `seen` map) but that scrolled out of
+ * the mounted window as later content loaded. RECOVERED FROM HISTORY
+ * 2026-09-01 (see walkGrid's header) -- only walkGrid uses this; walkPhotoView
+ * never scrolls the grid at all.
+ *
+ * A virtualized grid only ever mounts a WINDOW of tiles. walkGrid's own
+ * pre-scroll (shared with the aria fast path's pre-scroll, see
+ * processDateGroup) can run that window well past an early tile before the
+ * walk even gets to it -- scrolling DOWN can never recover such a tile
+ * (there's nothing further to reveal, and the window only follows the tail
+ * forward as new content loads), so this is the only path back to a tile
+ * that fell behind. A negative wheel delta is Google Photos' own "scroll up"
+ * gesture. Same real-correctness settle wait as scrollResults -- not human
+ * mimicry -- so it stays short and fixed regardless of --slow.
+ */
+async function scrollResultsUp(page) {
+  await page.mouse.wheel(0, -(600 + Math.random() * 400));
+  await sleep(FAST_DELAYS ? 0 : 500);
+}
+
+/**
  * True when `err` (or the page itself) indicates the tab/browser this worker
  * was driving has gone away -- Oliver's real Chrome, which can close a tab
  * out from under this run at any time (he uses the browser, or Chrome closes
@@ -873,7 +926,217 @@ async function walkPhotoView(page, dateFirstTile, unmatchedJobs, query, queue, d
   return { stillUnmatched: remaining };
 }
 
-export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun }) {
+/**
+ * GRID-BASED exhaustive walk -- the `--walk=grid` strategy, RECOVERED FROM
+ * HISTORY 2026-09-01 (commit "Replace the grid-return exhaustive walk with
+ * in-photo-view traversal") rather than rewritten, because it carried
+ * several hard-won fixes worth keeping intact: a cumulative `seen` set
+ * judged on new LABELS (never tile counts, since the grid is virtualized and
+ * a windowed swap can hold the on-screen count flat while the tiles
+ * underneath move on entirely), a scroll budget separate from the aria fast
+ * path's own pre-scroll budget, `visited.add` only after a tile genuinely
+ * opens, and bounded per-tile retries ending in an explicit `unreachable`
+ * record so EXHAUSTED can mean "every seen label was visited or explicitly
+ * given up on" and nothing was silently skipped.
+ *
+ * It was retired in favour of walkPhotoView after topping out at 2/27 tiles
+ * live -- but its actual root cause (closeAnyOpenPhoto pressing Escape
+ * TWICE, which the second time leaves the search results entirely rather
+ * than returning to the grid) was found and fixed in a LATER commit, after
+ * this walk was already deleted, so the fix was never tested against it (see
+ * the module header). closeAnyOpenPhoto below is that already-corrected,
+ * shared function -- not recovered from history -- so this run is the first
+ * time the grid walk has ever run with it.
+ *
+ * Opens each tile directly from the results grid via its identity-scoped
+ * locator (openTile/tileLocatorFor), reads + parses the panel
+ * (openInfoPanelOnce/readPanelText/parsePanelText), confirms + trashes a
+ * match through the same confirmAndTrash all strategies share, then returns
+ * to the grid (closeAnyOpenPhoto) before opening the next tile. Never steps
+ * through the photo view with ArrowRight.
+ *
+ * `seen` is the SAME map processDateGroup's aria-phase pre-scroll already
+ * populated -- both need one memory of "every tile this date has ever shown
+ * us" because the grid is virtualized (collectResultTiles only ever returns
+ * what's currently mounted). `tiles` is the latest on-screen snapshot to
+ * resume scanning from.
+ */
+async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun) {
+  let remaining = unmatchedJobs;
+  if (remaining.length === 0) return { stillUnmatched: remaining };
+
+  const mergeSeen = (freshTiles) => {
+    let addedNew = false;
+    for (const t of freshTiles) {
+      if (!seen.has(t.ariaLabel)) {
+        seen.set(t.ariaLabel, t);
+        addedNew = true;
+      }
+    }
+    return addedNew;
+  };
+
+  const visited = new Set();
+  // Tiles `seen` at some point but which never became actionable after
+  // MAX_TILE_OPEN_RETRIES scroll+retry attempts. Tracked separately from
+  // `visited` (opened and its panel read) so EXHAUSTED can mean what it says
+  // -- every seen label accounted for -- rather than silently dropping a
+  // tile the grid just wouldn't mount.
+  const unreachable = new Set();
+  const openAttempts = new Map(); // ariaLabel -> retry count so far
+  let steps = 0;
+  let boundHit = false;
+  // SEPARATE budget from the aria phase's own pre-scroll loop (processDateGroup)
+  // -- sharing one budget meant the pre-scroll could spend the whole thing
+  // just loading the day, leaving this walk's very first "nothing on-screen"
+  // check to break immediately with most of the date never reached.
+  let walkScrollAttempts = 0;
+  // Which direction the "no on-screen candidate" branch last made real
+  // progress in -- alternated each time rather than always preferring the
+  // same one, so a direction that just paid off doesn't keep re-covering the
+  // same ground forever (a direction that always scrolls up first can walk
+  // all the way back to the very first tile ever seen without ever giving a
+  // down-scroll the chance to reveal the tile that would end the walk).
+  let lastRecoveryDirection = null;
+
+  while (remaining.length > 0) {
+    let tile = tiles.find((t) => !visited.has(t.ariaLabel) && !unreachable.has(t.ariaLabel));
+
+    if (!tile) {
+      // Nothing on-screen is both unvisited and not given up on. Before
+      // concluding the date is exhausted, scroll (both directions -- see
+      // scrollResultsUp's header for why down-only can't recover a tile the
+      // window already moved past) and re-collect.
+      if (walkScrollAttempts >= MAX_SCROLL_ATTEMPTS_PER_DATE) break;
+
+      const tryDirection = async (direction) => {
+        if (direction === 'down') await scrollResults(page);
+        else await scrollResultsUp(page);
+        const fresh = await collectResultTiles(page);
+        // "Progress" covers BOTH senses scrolling can help: a genuinely NEW
+        // label (down's case) OR an already-known label that's simply back
+        // on-screen and still actionable (up's recovery case -- mergeSeen
+        // alone would say "nothing new" for a tile already in `seen`).
+        const newlySeen = mergeSeen(fresh);
+        const recoveredKnown = fresh.some((t) => !visited.has(t.ariaLabel) && !unreachable.has(t.ariaLabel));
+        return { fresh, progressed: newlySeen || recoveredKnown };
+      };
+
+      const preferred = lastRecoveryDirection === 'up' ? 'down' : 'up';
+      let outcome = await tryDirection(preferred);
+      let directionUsed = preferred;
+      if (!outcome.progressed) {
+        directionUsed = preferred === 'up' ? 'down' : 'up';
+        outcome = await tryDirection(directionUsed);
+      }
+
+      tiles = outcome.fresh;
+      if (outcome.progressed) {
+        walkScrollAttempts = 0; // genuine progress -- keep scrolling as long as it keeps paying off
+        lastRecoveryDirection = directionUsed;
+      } else {
+        walkScrollAttempts += 1;
+      }
+      continue; // re-check the freshly-collected/merged set for a candidate
+    }
+
+    if (steps >= MAX_STEPS_PER_DATE) {
+      boundHit = true;
+      break;
+    }
+    steps += 1;
+
+    try {
+      await openTile(page, tile);
+    } catch (err) {
+      if (err instanceof StaleTileError) {
+        // A tile we KNOW exists (on-screen a moment ago) failed to open --
+        // e.g. the grid re-virtualized it out between collecting and
+        // clicking. Retry a bounded number of times, scrolling in between,
+        // before giving up on THIS tile specifically. Deliberately does NOT
+        // add the tile to `visited` on failure -- only a genuine open earns
+        // that (see the comment above `visited.add` below).
+        const attempts = (openAttempts.get(tile.ariaLabel) ?? 0) + 1;
+        openAttempts.set(tile.ariaLabel, attempts);
+        if (attempts >= MAX_TILE_OPEN_RETRIES) {
+          unreachable.add(tile.ariaLabel);
+          console.log(
+            `[date ${query}] UNREACHABLE: "${tile.ariaLabel}" never became actionable after ${attempts} attempt(s) — ` +
+              'giving up on this tile, NOT counting it as walked'
+          );
+        } else {
+          if (VERBOSE) console.log(`  [grid step ${steps}] ${err.message} — retry ${attempts}/${MAX_TILE_OPEN_RETRIES} after scrolling`);
+          await scrollResults(page);
+        }
+        tiles = await collectResultTiles(page);
+        mergeSeen(tiles);
+        continue;
+      }
+      throw err;
+    }
+
+    // Only reaching here means the tile genuinely opened -- only NOW is it
+    // safe to count it visited. Marking it visited any earlier (e.g. before
+    // the openTile attempt) is the exact bug that let a date report
+    // EXHAUSTED while most of it was never actually opened.
+    visited.add(tile.ariaLabel);
+    openAttempts.delete(tile.ariaLabel);
+    walkScrollAttempts = 0; // opening a tile is progress too
+
+    await openInfoPanelOnce(page);
+    const text = await readPanelText(page);
+    const parsed = parsePanelText(text);
+    if (VERBOSE) {
+      console.log(
+        `  [grid step ${steps}] filename=${parsed.filename ?? '(none)'} ` +
+          `dims=${parsed.pixelWidth ?? '?'}x${parsed.pixelHeight ?? '?'}` +
+          (parsed.filename ? '' : ` rawLen=${(text || '').length} raw="${(text || '').slice(0, 120)}"`)
+      );
+    }
+    const job = findMatchingJob(remaining, parsed);
+    if (job) {
+      await confirmAndTrash(page, job, parsed, text, query, queue, dryRun);
+      remaining = remaining.filter((j) => j !== job);
+    }
+
+    if (remaining.length === 0) break;
+
+    // Back to the grid -- the LIVE-CORRECTED closeAnyOpenPhoto (search box
+    // visible AND trash control not visible, at most 2 Escape attempts). See
+    // this function's header for why this is the first time the grid walk
+    // has ever run against the fixed version.
+    await closeAnyOpenPhoto(page);
+    tiles = await collectResultTiles(page); // DOM re-renders on return to the grid
+    mergeSeen(tiles);
+  }
+
+  if (remaining.length > 0) {
+    // EXHAUSTED means every tile this walk ever saw (`seen`) has either been
+    // opened (`visited`) or explicitly given up on (`unreachable`) -- never
+    // silently skipped. `unwalked > 0` is the one case that would actually
+    // contradict that invariant, reserved for MAX_STEPS_PER_DATE cutting the
+    // walk off mid-day.
+    const unwalked = seen.size - visited.size - unreachable.size;
+    if (boundHit || unwalked > 0) {
+      const why = boundHit
+        ? `MAX_STEPS_PER_DATE (${MAX_STEPS_PER_DATE}) reached`
+        : `${MAX_SCROLL_ATTEMPTS_PER_DATE} consecutive fruitless scroll(s)`;
+      console.log(
+        `[date ${query}] ABANDONED: ${why}, ${remaining.length} job(s) still unmatched` +
+          (unwalked > 0 ? `, ${unwalked} seen tile(s) never reached` : '')
+      );
+    } else {
+      const unreachableNote = unreachable.size > 0 ? `, ${unreachable.size} unreachable (see UNREACHABLE above)` : '';
+      console.log(
+        `[date ${query}] EXHAUSTED: ${visited.size} tile(s) opened${unreachableNote} of ${seen.size} seen, ${remaining.length} job(s) still unmatched`
+      );
+    }
+  }
+
+  return { stillUnmatched: remaining };
+}
+
+export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun, walk = 'photo' }) {
   let remaining = [...unmatchedJobs];
   if (remaining.length === 0) return { stillUnmatched: remaining };
 
@@ -889,7 +1152,7 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
     query = await searchByDate(page, dateStr);
     tiles = await collectResultTiles(page);
   }
-  if (VERBOSE) console.log(`[search ${query}] ${tiles.length} visible photo tile(s)`);
+  if (VERBOSE) console.log(`[search ${query}] ${tiles.length} visible photo tile(s), exhaustive-fallback strategy: ${walk}`);
   if (tiles.length === 0) {
     console.log(`[search ${query}] no results after ${EMPTY_SEARCH_RETRIES + 1} attempt(s)`);
     return { stillUnmatched: remaining };
@@ -983,6 +1246,17 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
       await closeAnyOpenPhoto(page);
     }
     if (remaining.length === 0) return { stillUnmatched: remaining };
+    // Only the grid walk needs a fresh on-screen snapshot to resume scanning
+    // from (the DOM re-renders after trashing/closing) -- walkPhotoView below
+    // never uses `tiles` at all, it starts from `dateFirstTile` instead.
+    if (walk === 'grid') tiles = await collectResultTiles(page);
+  }
+
+  if (walk === 'grid') {
+    // seed with everything already known from the aria phase above -- see
+    // walkGrid's header for why it shares this map rather than starting over.
+    mergeSeen(tiles);
+    return await walkGrid(page, seen, tiles, remaining, query, queue, dryRun);
   }
 
   // --- Exhaustive fallback: in-photo-view traversal (see walkPhotoView) --
@@ -994,7 +1268,7 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
  * only for jobs still unmatched after the prior attempt. Anything left
  * unmatched after all three attempts becomes needs_review.
  */
-export async function runDateGroups(page, groupedJobs, queue, { dryRun }) {
+export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = 'photo' }) {
   for (const [dateStr, jobs] of groupedJobs) {
     let unmatched = [...jobs];
     const attemptDates = [dateStr, shiftDateDays(dateStr, -1), shiftDateDays(dateStr, 1)];
@@ -1002,7 +1276,7 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun }) {
     try {
       for (const attemptDate of attemptDates) {
         if (unmatched.length === 0) break;
-        const { stillUnmatched } = await processDateGroup(page, attemptDate, unmatched, queue, { dryRun });
+        const { stillUnmatched } = await processDateGroup(page, attemptDate, unmatched, queue, { dryRun, walk });
         unmatched = stillUnmatched;
         if (unmatched.length > 0) await stealthDelay(PACE_MS_MIN, PACE_MS_MAX); // pure mimicry, off unless --slow
       }
@@ -1044,7 +1318,7 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun }) {
   }
 }
 
-export async function runWorker({ cap = DEFAULT_CAP, dryRun = false } = {}) {
+export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'photo' } = {}) {
   const queue = new JobQueue(QUEUE_PATH);
   const jobs = queue.loadAll().filter((j) => j.status === 'queued').slice(0, cap);
 
@@ -1090,7 +1364,7 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false } = {}) {
     const context = browser.contexts()[0] ?? (await browser.newContext());
     page = await context.newPage();
     await openPhotosHome(page);
-    await runDateGroups(page, groups, queue, { dryRun });
+    await runDateGroups(page, groups, queue, { dryRun, walk });
   } catch (err) {
     loud(`BLOCKER: worker error: ${err.stack || err}`);
     process.exitCode = 1;

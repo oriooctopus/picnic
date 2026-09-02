@@ -957,3 +957,210 @@ test('the info panel is opened ONCE per date, not once per photo', async () => {
     assert.equal(iPresses, 1, `expected exactly one "i" press across all ${PHOTO_COUNT} photos walked, got ${iPresses}`);
   });
 });
+
+// -- --walk=<photo|grid> A/B (2026-09-01) ------------------------------------
+//
+// Both the in-photo-view walk (walkPhotoView, default) and the recovered
+// grid-return walk (walkGrid, RECOVERED FROM HISTORY -- see worker.mjs's
+// walkGrid header for why it's a recovery, not a rewrite, and what root
+// cause its old failure actually traced to) share the exact same
+// matching/deletion path (confirmAndTrash) and only differ in HOW a tile
+// gets opened and read. These tests prove that sameness holds, and that the
+// `walk` option genuinely selects between the two rather than being ignored.
+
+test('both --walk strategies reach a job whose photo is LAST on the date; the default (no walk option) behaves as --walk=photo', async () => {
+  const TILE_COUNT = 12;
+  const buildFixture = () => {
+    const labels = Array.from({ length: TILE_COUNT }, (_, i) => `Photo - Portrait - tile-${i}`);
+    const panelTextByLabel = { 'August 5, 2026': {} };
+    for (let i = 0; i < TILE_COUNT - 1; i++) {
+      panelTextByLabel['August 5, 2026'][labels[i]] = panelBlock(`IMG_920${i}.HEIC`, 1000, 1000);
+    }
+    panelTextByLabel['August 5, 2026'][labels[TILE_COUNT - 1]] = IMG_1433_BLOCK; // the match, LAST tile
+    return { labels, panelTextByLabel };
+  };
+
+  // --walk=photo: exactly one grid tile-click (tile 0), the rest via ArrowRight.
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const { labels, panelTextByLabel } = buildFixture();
+    const page = createFakePage({ searchResults: { 'August 5, 2026': labels.map((ariaLabel) => ({ ariaLabel })) }, panelTextByLabel });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false, walk: 'photo' });
+
+    assert.equal(stillUnmatched.length, 0, '--walk=photo must still reach the last tile');
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.equal(page.log.filter((l) => l.startsWith('tile-click:')).length, 1, '--walk=photo grid-clicks only the first tile');
+  });
+
+  // --walk=grid: every tile gets its own grid tile-click, zero ArrowRight presses.
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const { labels, panelTextByLabel } = buildFixture();
+    const page = createFakePage({ searchResults: { 'August 5, 2026': labels.map((ariaLabel) => ({ ariaLabel })) }, panelTextByLabel });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false, walk: 'grid' });
+
+    assert.equal(stillUnmatched.length, 0, '--walk=grid must still reach the last tile');
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.equal(page.log.filter((l) => l.startsWith('tile-click:')).length, TILE_COUNT, '--walk=grid opens each tile individually from the grid');
+    assert.equal(page.log.filter((l) => l === 'key:ArrowRight').length, 0, '--walk=grid never presses ArrowRight');
+  });
+
+  // No `walk` option at all: must behave exactly like --walk=photo (the
+  // documented default), never like --walk=grid.
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const { labels, panelTextByLabel } = buildFixture();
+    const page = createFakePage({ searchResults: { 'August 5, 2026': labels.map((ariaLabel) => ({ ariaLabel })) }, panelTextByLabel });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'default (no walk option) must still reach the last tile');
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.equal(page.log.filter((l) => l.startsWith('tile-click:')).length, 1, 'default must grid-click only the first tile, i.e. behave as --walk=photo');
+  });
+
+  // parseArgs itself: no --walk flag defaults to 'photo'.
+  assert.equal(parseArgs([]).walk, 'photo', 'parseArgs must default walk to "photo" when --walk is omitted');
+  assert.equal(parseArgs(['--walk=grid']).walk, 'grid');
+  assert.equal(parseArgs(['--walk=photo']).walk, 'photo');
+});
+
+// REGRESSION TEST for the exact bug walkGrid's cumulative `seen` set exists
+// to prevent: a VIRTUALIZED grid (config.windowSize) only ever mounts a
+// WINDOW of tiles, so the on-screen tile COUNT can stay perfectly flat across
+// a scroll even though the window has moved on to an entirely different set
+// of labels underneath. Judging "did that scroll find anything new" by
+// comparing on-screen COUNTS (rather than the label SET, as `seen`/mergeSeen
+// do) is blind to this and made a real 27-tile date report EXHAUSTED after
+// visiting only 2-3 tiles live. Proven by mutation in the report: replacing
+// walkGrid's label-set `mergeSeen`/`recoveredKnown` progress check with a
+// tile-count comparison reproduces exactly that -- the walk's "no on-screen
+// candidate" branch reads a flat count as "no progress" and gives up
+// scrolling long before every tile is reached.
+//
+// No job matches ANY tile on this date -- deliberately, so the walk cannot
+// stop early once it happens to find a match (as in the "reach the last
+// tile" tests above) and is forced to genuinely exhaust every tile the date
+// has, which is the only way to prove ALL of them were walked rather than
+// just enough to satisfy the jobs. WINDOW_SIZE=4 against 7 total tiles is
+// chosen so a SINGLE up-scroll from the tail window (started at index 3)
+// reaches all the way back to index 0 -- proving the recovery path (not just
+// the initial downward pre-scroll) also participates in exhausting the date.
+test('the grid strategy walks EVERY tile on a virtualized date: the on-screen window moves but the count stays flat', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue({ ...IMG_1433_JOB, filename: 'IMG_NOMATCH.HEIC' });
+    const WINDOW_SIZE = 4;
+    const REVEAL_BATCHES = 6; // 1 initial (searchResults) + 6 reveals = 7 total tiles
+    const labels = Array.from({ length: REVEAL_BATCHES + 1 }, (_, i) => `Photo - Portrait - tile-${i}`);
+    const panelTextByLabel = { 'August 5, 2026': {} };
+    for (const label of labels) {
+      panelTextByLabel['August 5, 2026'][label] = panelBlock(`${label}.HEIC`, 1000, 1000); // never matches IMG_NOMATCH.HEIC
+    }
+
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [{ ariaLabel: labels[0] }] },
+      scrollReveals: { 'August 5, 2026': labels.slice(1).map((l) => [{ ariaLabel: l }]) },
+      panelTextByLabel,
+      windowSize: WINDOW_SIZE, // on-screen count is ALWAYS exactly 4, however far the window has moved
+    });
+
+    const logs = await captureLogs(() => processDateGroup(page, '2026-08-05', [job], queue, { dryRun: true, walk: 'grid' }));
+
+    // Every genuinely distinct tile the date ever had must be opened exactly
+    // once -- the strongest statement of "walked every tile", not just
+    // "found the one that mattered" (there is nothing to find here).
+    const uniqueTileClicks = new Set(page.log.filter((l) => l.startsWith('tile-click:')).map((l) => l.slice('tile-click:'.length)));
+    assert.equal(
+      uniqueTileClicks.size,
+      labels.length,
+      `expected all ${labels.length} distinct tiles opened, got ${uniqueTileClicks.size}: ${JSON.stringify([...uniqueTileClicks])}`
+    );
+    // EXHAUSTED, not ABANDONED: every seen tile really was reached, so the
+    // walk must say so plainly rather than reporting a bound cutting it off.
+    assert.ok(
+      logs.some((l) => l.includes('EXHAUSTED') && !l.includes('ABANDONED') && !l.includes('never reached')),
+      `expected a clean EXHAUSTED (no ABANDONED / never-reached tiles) log line, got: ${JSON.stringify(logs)}`
+    );
+  });
+});
+
+// REGRESSION TEST: closeAnyOpenPhoto is documented (worker.mjs, and the
+// measured live sequence in the task brief) to need EXACTLY one Escape per
+// tile-to-tile transition -- a second Escape leaves the search results
+// entirely rather than returning to the grid. walkGrid calls it once between
+// every pair of consecutive (non-final) tiles it opens; this asserts the
+// actual count of Escape presses, not just that the walk eventually succeeds
+// (a walk that pressed Escape twice per transition could still "work" against
+// this fake, since fakePage's atGrid signal is idempotent under repeats).
+test('the grid strategy presses Escape exactly once per tile-to-tile transition', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const TILE_COUNT = 5;
+    const labels = Array.from({ length: TILE_COUNT }, (_, i) => `Photo - Portrait - tile-${i}`);
+    const panelTextByLabel = { 'August 5, 2026': {} };
+    for (let i = 0; i < TILE_COUNT - 1; i++) {
+      panelTextByLabel['August 5, 2026'][labels[i]] = panelBlock(`IMG_940${i}.HEIC`, 1000, 1000);
+    }
+    panelTextByLabel['August 5, 2026'][labels[TILE_COUNT - 1]] = IMG_1433_BLOCK; // match, last tile
+
+    const page = createFakePage({ searchResults: { 'August 5, 2026': labels.map((ariaLabel) => ({ ariaLabel })) }, panelTextByLabel });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false, walk: 'grid' });
+
+    assert.equal(stillUnmatched.length, 0);
+    // TILE_COUNT tiles walked in order = TILE_COUNT - 1 transitions between
+    // them (the last, matching tile is trashed and the walk stops -- it never
+    // closes back to the grid afterward, so it does NOT close-and-reopen).
+    const escapePresses = page.log.filter((l) => l === 'key:Escape').length;
+    assert.equal(escapePresses, TILE_COUNT - 1, `expected exactly ${TILE_COUNT - 1} Escape presses (one per transition), got ${escapePresses}`);
+    assert.equal(page.escapePresses, TILE_COUNT - 1, 'fakePage\'s own Escape counter must agree');
+  });
+});
+
+// Unconfirmed trash -> needs_review, and filename mismatch -> never trashed,
+// must hold identically under BOTH strategies -- they share confirmAndTrash
+// (the only place that ever calls moveToTrash / authorises a trash), so
+// safety cannot depend on which strategy opened the tile.
+for (const walk of ['photo', 'grid']) {
+  test(`[--walk=${walk}] a trash action that does not take is recorded as needs_review, never trashed`, async () => {
+    await withTempQueue(async (queue) => {
+      const { job } = queue.enqueue(IMG_1433_JOB);
+      const label = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
+      const page = createFakePage({
+        searchResults: { 'August 5, 2026': [{ ariaLabel: label }] },
+        panelTextByLabel: { 'August 5, 2026': { [label]: IMG_1433_BLOCK } },
+        infoButtonFound: true,
+        trashButtonVisible: false,
+        swallowTrashShortcut: true,
+      });
+
+      await processDateGroup(page, '2026-08-05', [queue.getById(job.id)], queue, { dryRun: false, walk });
+
+      const after = queue.getById(job.id);
+      assert.equal(after.status, 'needs_review', `[--walk=${walk}] unconfirmed trash must not be recorded as trashed`);
+      assert.match(after.error ?? '', /not confirmed/i);
+    });
+  });
+
+  test(`[--walk=${walk}] filename mismatch never reaches the trash path, even with matching dimensions`, async () => {
+    await withTempQueue(async (queue) => {
+      const { job } = queue.enqueue(IMG_1433_JOB); // expects IMG_1433.HEIC
+      const label = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
+      const page = createFakePage({
+        searchResults: { 'August 5, 2026': [{ ariaLabel: label }] },
+        panelTextByLabel: {
+          // Same dimensions as the job, but a different filename.
+          'August 5, 2026': { [label]: panelBlock('IMG_0001.HEIC', 2316, 3088) },
+        },
+      });
+
+      const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false, walk });
+
+      assert.equal(stillUnmatched.length, 1, `[--walk=${walk}] filename mismatch must never match`);
+      assert.ok(!page.log.some((l) => l.includes('Move to trash')));
+      assert.equal(queue.getById(job.id).status, 'queued', `[--walk=${walk}] job untouched by processDateGroup itself`);
+    });
+  });
+}
