@@ -476,6 +476,44 @@ test('a page that reports closed mid-walk ends the run cleanly and leaves untouc
   });
 });
 
+test('runDateGroups: a real (non-page-closed) throw mid-date must not overwrite a job the run ALREADY trashed', async () => {
+  await withTempQueue(async (queue) => {
+    // Two jobs in ONE date group. job1's tile opens and matches cleanly and
+    // gets trashed; job2's tile has no panelTextByLabel entry at all, so
+    // openInfoPanelOnce (called per-tile under walk='grid') spins past its
+    // deadline and throws "info panel never produced dimensions text" --
+    // a real mid-group failure, not the page-closed path exercised above.
+    const { job: job1 } = queue.enqueue(IMG_1433_JOB);
+    const { job: job2 } = queue.enqueue(IMG_1441_JOB);
+    const groups = groupJobsByDate([job1, job2]);
+
+    const label1 = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
+    const label2 = 'Photo - Portrait - Aug 5, 2026, 7:31:07 PM';
+    const page = createFakePage({
+      searchResults: {
+        'August 5, 2026': [{ ariaLabel: label1 }, { ariaLabel: label2 }],
+      },
+      panelTextByLabel: {
+        'August 5, 2026': { [label1]: IMG_1433_BLOCK }, // label2 deliberately has no entry
+      },
+    });
+
+    await assert.rejects(
+      () => runDateGroups(page, groups, queue, { dryRun: false, walk: 'grid' }),
+      /info panel never produced dimensions text/
+    );
+
+    // The bug: runDateGroups' catch block used to mark every job in the
+    // in-memory `unmatched` array as 'error', including job1 -- which
+    // processDateGroup had ALREADY resolved to 'trashed' before the throw.
+    // That silently rewrote a genuine deletion record into a false failure.
+    // The fix reads each job's CURRENT persisted status back from the queue
+    // and only marks it 'error' if it is still 'queued'.
+    assert.equal(queue.getById(job1.id).status, 'trashed', 'a job already trashed this run must keep that status, never be overwritten to error');
+    assert.equal(queue.getById(job2.id).status, 'error', 'the job that was genuinely never resolved must still be marked error');
+  });
+});
+
 test('isPageClosedError recognizes both page.isClosed() and the Playwright closed-target error text', () => {
   const closedPage = createFakePage();
   closedPage._closed = true;

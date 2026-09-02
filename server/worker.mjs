@@ -1295,7 +1295,21 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = '
         return; // end cleanly, no rethrow
       }
       if (!dryRun) {
+        // `unmatched` is a snapshot from the LAST attemptDate iteration that
+        // returned normally -- processDateGroup only reassigns it on a clean
+        // return (see the loop above). When it throws partway through a date
+        // group, `unmatched` still lists jobs the group had already resolved
+        // to trashed/needs_review before the throw (processDateGroup updates
+        // the queue as it goes, job by job). Blindly marking everything in
+        // `unmatched` as 'error' here rewrote genuine 'trashed' records back
+        // to 'error' -- confirmed live 2026-09-02 (worker-runs log for that
+        // date: two photos logged [trashed] ended the run recorded as
+        // error). Read each job's CURRENT persisted status back from the
+        // queue instead and only touch it if it is still 'queued' -- exactly
+        // what the isPageClosedError branch above already does, for the same
+        // reason.
         for (const job of unmatched) {
+          if (queue.getById(job.id)?.status !== 'queued') continue;
           queue.update(job.id, { status: 'error', error: String(err.message || err), attempts: job.attempts + 1 });
         }
       }
