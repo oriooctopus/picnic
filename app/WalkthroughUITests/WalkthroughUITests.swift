@@ -2096,6 +2096,59 @@ final class WalkthroughUITests: XCTestCase {
                        "Returning to the My Life tab re-opened the deck — auto-open must fire once per launch")
     }
 
+    /// A launch should reopen whichever month the user last swiped in, not
+    /// always the calendar-latest one test37 above covers — so coming back
+    /// to a half-sorted old month resumes it instead of dropping the user
+    /// on the newest month every time. `--reset-sort-state` clears both the
+    /// SwiftData sort marks and the UserDefaults "last swiped month"
+    /// pointer (see AppState's `--reset-sort-state` block), so this test
+    /// controls that pointer itself rather than inheriting whatever an
+    /// earlier test in this run left behind. Launches WITHOUT
+    /// --skip-auto-open-deck, same as test37 — this is the real launch path.
+    func test41LaunchReopensLastSwipedMonth() throws {
+        app.terminate()
+        app.launchArguments = ["--seed-library", "--reset-sort-state"]
+        app.launch()
+        dismissPhotoPermissionSheetIfPresent()
+
+        // No swipe history yet, so this should fall back to latest, same as
+        // test37 — dismiss it to get back to the grid.
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 120), "Launch should open a deck without any grid tap")
+        XCTAssertTrue(app.staticTexts["March 2026"].waitForExistence(timeout: 5),
+                      "With no swipe history yet, launch should fall back to the newest month")
+        app.buttons["deck.commit"].tap()
+        XCTAssertTrue(app.staticTexts["My life"].waitForExistence(timeout: 10))
+
+        // Navigate to a much older month and swipe on its first card.
+        let mayMonth = app.descendants(matching: .any)["monthCard.2025-05"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(mayMonth, initialTimeout: 30),
+                      "Seeded month 2025-05 should appear in the grid")
+        mayMonth.tap()
+        let mayCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(mayCard.waitForExistence(timeout: 20), "May's deck should open")
+        XCTAssertTrue(app.staticTexts["May 2025"].waitForExistence(timeout: 5))
+
+        mayCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: mayCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        // Swiping calls SortStore.setState, which stamps May's month key as
+        // "last swiped" — give the write a beat to land before killing the
+        // process.
+        Thread.sleep(forTimeInterval: 0.5)
+
+        app.terminate()
+        app.launchArguments = ["--seed-library"]
+        app.launch()
+        dismissPhotoPermissionSheetIfPresent()
+
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 120), "Relaunch should still auto-open a deck")
+        XCTAssertTrue(app.staticTexts["May 2025"].waitForExistence(timeout: 5),
+                      "Relaunch should reopen May 2025 — the month actually swiped in — not March 2026 (the calendar-latest month)")
+    }
+
     /// Regression test for the bug this session fixes: ComparePhotoCardView
     /// drew its photo with `.aspectRatio(contentMode: .fill)`, which crops a
     /// source photo to fill the box instead of shrinking it to fit inside —
