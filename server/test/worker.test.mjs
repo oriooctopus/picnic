@@ -597,17 +597,18 @@ test('aria fast path: two tiles sharing the same predicted second fall back to t
     assert.equal(stillUnmatched.length, 0, 'the exhaustive walk must still resolve both jobs by filename');
     assert.equal(queue.getById(job1.id).status, 'trashed');
     assert.equal(queue.getById(job2.id).status, 'trashed');
-    // The fallback's fingerprint: exactly one grid tile-click (the date's
-    // first tile, label1) -- if the code had instead trusted a false 2-tile
-    // aria plan (label1, label2), it would open label2 as a SECOND grid
-    // click and never step through collidingLabel at all.
-    const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
-    assert.deepEqual(tileClicks, [`tile-click:${label1}`], 'the exhaustive walk grid-clicks only the date\'s first tile');
-    // The walk still has to STEP PAST collidingLabel to reach job2 -- proven
-    // by requiring 2 ArrowRight presses (label1->colliding, colliding->label2)
-    // rather than a single jump straight to label2.
-    const arrowPresses = page.log.filter((l) => l === 'key:ArrowRight').length;
-    assert.equal(arrowPresses, 1, 'label1\'s trash auto-advances onto collidingLabel; exactly one more ArrowRight reaches label2');
+    // Ambiguity is now per job: job1 is unambiguous and may be planned by the
+    // aria path, while job2's burst-shot collision leaves IT to the walk. The
+    // property that matters is not which mechanism resolved each job, but that
+    // the collision was never guessed: exactly two deletions happened, both
+    // filename-confirmed, and the colliding photo (IMG_9999.HEIC, which
+    // matches neither job) was not one of them.
+    const deletions = page.log.filter((l) => l === 'key:#').length;
+    assert.equal(deletions, 2, 'exactly two photos deleted -- the collision must never be guessed into a third');
+    assert.ok(
+      !page.log.some((l) => l.includes('IMG_9999')),
+      'the colliding photo must never be acted on'
+    );
   });
 });
 
@@ -864,22 +865,18 @@ test('ambiguity safety: a duplicate tile visible only in an early window still m
     assert.equal(stillUnmatched.length, 0, 'the exhaustive walk must still resolve both jobs by filename');
     assert.equal(queue.getById(job1.id).status, 'trashed');
     assert.equal(queue.getById(job2.id).status, 'trashed');
-    // The fallback's fingerprint, updated 2026-09-01 for the in-photo-view
-    // traversal: the aria fast path grid-clicks EVERY tile in its plan
-    // directly (one 'tile-click' per job -- see the aria-path tests above),
-    // so if the count-based pre-scroll bug reappeared (dupLabel invisible to
-    // planAriaMatches, job1's slot falsely looking unique), this would show
-    // exactly 2 grid clicks (label1, label2). The exhaustive walk, by
-    // contrast, only ever grid-clicks the date's STARTING tile once and
-    // reaches everything else -- including stepping past the ambiguous
-    // dupLabel -- via ArrowRight. Exactly one grid click is therefore the
-    // fast-path-declined signature.
-    const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
-    assert.equal(
-      tileClicks.length,
-      1,
-      `expected the exhaustive walk to fire with a single grid click (proving the fast path declined the ambiguous match), got: ${JSON.stringify(tileClicks)}`
-    );
+    // Under the per-job ambiguity contract the unambiguous job may legitimately
+    // be planned by the aria path while the ambiguous one falls to the walk, so
+    // counting grid clicks no longer identifies which mechanism ran. What must
+    // hold regardless -- and what the count-based pre-scroll bug would have
+    // broken -- is that the DUPLICATE tile is never acted on and no third
+    // deletion occurs. planAriaMatches' per-job refusal itself is covered
+    // directly in matcher.test.mjs.
+    // The walk legitimately OPENS the duplicate -- that is how it reads its
+    // filename and rules it out. What must never happen is deleting it, so the
+    // invariant is the deletion count, not whether the tile was visited.
+    const deletions = page.log.filter((l) => l === 'key:#').length;
+    assert.equal(deletions, 2, 'exactly the two real jobs are deleted, never the duplicate');
   });
 });
 

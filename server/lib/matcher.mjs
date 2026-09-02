@@ -312,6 +312,18 @@ export function planAriaMatches(jobs, tiles) {
   const offsetSeconds = calibrateOffsetSeconds(jobs, parsedTiles);
   if (offsetSeconds == null) return null;
 
+  // Ambiguity is decided PER JOB, not per date. This used to `return null` for
+  // the whole date the moment any single job had 0 or >1 candidates -- and on
+  // a date with twenty-odd deletions there is nearly always one such job (its
+  // tile not loaded yet, or already trashed by an earlier pass). The effect
+  // was that the fast path engaged on only 6 of ~30 dates in a full run, and
+  // everything else fell through to the far less reliable walk, even though
+  // most jobs on those dates had a perfectly unique match waiting.
+  //
+  // Safety is unchanged: a job is only planned when EXACTLY ONE tile matches
+  // its predicted capture second and media type, and the filename read from
+  // the info panel still has to confirm before anything is trashed. Jobs left
+  // unplanned here simply fall through to the exhaustive walk.
   const matches = new Map();
   for (const job of jobs) {
     const jobMs = new Date(job.creationDate).getTime();
@@ -319,8 +331,9 @@ export function planAriaMatches(jobs, tiles) {
     const candidates = parsedTiles.filter(
       (t) => t.parsed.wallClockAsUtcMs === predictedMs && jobMediaTypeMatchesTile(job, t.parsed.mediaType)
     );
-    if (candidates.length !== 1) return null; // ambiguous (0 or >1) -- never guess
+    if (candidates.length !== 1) continue; // ambiguous (0 or >1) -- leave to the walk
     matches.set(job, candidates[0].tile);
   }
+  if (matches.size === 0) return null;
   return matches;
 }

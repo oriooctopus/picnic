@@ -257,16 +257,36 @@ test('planAriaMatches: a video job never matches a Photo tile at the same predic
   const wrongKindTile = 'Photo - Landscape - Aug 5, 2026, 9:00:00 PM';
   const tiles = [{ ariaLabel: ARIA_TILE_J1 }, { ariaLabel: ARIA_TILE_J2 }, { ariaLabel: wrongKindTile }, { ariaLabel: ARIA_DECOY }];
   const plan = planAriaMatches(ARIA_JOBS, tiles);
-  // job3 (video) has zero valid candidates now (the only tile at its second
-  // is a Photo) -- ambiguous for that job, so the WHOLE date falls back.
-  assert.equal(plan, null);
+  // job3 (video) has zero valid candidates now (the only tile at its second is
+  // a Photo). Under the per-job contract that excludes job3 alone -- the other
+  // jobs still get planned -- but the crucial property is unchanged: the video
+  // job must NEVER be paired with the Photo tile.
+  assert.ok(plan, 'the photo jobs are still planned');
+  assert.ok(!plan.has(ARIA_JOBS[2]), 'the video job must not be matched to a Photo tile');
+  for (const tile of plan.values()) {
+    assert.notEqual(tile.ariaLabel, wrongKindTile, 'the wrong-media-type tile must never be planned for anything');
+  }
 });
 
-test('planAriaMatches: two tiles sharing the same second trigger the exhaustive fallback, never a guess', () => {
+test('planAriaMatches: a tile collision excludes THAT job only, and never guesses between the candidates', () => {
+  // Ambiguity is per job, not per date: refusing the whole date meant one
+  // burst-shot collision discarded every confident match alongside it, which
+  // is why the fast path engaged on only 6 of ~30 dates in a live run.
   const collidingTile = 'Photo - Landscape - Aug 5, 2026, 7:31:07 PM'; // same second + mediaType as ARIA_TILE_J2
   const tiles = [{ ariaLabel: ARIA_TILE_J1 }, { ariaLabel: ARIA_TILE_J2 }, { ariaLabel: collidingTile }];
   const plan = planAriaMatches([ARIA_JOBS[0], ARIA_JOBS[1]], tiles);
-  assert.equal(plan, null, 'a burst-shot collision on job2\'s predicted second must refuse the whole date, not guess');
+
+  assert.ok(plan, 'the unambiguous job must still be planned');
+  assert.ok(!plan.has(ARIA_JOBS[1]), 'the colliding job must be left to the exhaustive walk, never guessed');
+  assert.equal(plan.get(ARIA_JOBS[0])?.ariaLabel, ARIA_TILE_J1, 'the unambiguous job keeps its exact tile');
+  assert.equal(plan.size, 1, 'exactly the unambiguous job is planned');
+});
+
+test('planAriaMatches: returns null when EVERY job is ambiguous, so the date falls to the walk', () => {
+  const collidingTile = 'Photo - Landscape - Aug 5, 2026, 7:31:07 PM';
+  const tiles = [{ ariaLabel: ARIA_TILE_J2 }, { ariaLabel: collidingTile }];
+  const plan = planAriaMatches([ARIA_JOBS[1]], tiles);
+  assert.equal(plan, null, 'nothing confidently matched means no plan at all');
 });
 
 test('planAriaMatches: refuses (null) when the offset never calibrates', () => {
