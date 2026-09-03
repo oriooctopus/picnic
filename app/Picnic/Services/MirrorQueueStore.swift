@@ -16,7 +16,13 @@ final class MirrorQueueStore: ObservableObject {
         refreshCount()
     }
 
-    func enqueue(assets: [PHAsset], filenames: [String: String]) {
+    // thumbnails is keyed the same way filenames is (localIdentifier →
+    // value) and is likewise gathered by the caller before the asset was
+    // deleted — this method itself only ever sees already-deleted assets, so
+    // it has no way to produce a thumbnail on its own. A missing entry (nil
+    // via subscript below) means PhotoKit couldn't produce one; that's a
+    // normal, expected outcome, not something to retry or flag here.
+    func enqueue(assets: [PHAsset], filenames: [String: String], thumbnails: [String: String]) {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withTimeZone]
 
@@ -30,7 +36,8 @@ final class MirrorQueueStore: ObservableObject {
                 pixelHeight: asset.pixelHeight,
                 mediaType: asset.mediaType == .video ? "video" : "image",
                 isLivePhoto: asset.mediaSubtypes.contains(.photoLive),
-                status: "pending"
+                status: "pending",
+                thumbnailBase64: thumbnails[asset.localIdentifier]
             )
             context.insert(job)
         }

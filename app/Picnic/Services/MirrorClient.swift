@@ -19,7 +19,7 @@ enum MirrorClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
 
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "filename": job.filename,
             "creationDate": job.creationDateISO8601,
             "pixelWidth": job.pixelWidth,
@@ -27,6 +27,12 @@ enum MirrorClient {
             "mediaType": job.mediaType,
             "isLivePhoto": job.isLivePhoto,
         ]
+        // Key omitted entirely (not sent as null) when there's no thumbnail —
+        // a job PhotoKit couldn't produce one for is still a fully valid job,
+        // and the server treats the field as optional.
+        if let thumbnailBase64 = job.thumbnailBase64 {
+            payload["thumbnailBase64"] = thumbnailBase64
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
         let (_, response) = try await URLSession.shared.data(for: request)

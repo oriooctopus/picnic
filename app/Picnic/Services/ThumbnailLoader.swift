@@ -59,6 +59,75 @@ enum ThumbnailLoader {
         }
     }
 
+    /// Best-effort, LOCAL-ONLY capture used only for the pre-delete mirror-
+    /// queue thumbnail (DeckViewModel.commitDeletions). Deliberately does NOT
+    /// call the `thumbnail(for:targetSize:)` above and reuse its options:
+    /// that method's `isNetworkAccessAllowed = true` is the right call for
+    /// rendering a card the user is actively looking at, but wrong here.
+    /// commitDeletions() calls this for every asset in the batch, in
+    /// parallel (see `deletionThumbnails(for:targetSize:)` below), BEFORE
+    /// the actual PhotoKit delete, and holds `isCommitting` (blocking the
+    /// commit UI) for the whole call. On a library with "Optimize iPhone
+    /// Storage" on, allowing network access here would let PHImageManager
+    /// fire real iCloud downloads with no timeout — a single stalled fetch
+    /// would hang the entire commit indefinitely, meaning the user's actual
+    /// deletion (the feature) never happens because a debugging aid (the
+    /// thumbnail) is stuck waiting on iCloud. `isNetworkAccessAllowed =
+    /// false` + `.fastFormat` means this can only ever return what PhotoKit
+    /// already has on-disk, immediately — never worth "fixing" back to the
+    /// shared method, which would silently reintroduce that hang. A cache
+    /// miss just yields nil, which callers already treat as "ship no
+    /// thumbnail for this asset," never a reason to block or retry.
+    /// In practice this usually succeeds anyway: by the time the user can
+    /// commit a delete, DeckView has already rendered this exact asset as a
+    /// card, so PhotoKit has it cached locally.
+    static func deletionThumbnail(for asset: PHAsset, targetSize: CGSize) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            let options = PHImageRequestOptions()
+            options.deliveryMode = .fastFormat
+            options.isNetworkAccessAllowed = false
+            options.resizeMode = .fast
+            var didResume = false
+            PHImageManager.default().requestImage(
+                for: asset, targetSize: targetSize, contentMode: .aspectFill, options: options
+            ) { image, _ in
+                guard !didResume else { return }
+                didResume = true
+                continuation.resume(returning: image)
+            }
+        }
+    }
+
+    /// Concurrent batch wrapper around `deletionThumbnail(for:targetSize:)`,
+    /// returning base64-encoded JPEGs keyed by localIdentifier (skipping any
+    /// asset that yielded nil or failed to encode). Runs the fetches as a
+    /// `withTaskGroup` rather than a sequential loop so a batch of N pending
+    /// deletes costs roughly one PhotoKit round trip, not N of them, while
+    /// commitDeletions() has `isCommitting` blocking the UI. `ThumbnailLoader`
+    /// carries no actor isolation of its own (it's a plain enum of static
+    /// funcs), so this can build and await its task group freely even though
+    /// its only caller, DeckViewModel.commitDeletions(), is @MainActor —
+    /// gathering the whole batch happens off the main actor, and only the
+    /// final `[String: String]` crosses back into DeckViewModel's isolation.
+    static func deletionThumbnails(for assets: [PHAsset], targetSize: CGSize) async -> [String: String] {
+        await withTaskGroup(of: (String, String?).self) { group in
+            for asset in assets {
+                group.addTask {
+                    guard let image = await deletionThumbnail(for: asset, targetSize: targetSize),
+                          let data = image.jpegData(compressionQuality: 0.7) else {
+                        return (asset.localIdentifier, nil)
+                    }
+                    return (asset.localIdentifier, data.base64EncodedString())
+                }
+            }
+            var result: [String: String] = [:]
+            for await (id, base64) in group {
+                if let base64 { result[id] = base64 }
+            }
+            return result
+        }
+    }
+
     static func fullImage(for asset: PHAsset, targetSize: CGSize) async -> UIImage? {
         #if DEBUG
         if slowImageLoadsEnabled {

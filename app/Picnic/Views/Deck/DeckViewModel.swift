@@ -371,8 +371,31 @@ final class DeckViewModel: ObservableObject {
             let filenames = Dictionary(
                 uniqueKeysWithValues: toDelete.map { ($0.localIdentifier, photoLibrary.originalFilename(for: $0)) }
             )
+            // MUST happen before deleteAssets() below, same reason filenames
+            // is gathered above rather than after: once PHAssetChangeRequest
+            // .deleteAssets commits, PhotoKit can no longer produce an image
+            // for that asset at all (it is not recoverable from the phone's
+            // Recently Deleted the way the Photos app can show it — this app
+            // has no access to that surface). Reading thumbnails after the
+            // delete, the way it might look "cleaner" to fold this loop in
+            // next to the mirrorQueue.enqueue call below, would silently ship
+            // a mirror queue with every thumbnail nil.
+            //
+            // Uses deletionThumbnail(s) — a network-disabled path — not the
+            // shared thumbnail(for:targetSize:) used for card rendering: this
+            // call sits BEFORE the delete with isCommitting blocking the UI,
+            // so allowing PhotoKit to fall back to an iCloud fetch here could
+            // hang the whole commit on a stalled download and block the
+            // user's actual deletion behind a debugging aid. See
+            // ThumbnailLoader.deletionThumbnail's doc comment. A miss (asset
+            // not cached locally, or encode failure) just yields no entry in
+            // the map, which is fine — the thumbnail is best-effort and must
+            // never block this asset's delete or its mirror job.
+            let thumbnails = await ThumbnailLoader.deletionThumbnails(
+                for: toDelete, targetSize: CGSize(width: 200, height: 200)
+            )
             try await photoLibrary.deleteAssets(toDelete)
-            mirrorQueue.enqueue(assets: toDelete, filenames: filenames)
+            mirrorQueue.enqueue(assets: toDelete, filenames: filenames, thumbnails: thumbnails)
             for asset in toDelete {
                 sortStore.setState(.deleted, for: asset, monthKey: month.key)
             }

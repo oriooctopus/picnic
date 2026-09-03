@@ -77,6 +77,18 @@ final class MirrorJobRecord {
     var lastError: String?
     /// "pending" | "sent"
     var status: String
+    /// JPEG thumbnail (~200x200, ~0.7 quality), base64-encoded, captured from
+    /// PhotoKit BEFORE the asset was deleted (see DeckViewModel
+    /// .commitDeletions's ordering comment — this is the only chance to ever
+    /// get an image for it). Lets the server's needs_review issues panel show
+    /// what the photo actually was instead of just a filename like
+    /// "IMG_2106.PNG". Optional with a default so SwiftData's lightweight
+    /// migration can add this column to existing installs without a store
+    /// wipe: every pre-existing row (Oliver has real un-mirrored jobs on his
+    /// phone already) just comes back nil, which is also the legitimate
+    /// "PhotoKit couldn't produce a thumbnail for this asset" case — nil here
+    /// is never itself a sign of a bug.
+    var thumbnailBase64: String?
 
     init(
         id: UUID,
@@ -86,7 +98,8 @@ final class MirrorJobRecord {
         pixelHeight: Int,
         mediaType: String,
         isLivePhoto: Bool,
-        status: String
+        status: String,
+        thumbnailBase64: String? = nil
     ) {
         self.id = id
         self.filename = filename
@@ -99,6 +112,7 @@ final class MirrorJobRecord {
         self.attemptCount = 0
         self.lastError = nil
         self.status = status
+        self.thumbnailBase64 = thumbnailBase64
     }
 }
 
