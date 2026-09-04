@@ -53,27 +53,38 @@ final class CompareViewModel: ObservableObject {
     /// now independent per photo: the only cross-set rule is that a photo
     /// can't be both kept and deleted, so accepting clears this photo's own
     /// reject (and tapping again un-marks it).
-    func accept(_ asset: PHAsset) {
+    ///
+    /// Returns whether this tap ADDED a mark (vs. toggled one off) — the
+    /// view uses that to auto-advance to the next card. Un-marking must not
+    /// advance: the user is correcting the photo in front of them, and
+    /// paging away from it is the opposite of what they asked for.
+    @discardableResult
+    func accept(_ asset: PHAsset) -> Bool {
         let id = asset.localIdentifier
         rejectedAssetIDs.remove(id)
         if acceptedAssetIDs.contains(id) {
             acceptedAssetIDs.remove(id)
-        } else {
-            acceptedAssetIDs.insert(id)
+            return false
         }
+        acceptedAssetIDs.insert(id)
+        return true
     }
 
     /// Trash: a per-photo toggle, mirroring `accept`. Rejecting one member no
     /// longer cues the whole group for deletion — that made "delete this one
     /// bad shot out of five" impossible to express.
-    func reject(_ asset: PHAsset) {
+    ///
+    /// Returns whether this tap ADDED a mark, same contract as `accept`.
+    @discardableResult
+    func reject(_ asset: PHAsset) -> Bool {
         let id = asset.localIdentifier
         acceptedAssetIDs.remove(id)
         if rejectedAssetIDs.contains(id) {
             rejectedAssetIDs.remove(id)
-        } else {
-            rejectedAssetIDs.insert(id)
+            return false
         }
+        rejectedAssetIDs.insert(id)
+        return true
     }
 
     func toggleFavorite(_ asset: PHAsset) async {

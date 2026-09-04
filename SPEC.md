@@ -57,7 +57,9 @@ All in `/home/esme/inbox/`, files `2026-08-02-1453*-IMG_138[2-9].png` and
    Thumbs-up and trash are independent toggles on each photo — mark as many
    as you want to keep and as many as you want to delete, in any order; a
    photo can only be in one bucket at a time, and tapping the same button
-   again un-marks it. The thumbnail strip shows a green dot per kept photo
+   again un-marks it. Marking a photo auto-advances to the next card in the
+   group (one tap per photo, no swipe in between); un-marking does not
+   advance, and the last card stays put rather than wrapping. The thumbnail strip shows a green dot per kept photo
    and a red dot per photo cued for deletion. Confirming applies exactly the
    marks made: rejected members join the deck's pending-delete cue (still
    only committed by the deck's X), accepted members are marked kept, and

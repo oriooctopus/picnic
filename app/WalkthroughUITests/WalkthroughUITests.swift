@@ -2419,6 +2419,12 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(thumb1.value as? String, "unsorted", "An untouched sibling thumbnail must not be affected by another photo's reject")
         capture("48-compare-reject-dot-before-confirm", delay: 0.3)
 
+        // MARK: The reject above ADDED a mark, so Compare auto-advanced the
+        // pager to photo 1 (see CompareView.advancePastMarkedCard) — page
+        // explicitly back to photo 0 so the accept below flips THIS photo's
+        // dot rather than marking photo 1 instead.
+        thumb0.tap()
+        Thread.sleep(forTimeInterval: 0.5)
         let accept = app.buttons["compare.accept"].firstMatch
         XCTAssertTrue(accept.waitForExistence(timeout: 5))
         accept.tap()
@@ -2449,11 +2455,159 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(thumb0.value as? String, "pending", "First reject tap should mark the photo pending")
         XCTAssertTrue(confirmButton.isEnabled, "Confirm should enable once a photo is rejected")
 
+        // MARK: That first reject ADDED a mark, so Compare auto-advanced
+        // the pager to photo 1 (see CompareView.advancePastMarkedCard) —
+        // page explicitly back to photo 0 so the second reject tap toggles
+        // THIS photo's mark off, instead of landing a fresh mark on photo 1.
+        thumb0.tap()
+        Thread.sleep(forTimeInterval: 0.5)
         reject.tap()
         Thread.sleep(forTimeInterval: 0.5)
         XCTAssertEqual(thumb0.value as? String, "unsorted",
                        "A second reject tap on the same photo should toggle the mark back off, not re-apply or error")
         XCTAssertFalse(confirmButton.isEnabled, "Confirm should disable again once the only mark on the group was toggled off")
         capture("50-compare-reject-toggle-off", delay: 0.3)
+    }
+
+    /// Regression test for this session's fix: marking a photo in Compare
+    /// (CompareView.advancePastMarkedCard) auto-advances the pager to the
+    /// next card, so a burst can be worked through with one tap per photo
+    /// instead of a tap-then-swipe each time.
+    ///
+    /// Never asserts on element frames (this repo's AX frames don't track
+    /// real geometry — see check_filmstrip_overlap.py's precedent). Instead
+    /// it proves "which card is the pager currently showing" the same way
+    /// test32/33/42 prove per-photo mark independence: by reading each
+    /// thumbnail's own `accessibilityValue` (unsorted/pending/kept) after a
+    /// mark tap that deliberately does NOT re-page first. If the pager had
+    /// NOT advanced, that tap would land on the same photo again — toggling
+    /// its existing mark back OFF. If it HAD advanced, the tap lands on a
+    /// fresh, still-unsorted photo — ADDING a new mark instead. Those two
+    /// outcomes are distinguishable purely from thumbnail state, with no
+    /// frame read anywhere.
+    ///
+    /// Runs on May's cluster A (4 members, thumb.0-3 — same group test35
+    /// uses), entirely inside one Compare session so each step's starting
+    /// thumbnail state is exactly what the previous step left behind.
+    func test45CompareMarkAutoAdvancesToNextCard() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
+        openMayDeck()
+        openCompare()
+
+        let reject = app.buttons["compare.reject"].firstMatch
+        let accept = app.buttons["compare.accept"].firstMatch
+        let favorite = app.buttons["compare.favorite"].firstMatch
+        let thumb0 = app.descendants(matching: .any)["compare.thumb.0"].firstMatch
+        let thumb1 = app.descendants(matching: .any)["compare.thumb.1"].firstMatch
+        let thumb2 = app.descendants(matching: .any)["compare.thumb.2"].firstMatch
+        let thumb3 = app.descendants(matching: .any)["compare.thumb.3"].firstMatch
+        XCTAssertTrue(reject.waitForExistence(timeout: 5))
+        XCTAssertTrue(thumb0.waitForExistence(timeout: 5))
+        XCTAssertTrue(thumb1.waitForExistence(timeout: 5))
+        XCTAssertTrue(thumb2.waitForExistence(timeout: 5))
+        XCTAssertTrue(thumb3.waitForExistence(timeout: 5))
+
+        // MARK: Trash on the first card advances the pager to the second.
+        // reject.tap() #1 marks photo 0 pending (a fresh ADD, since nothing
+        // is marked yet) — if that also advanced the pager, a SECOND
+        // reject.tap() with no paging in between lands on photo 1 (also a
+        // fresh ADD, so it marks pending too) rather than re-hitting photo 0
+        // (which would instead TOGGLE IT OFF, since a same-photo tap #2 is
+        // always a remove). Both thumbnails reading "pending" afterward is
+        // only possible if the second tap landed on a different photo than
+        // the first — i.e. the pager moved.
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(thumb0.value as? String, "pending", "First trash tap should mark photo 0 pending")
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(thumb0.value as? String, "pending",
+                       "Photo 0's mark must survive the second trash tap — if the pager had NOT advanced, that tap would have re-hit photo 0 and toggled it back to unsorted")
+        XCTAssertEqual(thumb1.value as? String, "pending",
+                       "The second trash tap (no re-paging) should have landed on photo 1, proving the first tap advanced the pager past photo 0")
+        capture("51-compare-autoadvance-trash", delay: 0.3)
+
+        // MARK: Thumbs-up also advances. Page explicitly to the still-
+        // untouched photo 2, then repeat the same two-tap proof with accept:
+        // photo 2's fresh accept.tap() should mark it kept AND advance to
+        // photo 3, so a second accept.tap() (no re-paging) marks photo 3
+        // kept too rather than un-marking photo 2.
+        thumb2.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        accept.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(thumb2.value as? String, "kept", "First thumbs-up tap should mark photo 2 kept")
+        accept.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(thumb2.value as? String, "kept",
+                       "Photo 2's mark must survive the second thumbs-up tap — if the pager had NOT advanced, that tap would have re-hit photo 2 and toggled it back to unsorted")
+        XCTAssertEqual(thumb3.value as? String, "kept",
+                       "The second thumbs-up tap (no re-paging) should have landed on photo 3, proving thumbs-up advances the pager too, not just trash")
+        capture("52-compare-autoadvance-thumbsup", delay: 0.3)
+
+        // MARK: Un-marking does NOT advance. Page back to photo 1 (still
+        // "pending" from the trash step above), toggle it off, then
+        // immediately re-mark it with no paging in between. If un-marking
+        // had (incorrectly) advanced the pager, this second tap would have
+        // landed on photo 2 instead — flipping ITS mark from kept to
+        // pending, since a reject tap on an already-accepted photo clears
+        // the accept and inserts a fresh reject (see CompareViewModel.reject).
+        // Seeing photo 1 correctly re-marked AND photo 2 still untouched
+        // (still "kept") together prove the un-mark tap left the pager
+        // exactly where it was.
+        thumb1.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(thumb1.value as? String, "unsorted", "Second trash tap on the same photo should toggle its mark back off")
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(thumb1.value as? String, "pending",
+                       "This tap must have landed on photo 1 again — proving the un-mark tap just above did not advance the pager")
+        XCTAssertEqual(thumb2.value as? String, "kept",
+                       "Photo 2 must be untouched by any of this — if un-marking HAD advanced the pager, this tap would have landed there instead and flipped it to pending")
+        capture("53-compare-autoadvance-unmark-stays", delay: 0.3)
+
+        // MARK: The last card does not advance past itself or wrap. Page to
+        // photo 3 (the group's final member, already "kept" from the
+        // thumbs-up step) and mark it twice more, exactly like the
+        // auto-advance proof above — except this time there is no next
+        // card to land on. Photo 0's mark (still "pending", untouched since
+        // the very first step) serves as a wraparound canary: if the pager
+        // had incorrectly wrapped back to photo 0 instead of staying put,
+        // one of these taps would have toggled IT instead, and Compare
+        // dismissing entirely (a group resolving only happens via the
+        // explicit confirm button, never a mark tap) would be an even
+        // louder signal of the same bug.
+        thumb3.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        accept.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(thumb3.value as? String, "unsorted", "Toggling photo 3's existing mark off should still work on the last card")
+        accept.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(thumb3.value as? String, "kept", "Re-marking photo 3 should land on photo 3 again, not wrap to photo 0")
+        XCTAssertEqual(thumb0.value as? String, "pending", "Photo 0's mark from the first step must be untouched — a wraparound bug would have toggled it here")
+        XCTAssertTrue(app.staticTexts["Compare"].exists, "Compare must still be open — marking the last card must never dismiss it (only the confirm button resolves a group)")
+        capture("54-compare-autoadvance-last-card-no-wrap", delay: 0.3)
+
+        // MARK: The heart/favorite button does not advance. Page to photo 2
+        // (still "kept" from the thumbs-up step), tap favorite, then prove
+        // the pager is still on photo 2 by toggling ITS accept mark off —
+        // if favorite had (incorrectly) advanced the pager, this tap would
+        // instead land on photo 3 and ADD a mark there (photo 3 is already
+        // "kept", so a real toggle-off is only observed if the tap truly
+        // landed back on photo 2).
+        thumb2.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertTrue(favorite.waitForExistence(timeout: 5), "Favorite button should exist on the card")
+        favorite.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertEqual(thumb2.value as? String, "kept", "Favoriting must not change the accept/reject mark")
+        accept.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(thumb2.value as? String, "unsorted",
+                       "This tap must have toggled photo 2's OWN mark off — proving favorite did not advance the pager away from it")
+        capture("55-compare-autoadvance-favorite-no-advance", delay: 0.3)
     }
 }

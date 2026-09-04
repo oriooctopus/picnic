@@ -41,8 +41,8 @@ struct CompareView: View {
                         isAccepted: viewModel.acceptedAssetIDs.contains(asset.localIdentifier),
                         isRejected: viewModel.rejectedAssetIDs.contains(asset.localIdentifier),
                         isFavorite: viewModel.favoritedAssetIDs.contains(asset.localIdentifier),
-                        onReject: { viewModel.reject(asset) },
-                        onAccept: { viewModel.accept(asset) },
+                        onReject: { if viewModel.reject(asset) { advancePastMarkedCard() } },
+                        onAccept: { if viewModel.accept(asset) { advancePastMarkedCard() } },
                         onFavorite: { Task { await viewModel.toggleFavorite(asset) } }
                     )
                     .tag(index)
@@ -65,6 +65,21 @@ struct CompareView: View {
         } message: {
             Text(viewModel.resolveError ?? "")
         }
+    }
+
+    /// Marking a photo pages to the next one, so a burst can be worked
+    /// through with one tap per photo instead of a tap-then-swipe each time.
+    /// Only ADDING a mark advances (see CompareViewModel.accept/reject's
+    /// return value) — toggling a mark back off leaves the card in place,
+    /// because that tap is the user correcting the photo they're looking at.
+    ///
+    /// Deliberately stops at the last card rather than wrapping or
+    /// dismissing: the confirm button is the only thing that resolves a
+    /// group, and silently looping back to photo 1 would make it impossible
+    /// to tell a finished pass from a fresh one.
+    private func advancePastMarkedCard() {
+        guard pageIndex < viewModel.group.assets.count - 1 else { return }
+        withAnimation { pageIndex += 1 }
     }
 
     private var header: some View {
