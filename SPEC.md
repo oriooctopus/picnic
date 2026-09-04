@@ -52,11 +52,19 @@ All in `/home/esme/inbox/`, files `2026-08-02-1453*-IMG_138[2-9].png` and
    PhotoKit batch delete of everything marked (iOS shows its single system
    confirm; photos go to iOS Recently Deleted), and each committed asset is
    queued for the Google Photos mirror.
-2. **Compare-group resolution is total.** In a compare group, the moment at
-   least one photo is sorted the bottom controls become enabled, and
-   confirming resolves the WHOLE group: accepting (thumbs-up) one photo
-   deletes all the others in the group; deleting one photo deletes them all.
-   Unaddressed group members are never left dangling.
+2. **Compare marks are per-photo and multi-select.** In a compare group, the
+   moment at least one photo is sorted the bottom controls become enabled.
+   Thumbs-up and trash are independent toggles on each photo — mark as many
+   as you want to keep and as many as you want to delete, in any order; a
+   photo can only be in one bucket at a time, and tapping the same button
+   again un-marks it. The thumbnail strip shows a green dot per kept photo
+   and a red dot per photo cued for deletion. Confirming applies exactly the
+   marks made: rejected members join the deck's pending-delete cue (still
+   only committed by the deck's X), accepted members are marked kept, and
+   **unmarked members are left untouched and stay unsorted in the deck**.
+   (This supersedes the earlier "resolution is total" rule, where accepting
+   one photo deleted every other member and rejecting one deleted them all —
+   that made "delete just this one bad shot out of five" impossible.)
 3. **Long-press a photo plays its Live Photo.**
 4. **Google side goes to TRASH only.** The mirror worker moves matched photos
    to Google Photos trash; it must never touch "Delete permanently". Restoring

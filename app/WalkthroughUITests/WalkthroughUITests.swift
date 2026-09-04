@@ -402,12 +402,29 @@ final class WalkthroughUITests: XCTestCase {
         openCompare()
         let confirmButton = acceptFirstComparePhoto()
 
-        // MARK: Confirm group resolution -> Compare defers to the deck's
+        // MARK: Also reject the second photo before confirming. Marks are
+        // now independent per photo (see CompareViewModel.confirmResolution),
+        // so an accept-only confirm cues NOTHING for delete and this test's
+        // whole point — proving Compare defers to the deck's pending-delete
+        // cue instead of showing PhotoKit's own dialog — would have nothing
+        // to observe. Paging via compare.thumb.1 (not a card swipe) sets
+        // pageIndex synchronously, same reasoning as test32/33/42 below.
+        let secondThumb = app.descendants(matching: .any)["compare.thumb.1"].firstMatch
+        XCTAssertTrue(secondThumb.waitForExistence(timeout: 5), "Second group member's thumbnail should exist in the bottom strip")
+        secondThumb.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        let reject = app.buttons["compare.reject"].firstMatch
+        XCTAssertTrue(reject.waitForExistence(timeout: 5), "Reject button should exist on the second card")
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+
+        // MARK: Confirm resolution -> Compare defers to the deck's
         // pending-delete cue instead of deleting immediately, so no PhotoKit
         // system dialog appears here anymore (that only fires later, from
         // the deck's own X commit). Confirming should just resolve/dismiss
-        // Compare and grow the deck's pending-delete badge by the rejected
-        // members of the group.
+        // Compare and grow the deck's pending-delete badge by the ONE
+        // rejected member — the accepted first photo is marked kept, not
+        // deleted, and is not part of this badge.
         confirmButton.tap()
         let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
         XCTAssertTrue(deckCard.waitForExistence(timeout: 10), "Confirming in Compare should return to the deck")
@@ -1188,10 +1205,10 @@ final class WalkthroughUITests: XCTestCase {
         // --reset-sort-state, not just --reset-hide-sorted: this asserts an
         // ABSOLUTE minimum (3+ unsorted photos), and May only has 5, so any
         // earlier test method in the same run that marks May's assets can
-        // starve it. test05/test06 resolve May's burst cluster A, which cues
-        // 4 of the 5 — leaving 1 and failing this precondition. It passed
-        // before only because no run had happened to schedule those Compare
-        // tests ahead of it.
+        // starve it. test05/test06/test32/42/43/44 all touch May's burst
+        // cluster A (marks are per-photo now, so exactly how many of the 5
+        // end up marked varies by test) — without this reset, running this
+        // method after any of them could leave fewer than 3 unsorted.
         relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
         let deckCard = openMayDeck()
 
@@ -1625,28 +1642,22 @@ final class WalkthroughUITests: XCTestCase {
         return Int(badge.label) ?? 0
     }
 
-    /// Diagnostic test for a claim about CompareViewModel's accept/reject
-    /// semantics (CompareViewModel.swift accept(_:)/reject(_:)/
-    /// confirmResolution()): accepting sets `acceptedAssetID` and clears
-    /// `rejectedAssetIDs`; rejecting inserts into `rejectedAssetIDs` and
-    /// clears `acceptedAssetID` — the two are mutually exclusive, whole-group
-    /// verdicts, not independent per-photo marks. confirmResolution() then
-    /// branches on `acceptedAssetID`: non-nil keeps that one photo and cues
-    /// every other group member for delete; nil (including "was accepted,
-    /// then a later reject wiped it") cues the ENTIRE group, including the
-    /// photo that was accepted first.
+    /// Proves CompareViewModel's accept/reject marks are INDEPENDENT
+    /// per-photo toggles, not a mutually-exclusive whole-group verdict
+    /// (CompareViewModel.swift accept(_:)/reject(_:)/confirmResolution()).
+    /// The old code kept a single `acceptedAssetID` that any reject wiped —
+    /// so accepting photo 1 then rejecting photo 2 used to erase the accept
+    /// entirely and cue the WHOLE group (all 4) for delete, keeping nothing.
     ///
-    /// This test accepts photo 1, then rejects photo 2, then confirms — on
-    /// the claim above, the accept is wiped by the reject, so all 4 members
-    /// of May's burst cluster A should end up cued for delete and NONE kept.
-    /// Written to assert the predicted (order-dependent) outcome: a pass
-    /// confirms the claim, a failure means the real semantics differ and the
-    /// actual pendingCount delta is the useful signal to report.
-    func test32CompareAcceptThenRejectDeletesWholeGroup() throws {
+    /// This test accepts photo 1, then rejects photo 2, then confirms. On
+    /// the current per-photo semantics that must cue exactly the ONE
+    /// rejected photo (not 4, not 0) and leave the accepted photo kept —
+    /// the opposite of what the old exclusivity bug would have produced.
+    func test32CompareAcceptThenRejectAreIndependentPerPhotoMarks() throws {
         // Clean sort/hideSorted state: without this, an earlier test method
         // in the same CI run could leave May's cluster A already resolved
         // (test06 does exactly that) or the pendingCount baseline nonzero,
-        // making the +4 delta below unverifiable.
+        // making the +1 delta below unverifiable.
         relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
         openMayDeck()
         let baseline = pendingCount()
@@ -1682,22 +1693,29 @@ final class WalkthroughUITests: XCTestCase {
 
         let afterConfirm = pendingCount()
         capture("33-deck-after-accept-then-reject", delay: 0.3)
-        XCTAssertEqual(afterConfirm, baseline + 4,
-                       "Predicted (order-dependent) outcome: accept-then-reject wipes the accept, so all 4 group members are cued for delete (baseline \(baseline), observed \(afterConfirm))")
+        XCTAssertEqual(afterConfirm, baseline + 1,
+                       "Only the rejected photo (2) should be cued for delete — the accept on photo 1 must survive the later reject, not be wiped by it (baseline \(baseline), observed \(afterConfirm))")
+
+        // Direct proof the accept survived: photo 1 (filmstrip index 0)
+        // should read "kept", not "pending" or "unsorted".
+        let thumb0 = app.descendants(matching: .any)["filmstrip.thumb.0"].firstMatch
+        XCTAssertTrue(thumb0.waitForExistence(timeout: 5))
+        XCTAssertEqual(thumb0.value as? String, "kept", "Photo 1's earlier accept must survive photo 2's later reject")
     }
 
-    /// Companion to test32, same claim, opposite tap order, on a DIFFERENT
-    /// burst group (September's 3-photo cluster B) — confirmResolution()
-    /// marks a group resolved, so re-testing May's cluster A here would find
-    /// it already gone.
+    /// Companion to test32, opposite tap order, on a DIFFERENT burst group
+    /// (September's 3-photo cluster B) — confirmResolution() marks a group
+    /// resolved, so re-testing May's cluster A here would find it already
+    /// gone.
     ///
-    /// Rejects photo 1, then accepts photo 2, then confirms — on the claim
-    /// above, the reject is wiped by the accept, so photo 2 should be kept
-    /// and the other 2 members (not photo 2) cued for delete. Compared with
-    /// test32, this is what actually proves or disproves tap-order-dependence:
-    /// same two actions (one accept, one reject) in the opposite order should
-    /// produce a different outcome if and only if the claim is correct.
-    func test33CompareRejectThenAcceptKeepsAccepted() throws {
+    /// Rejects photo 1, then accepts photo 2, then confirms. Under the old
+    /// mutually-exclusive code, accepting photo 2 would have wiped the
+    /// reject on photo 1 too (the single acceptedAssetID/rejectedAssetIDs
+    /// pair could only hold one verdict), leaving nothing cued. Under the
+    /// current per-photo semantics both marks must survive independently:
+    /// photo 1 cued for delete, photo 2 kept, and photo 3 — never touched —
+    /// left unsorted rather than swept into either bucket.
+    func test33CompareRejectThenAcceptAreIndependentPerPhotoMarks() throws {
         relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
         openSeptemberDeck()
         let baseline = pendingCount()
@@ -1720,7 +1738,7 @@ final class WalkthroughUITests: XCTestCase {
         capture("34-compare-reject-then-accept", delay: 0.3)
 
         let confirmButton = app.buttons["compare.confirm"]
-        XCTAssertTrue(confirmButton.isEnabled, "Confirm should be enabled — canConfirm is true whenever acceptedAssetID is set")
+        XCTAssertTrue(confirmButton.isEnabled, "Confirm should be enabled — canConfirm is true whenever acceptedAssetIDs or rejectedAssetIDs is non-empty")
         confirmButton.tap()
 
         let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
@@ -1729,29 +1747,40 @@ final class WalkthroughUITests: XCTestCase {
 
         let afterConfirm = pendingCount()
         capture("35-deck-after-reject-then-accept", delay: 0.3)
-        XCTAssertEqual(afterConfirm, baseline + 2,
-                       "Predicted (order-dependent) outcome: reject-then-accept wipes the reject, so only the 2 non-accepted group members are cued for delete (baseline \(baseline), observed \(afterConfirm))")
+        XCTAssertEqual(afterConfirm, baseline + 1,
+                       "Only the rejected photo (1) should be cued for delete — the later accept on photo 2 must not wipe it (baseline \(baseline), observed \(afterConfirm))")
+
+        // Direct proof both marks survived independently: photo 2 kept,
+        // photo 3 (never touched in Compare) left unsorted rather than
+        // being swept into either bucket.
+        let thumb1 = app.descendants(matching: .any)["filmstrip.thumb.1"].firstMatch
+        XCTAssertTrue(thumb1.waitForExistence(timeout: 5))
+        XCTAssertEqual(thumb1.value as? String, "kept", "Photo 2's accept must survive photo 1's earlier reject")
+        let thumb2 = app.descendants(matching: .any)["filmstrip.thumb.2"].firstMatch
+        XCTAssertTrue(thumb2.waitForExistence(timeout: 5))
+        XCTAssertEqual(thumb2.value as? String, "unsorted", "Photo 3 was never marked in Compare — it must stay unsorted, not be inferred into either bucket")
     }
 
     /// Regression test for the bug this session fixes: Compare's confirm
-    /// used to cue every rejected photo for delete (and mark any accepted
-    /// photo kept) with NO undo entry recorded at all — `markPendingDelete`'s
-    /// old doc comment said so explicitly ("deliberately skips the undo
-    /// stack"). Rejecting even one photo resolves the WHOLE group for delete
-    /// (SPEC.md semantics #2), so with 4 photos cued in one confirm tap,
-    /// Compare's confirm was both the LEAST reversible action in the app and
-    /// the ONE action with zero undo support. This proves a single undo tap
-    /// now reverses the whole batch (every cued photo restored, not just
-    /// one), clears their filmstrip X badges (not just the numeric pending
-    /// count), and un-resolves the group so Compare offers it again.
+    /// used to cue rejected photos for delete (and mark any accepted photo
+    /// kept) with NO undo entry recorded at all — `markPendingDelete`'s old
+    /// doc comment said so explicitly ("deliberately skips the undo stack").
+    /// That made Compare's confirm the ONE action in the app with zero undo
+    /// support. This proves a single undo tap now reverses the whole
+    /// resolution batch (the cued photo restored), clears its filmstrip X
+    /// badge (not just the numeric pending count), and un-resolves the
+    /// group so Compare offers it again. (This test only marks ONE of
+    /// cluster A's 4 photos — see test42 for the batch-of-several case;
+    /// rejecting one no longer cues the other 3, unlike the old
+    /// whole-group-verdict code this session replaced.)
     func test34UndoReversesWholeCompareConfirmInOneTap() throws {
         relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
         openMayDeck()
         let baseline = pendingCount()
 
-        // MARK: Reject one photo -> the whole 4-photo burst cluster A is
-        // cued for delete (no accept happened, so confirmResolution's "no
-        // acceptedAssetID" branch cues every group member, none kept).
+        // MARK: Reject one photo -> exactly that one photo (cluster A's
+        // first member) is cued for delete; the other 3 members are left
+        // untouched (per-photo marks, not a whole-group verdict).
         openCompare()
         let reject = app.buttons["compare.reject"].firstMatch
         XCTAssertTrue(reject.waitForExistence(timeout: 5), "Reject button should exist")
@@ -1809,18 +1838,33 @@ final class WalkthroughUITests: XCTestCase {
     /// the "any marked" filter (see DeckViewModel.refresh's doc comment)
     /// must drop them from the strip ENTIRELY — not just hide their badge,
     /// remove the cell.
+    ///
+    /// Marks are now per-photo (see CompareViewModel.reject), so getting all
+    /// 4 cluster-A members cued for this test's badge sweep requires
+    /// explicitly rejecting each one in turn — a single reject tap no longer
+    /// cues the whole group the way the pre-fix code did.
     func test35FilmstripBadgesAfterCompareConfirmBothToggleStates() throws {
         relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
         openMayDeck()
 
-        // MARK: Reject -> whole cluster A (thumb.0-3) cued; May's 5th photo
-        // (5/18, standalone — not part of the burst) lands at thumb.4,
-        // untouched by this confirm.
+        // MARK: Reject each of cluster A's 4 members in turn -> thumb.0-3
+        // all cued; May's 5th photo (5/18, standalone — not part of the
+        // burst) lands at thumb.4, untouched by this confirm. Paging via
+        // compare.thumb.N (not a card swipe) sets pageIndex synchronously —
+        // same reasoning as test32/33 above.
         openCompare()
-        let reject = app.buttons["compare.reject"].firstMatch
-        XCTAssertTrue(reject.waitForExistence(timeout: 5), "Reject button should exist")
-        reject.tap()
-        Thread.sleep(forTimeInterval: 0.5)
+        for index in 0...3 {
+            if index > 0 {
+                let thumb = app.descendants(matching: .any)["compare.thumb.\(index)"].firstMatch
+                XCTAssertTrue(thumb.waitForExistence(timeout: 5), "Compare thumbnail \(index) should exist in the bottom strip")
+                thumb.tap()
+                Thread.sleep(forTimeInterval: 0.3)
+            }
+            let reject = app.buttons["compare.reject"].firstMatch
+            XCTAssertTrue(reject.waitForExistence(timeout: 5), "Reject button should exist for member \(index)")
+            reject.tap()
+            Thread.sleep(forTimeInterval: 0.3)
+        }
         let confirmButton = app.buttons["compare.confirm"]
         XCTAssertTrue(confirmButton.isEnabled, "Confirm should be enabled once a photo is rejected")
         confirmButton.tap()
@@ -2276,5 +2320,140 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(accept.waitForExistence(timeout: 10), "Accept button should exist on the Compare card")
         Thread.sleep(forTimeInterval: 1.5)
         capture("45-compare-opened-on-tapped-member", delay: 0.3)
+    }
+
+    /// Regression test for bug report #1 this session fixes: multi-select.
+    /// The old code kept a single `acceptedAssetID` and a single
+    /// `rejectedAssetIDs` set that any opposing tap wiped, so rejecting one
+    /// photo out of a burst cluster used to cue the WHOLE group for delete
+    /// (or, if a photo had been accepted first, that accept would be
+    /// silently erased). Marking three different photos three different
+    /// ways in the SAME group — reject, reject, accept — must now cue
+    /// EXACTLY the 2 rejected photos, keep the accepted one, and leave the
+    /// 4th (never touched) member unsorted. On the old code this would have
+    /// cued all 4 (if the last action were treated as resolving the group)
+    /// or only 1 (if only the most recent mark survived) — either way not
+    /// the 2 this test demands, which is the mutation this test must kill.
+    func test42CompareMultiSelectCuesExactlyTheMarkedPhotos() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
+        openMayDeck()
+        let baseline = pendingCount()
+        openCompare()
+
+        // Reject photo 0 (first card, no paging needed).
+        let reject = app.buttons["compare.reject"].firstMatch
+        XCTAssertTrue(reject.waitForExistence(timeout: 5), "Reject button should exist on the first card")
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+
+        // Page to photo 1, reject it too.
+        let thumb1 = app.descendants(matching: .any)["compare.thumb.1"].firstMatch
+        XCTAssertTrue(thumb1.waitForExistence(timeout: 5), "Second member's thumbnail should exist in the bottom strip")
+        thumb1.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        let reject2 = app.buttons["compare.reject"].firstMatch
+        XCTAssertTrue(reject2.waitForExistence(timeout: 5), "Reject button should exist on the second card")
+        reject2.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+
+        // Page to photo 2, ACCEPT it — a different verdict on a third photo.
+        let thumb2 = app.descendants(matching: .any)["compare.thumb.2"].firstMatch
+        XCTAssertTrue(thumb2.waitForExistence(timeout: 5), "Third member's thumbnail should exist in the bottom strip")
+        thumb2.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        let accept = app.buttons["compare.accept"].firstMatch
+        XCTAssertTrue(accept.waitForExistence(timeout: 5), "Accept button should exist on the third card")
+        accept.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        capture("46-compare-multiselect-mixed-marks", delay: 0.3)
+
+        let confirmButton = app.buttons["compare.confirm"]
+        XCTAssertTrue(confirmButton.isEnabled, "Confirm should be enabled with 3 photos marked")
+        confirmButton.tap()
+
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 10), "Confirming should return to the deck")
+        XCTAssertFalse(app.staticTexts["Compare"].exists, "Compare header should be gone after confirming")
+
+        let afterConfirm = pendingCount()
+        capture("47-deck-after-multiselect-confirm", delay: 0.3)
+        XCTAssertEqual(afterConfirm, baseline + 2,
+                       "Exactly the 2 rejected photos (0 and 1) should be cued for delete — not all 4 and not just 1 (baseline \(baseline), observed \(afterConfirm))")
+
+        let thumb2AfterConfirm = app.descendants(matching: .any)["filmstrip.thumb.2"].firstMatch
+        XCTAssertTrue(thumb2AfterConfirm.waitForExistence(timeout: 5))
+        XCTAssertEqual(thumb2AfterConfirm.value as? String, "kept", "Photo 2 was accepted, so it should be marked kept, not cued for delete")
+
+        let thumb3AfterConfirm = app.descendants(matching: .any)["filmstrip.thumb.3"].firstMatch
+        XCTAssertTrue(thumb3AfterConfirm.waitForExistence(timeout: 5))
+        XCTAssertEqual(thumb3AfterConfirm.value as? String, "unsorted", "Photo 3 was never marked in Compare — it must stay unsorted, not be swept into either bucket by the batch confirm")
+    }
+
+    /// Regression test for bug report #2 this session fixes: the filmstrip
+    /// dot at the bottom of Compare only ever consulted `acceptedAssetID`
+    /// (CompareView.swift's bottomBar), so a rejected photo's dot rendered
+    /// `.clear` with no accessibilityValue at all — identical to an
+    /// untouched photo. There was no way to see, from inside Compare before
+    /// confirming, which photos had been cued for deletion. This asserts
+    /// the dot's accessibilityValue directly, while still inside Compare
+    /// (never confirmed), for all three states: unsorted, pending (reject),
+    /// and kept (accept) — and that marking one photo doesn't bleed onto an
+    /// untouched sibling's dot.
+    func test43CompareThumbBadgesReflectMarksBeforeConfirm() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
+        openMayDeck()
+        openCompare()
+
+        let thumb0 = app.descendants(matching: .any)["compare.thumb.0"].firstMatch
+        let thumb1 = app.descendants(matching: .any)["compare.thumb.1"].firstMatch
+        XCTAssertTrue(thumb0.waitForExistence(timeout: 5))
+        XCTAssertTrue(thumb1.waitForExistence(timeout: 5))
+        XCTAssertEqual(thumb0.value as? String, "unsorted", "Nothing has been marked yet")
+
+        let reject = app.buttons["compare.reject"].firstMatch
+        XCTAssertTrue(reject.waitForExistence(timeout: 5))
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(thumb0.value as? String, "pending",
+                       "Rejected photo's dot should read 'pending' (red) — old code had no accessibilityValue for this case at all")
+        XCTAssertEqual(thumb1.value as? String, "unsorted", "An untouched sibling thumbnail must not be affected by another photo's reject")
+        capture("48-compare-reject-dot-before-confirm", delay: 0.3)
+
+        let accept = app.buttons["compare.accept"].firstMatch
+        XCTAssertTrue(accept.waitForExistence(timeout: 5))
+        accept.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(thumb0.value as? String, "kept", "Accepting should flip the same photo's dot from pending to kept")
+        capture("49-compare-accept-dot-before-confirm", delay: 0.3)
+    }
+
+    /// Regression test for the toggle-off behavior `reject`/`accept` gained
+    /// this session: tapping the same mark button twice on the same photo
+    /// un-marks it, rather than being a no-op or an error. Also proves
+    /// `canConfirm` (and therefore the confirm button's enabled state)
+    /// tracks the mark being removed, not just added.
+    func test44CompareRejectTwiceTogglesBackToUnsorted() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
+        openMayDeck()
+        openCompare()
+
+        let reject = app.buttons["compare.reject"].firstMatch
+        let confirmButton = app.buttons["compare.confirm"]
+        XCTAssertTrue(reject.waitForExistence(timeout: 5))
+        XCTAssertFalse(confirmButton.isEnabled, "Confirm should start disabled with nothing marked")
+
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        let thumb0 = app.descendants(matching: .any)["compare.thumb.0"].firstMatch
+        XCTAssertTrue(thumb0.waitForExistence(timeout: 5))
+        XCTAssertEqual(thumb0.value as? String, "pending", "First reject tap should mark the photo pending")
+        XCTAssertTrue(confirmButton.isEnabled, "Confirm should enable once a photo is rejected")
+
+        reject.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(thumb0.value as? String, "unsorted",
+                       "A second reject tap on the same photo should toggle the mark back off, not re-apply or error")
+        XCTAssertFalse(confirmButton.isEnabled, "Confirm should disable again once the only mark on the group was toggled off")
+        capture("50-compare-reject-toggle-off", delay: 0.3)
     }
 }

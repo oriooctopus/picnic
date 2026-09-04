@@ -38,7 +38,7 @@ struct CompareView: View {
                         asset: asset,
                         isBest: asset.localIdentifier == viewModel.bestAssetID,
                         fileSize: viewModel.fileSizes[asset.localIdentifier],
-                        isAccepted: viewModel.acceptedAssetID == asset.localIdentifier,
+                        isAccepted: viewModel.acceptedAssetIDs.contains(asset.localIdentifier),
                         isRejected: viewModel.rejectedAssetIDs.contains(asset.localIdentifier),
                         isFavorite: viewModel.favoritedAssetIDs.contains(asset.localIdentifier),
                         onReject: { viewModel.reject(asset) },
@@ -128,10 +128,28 @@ struct CompareView: View {
                                         .stroke(index == pageIndex ? Color.white : .clear, lineWidth: 2)
                                 )
                                 .onTapGesture { withAnimation { pageIndex = index } }
+                            // Green = kept, red = cued for deletion. The
+                            // reject case used to have no dot at all (only
+                            // `acceptedAssetID` was consulted), so tapping
+                            // trash left the strip looking untouched and the
+                            // only feedback was the card's own red border,
+                            // which is off-screen for every group member the
+                            // pager isn't currently showing.
                             Circle()
-                                .fill(asset.localIdentifier == viewModel.acceptedAssetID ? Color.green : .clear)
+                                .fill(viewModel.acceptedAssetIDs.contains(asset.localIdentifier)
+                                      ? Color.green
+                                      : (viewModel.rejectedAssetIDs.contains(asset.localIdentifier) ? Color.red : .clear))
                                 .frame(width: 6, height: 6)
                         }
+                        // Mark state exposed the same way FilmstripThumbnail
+                        // does it (accessibilityValue, never frames — this
+                        // repo's AX frames don't track real geometry), so a
+                        // UI test can assert the dot actually appeared rather
+                        // than only that the tap was accepted.
+                        .accessibilityValue(
+                            viewModel.acceptedAssetIDs.contains(asset.localIdentifier) ? "kept"
+                            : (viewModel.rejectedAssetIDs.contains(asset.localIdentifier) ? "pending" : "unsorted")
+                        )
                         // Deterministic page-jump target for UI tests: swipe-based
                         // paging on the TabView(.page) card can't reliably target
                         // "page N" (adjacent pages may or may not be realized in

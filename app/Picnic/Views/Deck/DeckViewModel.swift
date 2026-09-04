@@ -254,7 +254,7 @@ final class DeckViewModel: ObservableObject {
     /// what lets `undo()` reverse a whole resolution in one tap, and what
     /// keeps every SortState write behind this single source of truth (the
     /// same rule `refresh(follow:)`'s doc comment establishes).
-    func resolveCompareGroup(toDelete: [PHAsset], keeping kept: PHAsset?, groupID: String) {
+    func resolveCompareGroup(toDelete: [PHAsset], keeping kept: [PHAsset], groupID: String) {
         // Captured before the marks (and therefore visibleAssets) change:
         // if the batch includes assets sitting before currentIndex, letting
         // those disappear under hideSorted shifts every later index down —
@@ -269,9 +269,9 @@ final class DeckViewModel: ObservableObject {
             changes.append(.init(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset)))
             sortStore.setState(.markedForDelete, for: asset, monthKey: month.key)
         }
-        if let kept {
-            changes.append(.init(assetID: kept.localIdentifier, previousState: sortStore.state(for: kept)))
-            sortStore.setState(.kept, for: kept, monthKey: month.key)
+        for asset in kept {
+            changes.append(.init(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset)))
+            sortStore.setState(.kept, for: asset, monthKey: month.key)
         }
         undoStack.append(UndoEntry(changes: changes, compareGroupID: groupID))
         sortStore.markGroupResolved(groupID)
