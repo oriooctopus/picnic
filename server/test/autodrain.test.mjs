@@ -547,6 +547,124 @@ test('a killed worker child (SIGKILL) still resolves and releases the single-fli
   });
 });
 
+test('[amend] a run that finishes with jobs still queued (no pendingFollowUp, no new enqueue) re-arms scheduling instead of stranding them', async () => {
+  await withTempQueue(async (queue) => {
+    // Mirrors the real incident: worker.mjs "ABANDONED: N consecutive
+    // fruitless scroll(s)" leaves the job untouched at 'queued' -- no
+    // status change, no exception, exit code 0. Before this fix, startRun's
+    // finally only re-armed on pendingFollowUp (set only by a NEW enqueue
+    // arriving mid-run), so a run that legitimately made zero progress on
+    // an already-queued job left it stranded forever with no live timer.
+    addQueuedJob(queue, 'A.HEIC');
+    const clock = createFakeClock();
+    const { spawnWorker, calls } = makeSpawnRecorder(); // resolves cleanly, never touches the queue -> job stays 'queued'
+    const drain = createAutoDrain(baseDeps(queue, clock, { spawnWorker }));
+
+    drain.notifyEnqueued();
+    clock.advance(DEBOUNCE_MS);
+    await tick();
+    assert.equal(calls.length, 1, 'first run happened');
+    assert.equal(drain.getStatus().lastRun.outcome, 'completed');
+
+    // No further notifyEnqueued() call. Advance well past both the debounce
+    // and the CDP backoff window -- whichever mechanism the fix uses
+    // (immediate re-debounce or a backoff fallback), a second run must
+    // eventually happen; on the unfixed code this never fires.
+    clock.advance(CDP_BACKOFF_MS + DEBOUNCE_MS);
+    await tick();
+    assert.equal(calls.length, 2, 'a run ending with a job still queued must re-arm scheduling, not strand it');
+  });
+});
+
+test('[amend] a run that makes zero progress on a still-queued job does not hot-loop on the short debounce window', async () => {
+  await withTempQueue(async (queue) => {
+    // Same zero-progress shape as above, but this test pins the OTHER half
+    // of the guard: re-arming must not spin the browser continuously. If
+    // the fix re-armed via armScheduling() (the short ~90s debounce) on
+    // every zero-progress run, this would fire a second run within
+    // DEBOUNCE_MS. The guard must fall back to the longer backoff instead.
+    addQueuedJob(queue, 'A.HEIC');
+    const clock = createFakeClock();
+    const { spawnWorker, calls } = makeSpawnRecorder();
+    const drain = createAutoDrain(baseDeps(queue, clock, { spawnWorker }));
+
+    drain.notifyEnqueued();
+    clock.advance(DEBOUNCE_MS);
+    await tick();
+    assert.equal(calls.length, 1, 'first run happened');
+
+    clock.advance(DEBOUNCE_MS - 1);
+    await tick();
+    assert.equal(calls.length, 1, 'zero-progress re-arm must not fire on the short debounce window');
+  });
+});
+
+test('[amend] a run that DOES make progress (some job left the queued state) but still has leftover queued jobs re-arms on the normal debounce', async () => {
+  await withTempQueue(async (queue) => {
+    // Simulates the DEFAULT_CAP=50 shape: a run processes some jobs and
+    // leaves others behind simply because there were more than the run
+    // could handle in one pass, not because of a stuck/fruitless job. That
+    // is real forward progress, so the next batch should be picked up
+    // promptly (the normal debounce), not pushed out to the slow backoff.
+    const a = addQueuedJob(queue, 'A.HEIC');
+    addQueuedJob(queue, 'B.HEIC', '2026-06-16T14:30:00.000Z'); // stays queued -- simulates the cap being hit
+    const clock = createFakeClock();
+    const calls = [];
+    const spawnWorker = async ({ walk }) => {
+      calls.push(walk);
+      queue.update(a.id, { status: 'trashed' }); // only A gets processed this run
+      return { code: 0 };
+    };
+    const drain = createAutoDrain(baseDeps(queue, clock, { spawnWorker }));
+
+    drain.notifyEnqueued();
+    clock.advance(DEBOUNCE_MS);
+    await tick();
+    assert.deepEqual(calls, ['photo']);
+
+    clock.advance(DEBOUNCE_MS);
+    await tick();
+    assert.deepEqual(calls, ['photo', 'photo'], 'progress made -> re-arms on the normal debounce, not the slow backoff');
+  });
+});
+
+test('[amend] pendingFollowUp and the still-queued progress guard never double-arm (exactly one scheduled run, not two)', async () => {
+  await withTempQueue(async (queue) => {
+    // A run finishes having made progress AND left a job queued (this
+    // guard's condition) AND a new enqueue arrived mid-run (pendingFollowUp).
+    // Both paths independently want to schedule a follow-up; the fix must
+    // take one, not both (which would otherwise show up as two spawns
+    // landing back-to-back instead of one debounced follow-up).
+    const a = addQueuedJob(queue, 'A.HEIC');
+    addQueuedJob(queue, 'B.HEIC', '2026-06-16T14:30:00.000Z');
+    const clock = createFakeClock();
+    const deferred = makeDeferredSpawn();
+    const drain = createAutoDrain(baseDeps(queue, clock, { spawnWorker: deferred.spawnWorker }));
+
+    drain.notifyEnqueued();
+    clock.advance(DEBOUNCE_MS);
+    await tick();
+    assert.equal(deferred.calls.length, 1, 'first run started');
+
+    // a new job arrives mid-run and its debounce fires before the run finishes
+    addQueuedJob(queue, 'C.HEIC', '2026-06-17T00:00:00.000Z');
+    drain.notifyEnqueued();
+    clock.advance(DEBOUNCE_MS);
+    await tick();
+    assert.equal(deferred.calls.length, 1, 'still only one run in flight');
+
+    // the in-flight run makes progress on A but leaves B (and C) queued
+    queue.update(a.id, { status: 'trashed' });
+    deferred.resolveNext({ code: 0 });
+    await tick();
+    assert.equal(drain.isRunning(), false);
+
+    clock.advance(DEBOUNCE_MS);
+    await tick();
+    assert.equal(deferred.calls.length, 2, 'exactly one follow-up run scheduled, not two');
+  });
+});
+
 test('getStatus reports the outcome of the last run', async () => {
   await withTempQueue(async (queue) => {
     addQueuedJob(queue, 'A.HEIC');

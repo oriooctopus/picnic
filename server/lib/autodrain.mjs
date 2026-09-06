@@ -91,6 +91,35 @@
  * `now()` is only ever used for the log filename and to detect "is this the
  * first enqueue of a new idle burst" (a null-check, not a duration).
  *
+ * [amend] item 10: a run FINISHING is not itself a signal that the queue is
+ *   drained. Two things make that the normal case, not an edge case: (a)
+ *   createWorkerSpawn's caller in queue-server.mjs passes no `cap`, so
+ *   worker.mjs runs at DEFAULT_CAP=50 -- a backlog above 50 structurally
+ *   cannot drain in one run; (b) worker.mjs regularly abandons a date after
+ *   MAX_STEPS_PER_DATE fruitless scrolls with jobs still unmatched (logged
+ *   as "ABANDONED"), leaving them 'queued'. Before this amendment, startRun's
+ *   finally only re-armed via pendingFollowUp, which is set ONLY by a NEW
+ *   notifyEnqueued() firing mid-run -- nothing ever re-checked "is the queue
+ *   still non-empty" after a run that nobody interrupted. That's exactly how
+ *   65 jobs sat queued for 43 hours in production: two runs both exited 0
+ *   with jobs left queued, and nothing scheduled a next attempt until an
+ *   unrelated new enqueue arrived. Fixed by checking, in the same finally,
+ *   whether the queue still holds a 'queued' job after a run that actually
+ *   reached the worker (not the cdp_unreachable bail-out, which already
+ *   backs off on its own). That alone would risk a hot loop against the
+ *   browser if a run touches nothing every time (a genuinely stuck job), so
+ *   the branch is gated on `progressMade` -- did ANY job that was 'queued'
+ *   at this run's start end up somewhere else by the end (trashed,
+ *   needs_review, or cycled through the grid retry)? Progress re-arms on
+ *   the normal short debounce (there's clearly more for this run shape to
+ *   chew through); no progress falls back to the same CDP-backoff-length
+ *   timer used for an unreachable endpoint, so a stuck queue still gets
+ *   retried eventually instead of stranding silently, just slowly enough
+ *   not to spin the browser continuously. DEFAULT_CAP itself is untouched
+ *   deliberately -- raising it would lengthen a single browser session
+ *   against Google, a pacing risk, whereas chaining runs via this re-arm
+ *   has no such cost.
+ *
  * [amend] on resetting stranded non-terminal jobs on startup (item 3 in the
  * QA pass): checked against lib/queue.mjs's actual STATUSES — ['queued',
  * 'trashed', 'needs_review', 'error']. There is no in-progress/processing
@@ -228,6 +257,12 @@ export function createAutoDrain({
     running = true;
     pendingFollowUp = false;
     const startedAt = now();
+    // [amend] item 10 (see module header): whether the worker actually ran
+    // this time (false on the early cdp_unreachable bail-out, which already
+    // has its own scheduleBackoff() and doesn't need the guard below), and
+    // whether it made any forward progress -- see the finally block.
+    let ranWorker = false;
+    let progressMade = false;
     try {
       const reachable = await probeCdp();
       if (!reachable) {
@@ -236,6 +271,7 @@ export function createAutoDrain({
         lastRun = { startedAt, finishedAt: now(), outcome: 'cdp_unreachable' };
         return;
       }
+      ranWorker = true;
 
       // Only jobs 'queued' at the moment this run starts, and that haven't
       // already burned their one strategy retry (see module header 5b), are
@@ -266,6 +302,19 @@ export function createAutoDrain({
         }
       }
 
+      // [amend] progress check for the re-arm guard below (item 10): did any
+      // job that was 'queued' when this run started end up somewhere else?
+      // A job leaving 'queued' (trashed, needs_review, or re-queued-then-
+      // resolved by the grid retry) counts as progress even if it isn't
+      // fully done, because it proves the run is capable of draining this
+      // queue and a follow-up is worth scheduling promptly. A job still
+      // sitting at 'queued' unchanged -- the worker.mjs "ABANDONED: N
+      // consecutive fruitless scroll(s)" case from the module header -- is
+      // zero progress on it specifically, but ANY OTHER queued job moving
+      // is enough: this is a per-run signal, not a per-job one.
+      const stillQueuedIds = new Set(queue.loadAll().filter((j) => j.status === 'queued').map((j) => j.id));
+      progressMade = queuedAtStart.some((j) => !stillQueuedIds.has(j.id));
+
       lastRun = {
         startedAt,
         finishedAt: now(),
@@ -289,6 +338,25 @@ export function createAutoDrain({
       if (pendingFollowUp) {
         pendingFollowUp = false;
         armScheduling();
+      } else if (ranWorker && queue.loadAll().some((j) => j.status === 'queued')) {
+        // [amend] item 10 (see module header): the original bug -- a run
+        // that finishes with jobs still 'queued' and nothing checking for
+        // that. This is the NORMAL path, not an edge case: worker.mjs
+        // routinely abandons a date after a fixed number of fruitless
+        // scrolls with jobs still unmatched, and DEFAULT_CAP alone caps a
+        // single run at 50 jobs regardless of how large the backlog is. If
+        // this branch just called armScheduling() unconditionally, a run
+        // that touches nothing (every remaining job genuinely stuck) would
+        // spin the browser again every ~90s forever -- so it only takes the
+        // fast (debounce) path when THIS run proved it can make progress;
+        // otherwise it falls back to the same slow backoff used for a
+        // CDP-unreachable run, which still guarantees the queue eventually
+        // gets re-attempted instead of silently stranding it.
+        if (progressMade) {
+          armScheduling();
+        } else {
+          scheduleBackoff();
+        }
       }
     }
   }
