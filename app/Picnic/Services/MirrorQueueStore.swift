@@ -10,6 +10,16 @@ final class MirrorQueueStore: ObservableObject {
     private let context: ModelContext
     @Published var pendingCount: Int = 0
     @Published var lastError: String?
+    // Last known-good GET /queue response. Deliberately never reset to nil
+    // by a failed poll (see refreshServerStatus()) -- MirrorBannerLogic
+    // treats nil as "never fetched successfully, ever", not "unknown right
+    // now", so resetting it here would flash the server-backlog banner off
+    // every time one poll drops a packet.
+    @Published private(set) var serverStatus: MirrorQueueStatus?
+    private var pollTask: Task<Void, Never>?
+    // 5 minutes: the banner's own threshold is a full HOUR of backlog, so
+    // polling faster than that buys no earlier signal, only battery/data.
+    private static let pollIntervalNanoseconds: UInt64 = 5 * 60 * 1_000_000_000
 
     init(context: ModelContext) {
         self.context = context
@@ -70,5 +80,42 @@ final class MirrorQueueStore: ObservableObject {
         }
         try? context.save()
         refreshCount()
+    }
+
+    /// One-shot GET /queue refresh. Called on foreground and by the
+    /// periodic poll below; also safe to call ad hoc.
+    func refreshServerStatus() async {
+        do {
+            serverStatus = try await MirrorClient.fetchStatus()
+        } catch {
+            // Printed, not stored: an unreachable status endpoint must not
+            // paint a scary banner out of nothing (see MirrorBannerLogic),
+            // but a bare `catch {}` here would hide a real outage from
+            // anyone watching console output. serverStatus is left exactly
+            // as it was -- it just goes stale until the next poll succeeds.
+            print("MirrorQueueStore: status fetch failed: \(error)")
+        }
+    }
+
+    /// Starts a low-frequency repeating poll of server status while the app
+    /// is foregrounded (see PicnicApp.swift's scenePhase handling). Safe to
+    /// call when already polling -- restarts from a fresh interval rather
+    /// than stacking a second loop.
+    func startPolling() {
+        stopPolling()
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.refreshServerStatus()
+                try? await Task.sleep(nanoseconds: Self.pollIntervalNanoseconds)
+            }
+        }
+    }
+
+    /// Cancels the periodic poll. Must be called on background/inactive --
+    /// leaving the loop running would keep firing network requests against
+    /// a suspended process's continuation the moment iOS resumes it.
+    func stopPolling() {
+        pollTask?.cancel()
+        pollTask = nil
     }
 }

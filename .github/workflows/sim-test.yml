@@ -76,7 +76,12 @@ jobs:
 
       # PASS criteria: launch + tab navigation to Utilities and Profile.
       # See app/PicnicUITests/PicnicSmokeUITests.swift for the assertions.
-      - name: Run UI smoke tests
+      # PicnicTests (unit tests, e.g. MirrorBannerLogicTests) needs no photo
+      # library grant or simulator boot -- included here anyway rather than
+      # a separate xcodebuild invocation because -only-testing accepts more
+      # than one target and this avoids paying for a second macOS runner
+      # boot just to run pure-Foundation logic tests.
+      - name: Run unit + UI smoke tests
         run: |
           cd app
           xcodebuild test \
@@ -84,6 +89,7 @@ jobs:
             -scheme Picnic \
             -destination "id=$SIM_UDID" \
             -derivedDataPath build \
+            -only-testing:PicnicTests \
             -only-testing:PicnicUITests \
             CODE_SIGNING_ALLOWED=NO
 

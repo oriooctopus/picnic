@@ -10,6 +10,18 @@ enum MirrorClientError: Error, CustomStringConvertible {
     }
 }
 
+/// Decoded slice of GET /queue's response -- only the fields the banner
+/// needs, not the full job array (server/queue-server.mjs also returns up
+/// to 50 recent jobs, which we deliberately don't model). `oldestQueuedWaitMs`
+/// is nil exactly when the server reports no queued jobs at all.
+struct MirrorQueueStatus: Decodable {
+    struct Counts: Decodable { let queued: Int }
+    struct AutoDrain: Decodable { let oldestQueuedWaitMs: Int? }
+
+    let counts: Counts
+    let autoDrain: AutoDrain
+}
+
 /// Talks to the picnic-mirror server's POST /queue endpoint. Fire-and-retry:
 /// callers persist the job and only mark it sent after a 2xx response.
 enum MirrorClient {
@@ -40,5 +52,22 @@ enum MirrorClient {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw MirrorClientError.badStatus(code)
         }
+    }
+
+    /// GET /queue -- the server-side backlog status the device-side pending
+    /// queue can't see (see MirrorSyncBanner.swift's header comment). Reuses
+    /// the same endpoint POST uses rather than adding a new one; the ?token=
+    /// query param that /issues and /thumb accept does NOT work here, this
+    /// route only checks the bearer header (server/lib/auth.mjs).
+    static func fetchStatus() async throws -> MirrorQueueStatus {
+        var request = URLRequest(url: Config.mirrorQueueURL)
+        request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw MirrorClientError.badStatus(code)
+        }
+        return try JSONDecoder().decode(MirrorQueueStatus.self, from: data)
     }
 }

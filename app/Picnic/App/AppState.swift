@@ -153,6 +153,13 @@ final class AppState: ObservableObject {
         refreshMonths()
         #endif
         await mirrorQueue.drainQueue()
+        // Launch counts as a foreground -- see PicnicApp.swift's scenePhase
+        // handler for the background/re-foreground case. Fetch once
+        // immediately rather than waiting out the first poll interval so a
+        // launch after the app's been backgrounded for hours doesn't show
+        // stale data for 5 minutes.
+        await mirrorQueue.refreshServerStatus()
+        mirrorQueue.startPolling()
     }
 
     func refreshMonths() {

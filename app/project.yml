@@ -68,9 +68,23 @@ targets:
       - package: Shuffle
     scheme:
       testTargets:
+        - PicnicTests
         - PicnicUITests
         - WalkthroughUITests
       gatherCoverageData: false
+
+  PicnicTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: PicnicTests
+    dependencies:
+      - target: Picnic
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.oliverullman.picnic.tests
+        CODE_SIGN_STYLE: Automatic
 
   PicnicUITests:
     type: bundle.ui-testing
