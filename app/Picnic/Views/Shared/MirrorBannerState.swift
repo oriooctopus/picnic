@@ -51,7 +51,7 @@ enum MirrorBannerLogic {
             return .devicePending(count: pendingCount, lastError: lastError)
         }
         guard let queued = serverQueuedCount, let waitMs = oldestQueuedWaitMs,
-              waitMs > serverBacklogThresholdMs else {
+              waitMs < serverBacklogThresholdMs else {
             return .none
         }
         return .serverBacklog(count: queued, waitMs: waitMs)
