@@ -123,11 +123,10 @@ final class CompareViewModel: ObservableObject {
         isResolving = true
         defer { isResolving = false }
 
-        let deleteUnmarked = rejectedAssetIDs.isEmpty
+        // TEMP: reinstate accept-only bug for regression proof (test46) — DO NOT MERGE.
         let toDelete = group.assets.filter {
             let id = $0.localIdentifier
             return rejectedAssetIDs.contains(id)
-                || (deleteUnmarked && !acceptedAssetIDs.contains(id))
         }
         let kept = group.assets.filter { acceptedAssetIDs.contains($0.localIdentifier) }
 
