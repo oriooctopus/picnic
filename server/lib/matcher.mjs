@@ -174,6 +174,55 @@ export function dedupeTilesByAriaLabel(tiles) {
 }
 
 /**
+ * A tile's REAL identity: its href when known, falling back to its
+ * aria-label for anything that doesn't carry one (older callers/tests that
+ * never read href -- see dedupeTilesByIdentity). Google Photos assigns each
+ * library item a stable per-item href regardless of which grid size it's
+ * currently rendered at, so href is the one thing that tells apart "the same
+ * item rendered twice" from "two distinct items that happen to render the
+ * same aria-label text" (see dedupeTilesByIdentity's header for why that
+ * distinction matters).
+ */
+export function tileIdentity(tile) {
+  return tile.href ?? tile.ariaLabel;
+}
+
+/**
+ * Dedupe by the tile's REAL identity (href) rather than its aria-label alone
+ * (dedupeTilesByAriaLabel above, kept for its own tests/history and for any
+ * caller that only ever had aria-label to go on).
+ *
+ * 2026-09-12 FINDING: Oliver's real duplicate library items (a photo
+ * downloaded to his phone and separately re-uploaded by a backup tool) carry
+ * the SAME EXIF capture time down to the second, so their grid tiles render a
+ * BYTE-IDENTICAL aria-label ("Photo - Portrait - Aug 5, 2026, 6:54:07 PM")
+ * despite being two distinct Google Photos items with distinct hrefs.
+ * dedupeTilesByAriaLabel was built only to collapse the SAME photo rendered
+ * at multiple grid sizes (which shares BOTH aria-label and href) -- it can't
+ * tell that case apart from two genuinely different items that happen to
+ * collide on aria-label text, and silently drops one of the real items
+ * before planAriaMatches ever sees it. That is the actual reason a date
+ * fully resolved by the aria fast path (the common case: one queued job,
+ * whose duplicate is otherwise invisible to it) never got a chance to notice
+ * the collision and defer to the exhaustive walk. Deduping by href instead
+ * keeps both real items as separate candidates: planAriaMatches then
+ * correctly sees 2 candidates for that job's predicted second and defers it
+ * to the walk, which finds and trashes both (see confirmAndTrash's /
+ * walkPhotoView's matchedJobs).
+ */
+export function dedupeTilesByIdentity(tiles) {
+  const seen = new Set();
+  const out = [];
+  for (const tile of tiles) {
+    const key = tileIdentity(tile);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(tile);
+  }
+  return out;
+}
+
+/**
  * -- CHANGE 1: aria-label fast-path matching -------------------------------
  *
  * A result-grid tile's aria-label carries capture time to the SECOND, in the

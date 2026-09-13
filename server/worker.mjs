@@ -90,7 +90,8 @@ import {
   formatSearchDate,
   groupJobsByDate,
   isRealPhotoTile,
-  dedupeTilesByAriaLabel,
+  dedupeTilesByIdentity,
+  tileIdentity,
   planAriaMatches,
 } from './lib/matcher.mjs';
 
@@ -393,6 +394,18 @@ async function searchByDate(page, dateStr) {
 /**
  * Collect this date's real photo/video tiles (filtering Google's own decoy
  * chips, deduping the same photo rendered at multiple grid sizes).
+ *
+ * Dedupes by IDENTITY (href, falling back to aria-label when href is
+ * unreadable -- see matcher.mjs's tileIdentity/dedupeTilesByIdentity), NOT by
+ * aria-label alone. 2026-09-12 FINDING: two of Oliver's real duplicate
+ * library items (same photo downloaded then separately re-uploaded by a
+ * backup tool) share an EXIF capture second and so render a BYTE-IDENTICAL
+ * aria-label -- deduping by aria-label alone silently dropped one of them
+ * before planAriaMatches ever got a chance to see two candidates and defer
+ * the ambiguous job to the exhaustive walk. href is the one attribute that
+ * actually tells apart "the same item rendered at another grid size" (same
+ * href) from "two distinct items that happen to collide on aria-label text"
+ * (different hrefs) -- see dedupeTilesByIdentity's header for the full case.
  */
 async function collectResultTiles(page) {
   const links = await page.locator(RESULT_LINK_SELECTOR).all();
@@ -406,9 +419,10 @@ async function collectResultTiles(page) {
     // the walk picks a stale hidden tile and openTile() dies in
     // scrollIntoViewIfNeeded with "element is not visible".
     if (!(await link.isVisible().catch(() => false))) continue;
-    withLabels.push({ locator: link, ariaLabel });
+    const href = await link.getAttribute('href').catch(() => null);
+    withLabels.push({ locator: link, ariaLabel, href });
   }
-  return dedupeTilesByAriaLabel(withLabels);
+  return dedupeTilesByIdentity(withLabels);
 }
 
 /** Thrown when a held tile locator no longer points at the tile we collected. */
@@ -438,15 +452,15 @@ async function openTile(page, tile) {
   // much we scroll, so dates reported "EXHAUSTED" after a handful of tiles and
   // silently left photos undeleted. :visible excludes a 0x0 element while
   // still matching a real tile that is merely below the fold.
-  const locator = tileLocatorFor(page, tile.ariaLabel);
+  const locator = tileLocatorFor(page, tile);
   if ((await locator.count()) === 0) {
-    throw new StaleTileError(`tile gone from the grid: "${tile.ariaLabel}"`);
+    throw new StaleTileError(`tile gone from the grid: "${tileIdentity(tile)}"`);
   }
   // Scroll BEFORE the final visibility assertion: the live grid is virtualized,
   // so a genuine tile below the fold is not actionable until scrolled to.
   await locator.first().scrollIntoViewIfNeeded().catch(() => {});
   if (!(await locator.first().isVisible().catch(() => false))) {
-    throw new StaleTileError(`tile not actionable after scrolling: "${tile.ariaLabel}"`);
+    throw new StaleTileError(`tile not actionable after scrolling: "${tileIdentity(tile)}"`);
   }
   await stealthDelay(500, 2000); // pre-click jitter -- pure mimicry, off unless --slow
   await locator.first().click();
@@ -456,14 +470,29 @@ async function openTile(page, tile) {
 
 
 /**
- * A locator that finds a result tile by its aria-label rather than its index.
- * aria-labels here look like `Photo - Portrait - Aug 5, 2026, 6:54:07 PM`;
- * they contain commas and spaces but no double quotes, so they drop into an
- * attribute selector as-is.
+ * A locator that finds a result tile by its IDENTITY (href when known, plus
+ * aria-label) rather than its grid index. aria-labels here look like
+ * `Photo - Portrait - Aug 5, 2026, 6:54:07 PM`; they contain commas and
+ * spaces but no double quotes, so they drop into an attribute selector as-is
+ * (hrefs are ordinary relative paths, same assumption).
+ *
+ * 2026-09-12: `[aria-label="..."]` ALONE is ambiguous for Oliver's real
+ * duplicate library items -- two distinct Google Photos items that share an
+ * EXIF capture second render the identical aria-label text, so an
+ * aria-label-only selector can match TWO real elements and `.first()` always
+ * resolves to the same one, making the second copy permanently unreachable
+ * by identity. Pinning href too (when collectResultTiles read one) picks out
+ * the SPECIFIC element the caller actually means. Falls back to aria-label
+ * alone when href is unavailable (older callers/fixtures), matching the
+ * pre-2026-09-12 behaviour exactly.
  */
-function tileLocatorFor(page, ariaLabel) {
-  const escaped = ariaLabel.replace(/["\\]/g, '\\$&');
-  return page.locator(`${RESULT_LINK_SELECTOR}[aria-label="${escaped}"]:visible`);
+function tileLocatorFor(page, tile) {
+  const escapedLabel = tile.ariaLabel.replace(/["\\]/g, '\\$&');
+  if (tile.href) {
+    const escapedHref = tile.href.replace(/["\\]/g, '\\$&');
+    return page.locator(`${RESULT_LINK_SELECTOR}[href="${escapedHref}"][aria-label="${escapedLabel}"]:visible`);
+  }
+  return page.locator(`${RESULT_LINK_SELECTOR}[aria-label="${escapedLabel}"]:visible`);
 }
 
 
@@ -687,15 +716,64 @@ async function moveToTrash(page, panelTextBefore) {
  * pre-filter or the exhaustive walk makes no difference to how a match gets
  * confirmed or trashed.
  */
-async function confirmAndTrash(page, job, parsed, text, query, queue, dryRun) {
+/**
+ * `isDuplicateCopy` (added for Oliver's real duplicate library items -- a
+ * photo downloaded to his phone and then separately re-uploaded by a backup
+ * tool gives Google Photos two distinct items with the same filename+dims,
+ * same search date): true when `job` was ALREADY confirmed+trashed once
+ * earlier in this same date's walk (tracked by the caller's `matchedJobs`
+ * set) and this is a further copy of it, found at a DIFFERENT tile. The
+ * "never guess" rule is unchanged either way -- the caller only reaches here
+ * after findMatchingJob already confirmed this exact job's filename+dims
+ * against the parsed panel, whether that job came from `remaining` (first
+ * copy) or `matchedJobs` (a further one).
+ *
+ * A duplicate trash must NOT overwrite the first copy's `comparison`/
+ * `attempts` bookkeeping (that recorded the confirmation that made the job
+ * 'trashed' in the first place) -- it only advances `copiesTrashed`, which
+ * schema-old jobs implicitly read as 1 (see queue.mjs; the field is purely
+ * additive, so the iOS app and queue-server.mjs's JSON responses are
+ * unaffected by its absence on older records).
+ *
+ * Returns whether the trash was CONFIRMED (false for dry-run, which never
+ * attempts one) -- callers use this, not a panel-text diff, to know whether
+ * the view has moved on. A confirmed trash always removes the current photo
+ * from the results, so the view HAS moved on (to whatever's next, or closed
+ * if it was the day's last) even when the new panel's text happens to be
+ * byte-identical to what was just trashed -- exactly the duplicate-copy case
+ * this exists for (two items with the same filename/dims/camera info render
+ * the same panel text). A text diff genuinely cannot tell that apart from
+ * "never moved"; the confirmation itself is the only reliable signal.
+ */
+async function confirmAndTrash(page, job, parsed, text, query, queue, dryRun, isDuplicateCopy = false) {
   if (dryRun) {
-    console.log(`[dry-run WOULD TRASH] ${job.filename} (search ${query})`);
-    return;
+    console.log(`[dry-run WOULD TRASH${isDuplicateCopy ? ' duplicate copy of' : ''}] ${job.filename} (search ${query})`);
+    return false;
   }
   const confirmed = await moveToTrash(page, text);
+  if (isDuplicateCopy) {
+    if (confirmed) {
+      // Read the job's CURRENT persisted state (not the possibly-stale `job`
+      // reference the caller is holding) so a second or third copy in the
+      // same walk still increments from the real count, not from 1 every
+      // time.
+      const current = queue.getById(job.id);
+      const copiesTrashed = (current.copiesTrashed ?? 1) + 1;
+      queue.update(job.id, { copiesTrashed });
+      console.log(`[trashed] ${job.filename}: duplicate copy #${copiesTrashed} (search ${query})`);
+    } else {
+      // Do NOT downgrade status: the job is genuinely 'trashed' already from
+      // its first copy. Surface the unconfirmed duplicate via `error` alone
+      // so a human can check Google Photos for a stray copy, without
+      // rewriting a real deletion back to needs_review.
+      queue.update(job.id, { error: `a duplicate copy matched but its trash action was not confirmed (search ${query})` });
+      console.log(`[needs_review] ${job.filename}: duplicate matched but trash not confirmed (search ${query})`);
+    }
+    return confirmed;
+  }
   const comparison = { searchDate: query, matchedFilename: parsed.filename, pixelWidth: parsed.pixelWidth, pixelHeight: parsed.pixelHeight };
   if (confirmed) {
-    queue.update(job.id, { status: 'trashed', comparison, attempts: job.attempts + 1 });
+    queue.update(job.id, { status: 'trashed', comparison, copiesTrashed: 1, attempts: job.attempts + 1 });
     console.log(`[trashed] ${job.filename} (search ${query})`);
   } else {
     // Matched the right photo but could not prove the trash took. Leave it
@@ -709,6 +787,7 @@ async function confirmAndTrash(page, job, parsed, text, query, queue, dryRun) {
     });
     console.log(`[needs_review] ${job.filename}: matched but trash not confirmed (search ${query})`);
   }
+  return confirmed;
 }
 
 /**
@@ -796,10 +875,22 @@ async function waitForPanelChange(page, previousText) {
  * collectResultTiles() call, before the aria phase's own pre-scroll could
  * run the mounted window past it -- so this never depends on where the grid
  * happens to be scrolled to when the aria phase hands off.
+ *
+ * `matchedJobs` (added for Oliver's real duplicate library items -- see
+ * confirmAndTrash's header): jobs already confirmed+trashed once earlier in
+ * THIS date's search (by the aria phase, or by an earlier photo in this same
+ * walk), shared by reference with the caller so it also picks up whatever
+ * this walk itself matches. A duplicate copy of one of these can appear
+ * ANYWHERE in the rest of the day's order -- there is no way to know it
+ * won't -- so once anything has matched, the walk no longer stops the moment
+ * `remaining` empties; it keeps stepping to the genuine end of the day (the
+ * "no next photo" signal) or MAX_STEPS_PER_DATE, checking every subsequent
+ * photo against matchedJobs too. Only when NEITHER remaining nor matchedJobs
+ * has anything left to check is there truly nothing this walk can still find.
  */
-async function walkPhotoView(page, dateFirstTile, unmatchedJobs, query, queue, dryRun) {
+async function walkPhotoView(page, dateFirstTile, unmatchedJobs, query, queue, dryRun, matchedJobs = new Set()) {
   let remaining = unmatchedJobs;
-  if (remaining.length === 0) return { stillUnmatched: remaining };
+  if (remaining.length === 0 && matchedJobs.size === 0) return { stillUnmatched: remaining };
 
   const tile = await openFirstTile(page, dateFirstTile);
   if (!tile) {
@@ -819,7 +910,11 @@ async function walkPhotoView(page, dateFirstTile, unmatchedJobs, query, queue, d
   let boundHit = false;
   let text = await readPanelText(page);
 
-  while (remaining.length > 0) {
+  // See matchedJobs' header above: once anything has matched, a duplicate of
+  // it could be anywhere later in the day, so the loop no longer stops just
+  // because `remaining` emptied -- only when there's truly nothing left
+  // either unmatched or worth re-checking for a further copy.
+  while (remaining.length > 0 || matchedJobs.size > 0) {
     if (steps >= MAX_STEPS_PER_DATE) {
       boundHit = true;
       break;
@@ -834,29 +929,48 @@ async function walkPhotoView(page, dateFirstTile, unmatchedJobs, query, queue, d
           (parsed.filename ? '' : ` rawLen=${(text || '').length} raw="${(text || '').slice(0, 100)}"`)
       );
     }
-    const job = findMatchingJob(remaining, parsed);
+    // Check this photo against unmatched jobs AND jobs already matched
+    // earlier this date -- a hit against the latter is a further copy of a
+    // job we've already confirmed once (findMatchingJob still requires
+    // filename+dims to agree exactly; "already matched" only widens WHICH
+    // jobs we compare against, never how a match is confirmed).
+    const candidateJobs = matchedJobs.size > 0 ? [...remaining, ...matchedJobs] : remaining;
+    const job = findMatchingJob(candidateJobs, parsed);
     let advancedByDelete = false;
 
     if (job) {
-      await confirmAndTrash(page, job, parsed, text, query, queue, dryRun);
-      remaining = remaining.filter((j) => j !== job);
+      const isDuplicateCopy = matchedJobs.has(job);
+      const confirmed = await confirmAndTrash(page, job, parsed, text, query, queue, dryRun, isDuplicateCopy);
+      if (!isDuplicateCopy) {
+        remaining = remaining.filter((j) => j !== job);
+        matchedJobs.add(job);
+      }
       if (!dryRun) {
-        // A trashed photo disappears from the results, and the view can
-        // auto-advance to the next one BY ITSELF -- the same thing
-        // moveToTrash's own settled() check already has to detect (a panel
-        // that moved on from `panelTextBefore` counts as settled). Check for
-        // it here too: if the panel already moved on, do NOT blindly
-        // ArrowRight below, or we'd skip the very photo the auto-advance
-        // just landed on.
         const afterTrash = await readPanelText(page);
-        if (afterTrash && afterTrash !== text) {
+        if (confirmed) {
+          // A CONFIRMED trash always removes the current photo from the
+          // results -- the view HAS moved on (to whatever's next, or closed
+          // if this was the day's last photo), which is settled fact once
+          // confirmAndTrash reports it, not something to re-derive from a
+          // text diff. Diffing would fail exactly for a duplicate copy
+          // (2026-09-12 finding): two items with the same filename/dims/
+          // camera info render BYTE-IDENTICAL panel text, so
+          // `afterTrash !== text` reads false even though the view is now
+          // showing a genuinely different (duplicate) photo -- which used to
+          // make the walk try to ArrowRight past it instead of examining it,
+          // silently skipping the very duplicate this feature exists to
+          // catch. Always take the fresh read, whether or not it looks
+          // different from `text`.
+          text = afterTrash;
+          advancedByDelete = true;
+        } else if (afterTrash && afterTrash !== text) {
+          // Trash was not confirmed (rare), but the panel moved anyway --
+          // same handling this branch always had.
           text = afterTrash;
           advancedByDelete = true;
         }
       }
     }
-
-    if (remaining.length === 0) break;
 
     if (!advancedByDelete) {
       // ArrowRight does not always register: with identical code this date
@@ -960,16 +1074,29 @@ async function walkPhotoView(page, dateFirstTile, unmatchedJobs, query, queue, d
  * us" because the grid is virtualized (collectResultTiles only ever returns
  * what's currently mounted). `tiles` is the latest on-screen snapshot to
  * resume scanning from.
+ *
+ * `matchedJobs`: same duplicate-hunting contract as walkPhotoView's (see its
+ * header) -- jobs already confirmed+trashed once this date, shared by
+ * reference so a further copy found at another tile still gets trashed
+ * rather than silently skipped once its job is no longer "unmatched".
  */
-async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun) {
+async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun, matchedJobs = new Set()) {
   let remaining = unmatchedJobs;
-  if (remaining.length === 0) return { stillUnmatched: remaining };
+  if (remaining.length === 0 && matchedJobs.size === 0) return { stillUnmatched: remaining };
 
+  // Keyed by IDENTITY (tileIdentity: href, falling back to aria-label), NOT
+  // aria-label alone -- 2026-09-12: two of Oliver's real duplicate library
+  // items share an aria-label (same EXIF capture second), and this map/the
+  // visited/unreachable/openAttempts bookkeeping below all need to treat
+  // them as the two SEPARATE tiles they are, or the grid walk would mark
+  // opening one as covering both and silently never visit the second. See
+  // dedupeTilesByIdentity's header in matcher.mjs for the full case.
   const mergeSeen = (freshTiles) => {
     let addedNew = false;
     for (const t of freshTiles) {
-      if (!seen.has(t.ariaLabel)) {
-        seen.set(t.ariaLabel, t);
+      const key = tileIdentity(t);
+      if (!seen.has(key)) {
+        seen.set(key, t);
         addedNew = true;
       }
     }
@@ -999,8 +1126,10 @@ async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun) 
   // down-scroll the chance to reveal the tile that would end the walk).
   let lastRecoveryDirection = null;
 
-  while (remaining.length > 0) {
-    let tile = tiles.find((t) => !visited.has(t.ariaLabel) && !unreachable.has(t.ariaLabel));
+  // See matchedJobs' header above: keep scanning tiles for a duplicate copy
+  // of an already-matched job even once `remaining` empties.
+  while (remaining.length > 0 || matchedJobs.size > 0) {
+    let tile = tiles.find((t) => !visited.has(tileIdentity(t)) && !unreachable.has(tileIdentity(t)));
 
     if (!tile) {
       // Nothing on-screen is both unvisited and not given up on. Before
@@ -1018,7 +1147,7 @@ async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun) 
         // on-screen and still actionable (up's recovery case -- mergeSeen
         // alone would say "nothing new" for a tile already in `seen`).
         const newlySeen = mergeSeen(fresh);
-        const recoveredKnown = fresh.some((t) => !visited.has(t.ariaLabel) && !unreachable.has(t.ariaLabel));
+        const recoveredKnown = fresh.some((t) => !visited.has(tileIdentity(t)) && !unreachable.has(tileIdentity(t)));
         return { fresh, progressed: newlySeen || recoveredKnown };
       };
 
@@ -1056,10 +1185,10 @@ async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun) 
         // before giving up on THIS tile specifically. Deliberately does NOT
         // add the tile to `visited` on failure -- only a genuine open earns
         // that (see the comment above `visited.add` below).
-        const attempts = (openAttempts.get(tile.ariaLabel) ?? 0) + 1;
-        openAttempts.set(tile.ariaLabel, attempts);
+        const attempts = (openAttempts.get(tileIdentity(tile)) ?? 0) + 1;
+        openAttempts.set(tileIdentity(tile), attempts);
         if (attempts >= MAX_TILE_OPEN_RETRIES) {
-          unreachable.add(tile.ariaLabel);
+          unreachable.add(tileIdentity(tile));
           console.log(
             `[date ${query}] UNREACHABLE: "${tile.ariaLabel}" never became actionable after ${attempts} attempt(s) — ` +
               'giving up on this tile, NOT counting it as walked'
@@ -1079,8 +1208,8 @@ async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun) 
     // safe to count it visited. Marking it visited any earlier (e.g. before
     // the openTile attempt) is the exact bug that let a date report
     // EXHAUSTED while most of it was never actually opened.
-    visited.add(tile.ariaLabel);
-    openAttempts.delete(tile.ariaLabel);
+    visited.add(tileIdentity(tile));
+    openAttempts.delete(tileIdentity(tile));
     walkScrollAttempts = 0; // opening a tile is progress too
 
     await openInfoPanelOnce(page);
@@ -1093,13 +1222,20 @@ async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun) 
           (parsed.filename ? '' : ` rawLen=${(text || '').length} raw="${(text || '').slice(0, 120)}"`)
       );
     }
-    const job = findMatchingJob(remaining, parsed);
+    // See walkPhotoView's identical candidateJobs comment -- widen the
+    // candidate set to already-matched jobs too, so a duplicate copy at a
+    // DIFFERENT tile still gets trashed instead of silently opened and
+    // ignored once its job is no longer "unmatched".
+    const candidateJobs = matchedJobs.size > 0 ? [...remaining, ...matchedJobs] : remaining;
+    const job = findMatchingJob(candidateJobs, parsed);
     if (job) {
-      await confirmAndTrash(page, job, parsed, text, query, queue, dryRun);
-      remaining = remaining.filter((j) => j !== job);
+      const isDuplicateCopy = matchedJobs.has(job);
+      await confirmAndTrash(page, job, parsed, text, query, queue, dryRun, isDuplicateCopy);
+      if (!isDuplicateCopy) {
+        remaining = remaining.filter((j) => j !== job);
+        matchedJobs.add(job);
+      }
     }
-
-    if (remaining.length === 0) break;
 
     // Back to the grid -- the LIVE-CORRECTED closeAnyOpenPhoto (search box
     // visible AND trash control not visible, at most 2 Escape attempts). See
@@ -1178,14 +1314,26 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
   // one), not just a coverage one. The exhaustive fallback below (walkPhoto-
   // View) needs none of this: it never re-collects or scrolls the grid at
   // all, see its header for why.
-  const seen = new Map(); // ariaLabel -> tile, first-seen copy
+  const seen = new Map(); // identity (href, or aria-label as fallback) -> tile, first-seen copy
+  // Jobs already confirmed+trashed once THIS date search -- shared across the
+  // aria phase below and whichever exhaustive walk follows, so a duplicate
+  // copy found later still gets trashed. See confirmAndTrash's/walkPhotoView's
+  // matchedJobs comments for the full rationale.
+  const matchedJobs = new Set();
   let scrollAttempts = 0;
 
+  // Keyed by IDENTITY, not aria-label alone -- see collectResultTiles' and
+  // dedupeTilesByIdentity's headers. planAriaMatches reads `[...seen.values()]`
+  // below to decide ambiguity; if two of Oliver's real duplicate library
+  // items (identical aria-label, distinct href) collapsed to one entry here,
+  // planAriaMatches would see only 1 candidate and never notice the
+  // collision -- which is exactly the 2026-09-12 gap this keys around.
   const mergeSeen = (freshTiles) => {
     let addedNew = false;
     for (const t of freshTiles) {
-      if (!seen.has(t.ariaLabel)) {
-        seen.set(t.ariaLabel, t);
+      const key = tileIdentity(t);
+      if (!seen.has(key)) {
+        seen.set(key, t);
         addedNew = true;
       }
     }
@@ -1236,6 +1384,17 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
       if (findMatchingJob(remaining, parsed) === job) {
         await confirmAndTrash(page, job, parsed, text, query, queue, dryRun);
         remaining = remaining.filter((j) => j !== job);
+        // Remembered so that if the exhaustive walk below still has to run
+        // (because some OTHER job on this date is unmatched), it keeps
+        // checking every photo it visits against this job too -- a duplicate
+        // copy of it can be sitting anywhere else in the day's results. See
+        // confirmAndTrash's / walkPhotoView's matchedJobs comments. A date
+        // fully resolved by the aria plan (remaining empties right below)
+        // never reaches the walk at all, so a duplicate that shares this
+        // job's exact predicted second (the identical-timestamp case
+        // planAriaMatches' own ambiguity check is designed to catch) is the
+        // one shape this still can't find -- see report.
+        matchedJobs.add(job);
       } else if (VERBOSE) {
         console.log(
           `  [aria] predicted tile for ${job.filename} did not confirm by filename ` +
@@ -1256,11 +1415,11 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
     // seed with everything already known from the aria phase above -- see
     // walkGrid's header for why it shares this map rather than starting over.
     mergeSeen(tiles);
-    return await walkGrid(page, seen, tiles, remaining, query, queue, dryRun);
+    return await walkGrid(page, seen, tiles, remaining, query, queue, dryRun, matchedJobs);
   }
 
   // --- Exhaustive fallback: in-photo-view traversal (see walkPhotoView) --
-  return await walkPhotoView(page, dateFirstTile, remaining, query, queue, dryRun);
+  return await walkPhotoView(page, dateFirstTile, remaining, query, queue, dryRun, matchedJobs);
 }
 
 /**

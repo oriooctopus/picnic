@@ -1,3 +1,5 @@
+import { tileIdentity } from '../../lib/matcher.mjs';
+
 /**
  * Minimal fake of the slice of the Playwright `page` API worker.mjs actually
  * calls (locator/keyboard/mouse/goto/bringToFront/evaluate/url/isClosed),
@@ -59,6 +61,46 @@ function ariaLabelFromSelector(selector) {
 }
 
 /**
+ * `tileLocatorFor` (2026-09-12) also pins `[href="..."]` when the tile it was
+ * built from carried one -- pull that back out the same way ariaLabelFromSelector
+ * pulls the aria-label. `null` (no href attribute in the selector at all) is
+ * the back-compat case: match by aria-label alone, exactly like every fixture
+ * written before this change.
+ */
+function hrefFromSelector(selector) {
+  const m = /\[href="((?:[^"\\]|\\.)*)"\]/.exec(selector || '');
+  return m ? m[1].replace(/\\(.)/g, '$1') : null;
+}
+
+/** tileIdentity() (matcher.mjs) expects an object; fixtures can still be bare strings. */
+function identityOf(tile) {
+  return tileIdentity(typeof tile === 'string' ? { ariaLabel: tile } : tile);
+}
+
+/**
+ * Find a tile in the currently-mounted grid by aria-label, optionally pinned
+ * to a specific href too -- mirrors tileLocatorFor's own two-attribute
+ * selector. `href == null` means the selector carried no href constraint
+ * (an older, aria-label-only selector, or a bare-string tile fixture) --
+ * match by aria-label alone, same as every fixture written before
+ * 2026-09-12. A non-null href requires an EXACT match, which is what makes
+ * two tiles sharing an aria-label but differing by href independently
+ * addressable (Oliver's real duplicate library items -- see
+ * dedupeTilesByIdentity's header in matcher.mjs).
+ */
+function findTile(page, { ariaLabel, href }) {
+  return (
+    windowedTiles(page).find((t) => {
+      const tAriaLabel = typeof t === 'string' ? t : t.ariaLabel;
+      if (tAriaLabel !== ariaLabel) return false;
+      if (href == null) return true;
+      const tHref = typeof t === 'string' ? undefined : t.href;
+      return tHref === href;
+    }) ?? null
+  );
+}
+
+/**
  * True when `selector` is an identity-scoped result-link selector built by
  * worker.mjs's tileLocatorFor (`a[href^="./search/"][aria-label="..."]`),
  * as opposed to the plain `a[href^="./search/"]` selector .all() resolves
@@ -82,10 +124,11 @@ function tilesInGrid(page) {
   const base = page.config.searchResults[query] ?? [];
   const reveals = page.config.scrollReveals[query] ?? [];
   const revealedBatches = reveals.slice(0, page.revealedCount).flat();
-  return [...base, ...revealedBatches].filter((tile) => {
-    const label = typeof tile === 'string' ? tile : tile.ariaLabel;
-    return !page.trashedLabels.has(label);
-  });
+  // Filtered by IDENTITY (href, falling back to aria-label), not aria-label
+  // alone -- 2026-09-12: two of Oliver's real duplicate library items can
+  // share an aria-label (identical EXIF capture second) but have distinct
+  // hrefs; trashing one must not make BOTH disappear from the grid.
+  return [...base, ...revealedBatches].filter((tile) => !page.trashedIdentities.has(identityOf(tile)));
 }
 
 /**
@@ -123,10 +166,6 @@ function windowedTiles(page) {
   const maxStart = Math.max(0, all.length - windowSize);
   const start = Math.min(page.windowStart, maxStart);
   return all.slice(start, start + windowSize);
-}
-
-function findTileByLabel(page, label) {
-  return windowedTiles(page).find((t) => (typeof t === 'string' ? t : t.ariaLabel) === label) ?? null;
 }
 
 /**
@@ -167,9 +206,17 @@ function photoOpen(page) {
  * click has the same effect regardless of which selector shape found the
  * tile, same as it would on the real DOM (it's the same element either way).
  */
-function openTileInFake(page, ariaLabel) {
+function openTileInFake(page, ariaLabel, href) {
   page.log.push(`tile-click:${ariaLabel}`);
   page.openedAriaLabel = ariaLabel;
+  // Separate from openedAriaLabel (used for panel-text lookups, which are
+  // legitimately keyed by aria-label since duplicate copies share identical
+  // panel content) -- openedIdentity (href, falling back to aria-label) is
+  // what performTrash/hasNextPhoto/advanceToNextTile use to find THIS
+  // specific element's position in fullOrderedTiles(), so trashing one of
+  // two aria-label-sharing duplicates only removes that ONE from the day's
+  // order, not both.
+  page.openedIdentity = href ?? ariaLabel;
   page.openedTileCount += 1;
   // Simulates the browser tab disappearing right after this tile finished
   // opening -- the NEXT guarded interaction (info panel, trash, escape...)
@@ -203,8 +250,10 @@ class FakeLocator {
     // not click, which is the one that matters for reaching the panel text.
     if (isTileIdentitySelector(this.selector)) {
       const label = ariaLabelFromSelector(this.selector);
-      if (!isUnopenable(this.page, label) && findTileByLabel(this.page, label)) {
-        openTileInFake(this.page, label);
+      const href = hrefFromSelector(this.selector);
+      const tile = findTile(this.page, { ariaLabel: label, href });
+      if (!isUnopenable(this.page, label) && tile) {
+        openTileInFake(this.page, label, typeof tile === 'string' ? undefined : tile.href);
         return;
       }
     }
@@ -237,16 +286,19 @@ class FakeLocator {
 
 /** One result-grid tile, as returned by `.all()` on the result-link selector. */
 class FakeTileLink {
-  constructor(page, ariaLabel, index) {
+  constructor(page, ariaLabel, index, href) {
     this.page = page;
     this.ariaLabel = ariaLabel;
     this.index = index;
+    this.href = href; // undefined for fixtures that never set one -- see identityOf()'s fallback to aria-label
   }
   async isVisible() {
     return this.hidden !== true;
   }
   async getAttribute(name) {
-    return name === 'aria-label' ? this.ariaLabel : null;
+    if (name === 'aria-label') return this.ariaLabel;
+    if (name === 'href') return this.href ?? null;
+    return null;
   }
   async scrollIntoViewIfNeeded() {
     this.page.log.push(`scroll:tile:${this.ariaLabel}`);
@@ -263,11 +315,15 @@ class FakeTileLink {
     // FakeTileLink still opens exactly the tile it was built for). Only this
     // POSITIONAL path can drift -- the identity-scoped locator worker.mjs's
     // openTile actually uses now (tileLocatorFor, see FakeLocator.click()
-    // above) always resolves fresh by aria-label and is immune, which is
+    // above) always resolves fresh by aria-label+href and is immune, which is
     // the whole point of the fix and what the positional-drift regression
-    // test below proves by mutation.
+    // test below proves by mutation. `staleTileClickTargets` fixtures only
+    // ever named an aria-label to drift onto (pre-2026-09-12), so the drift
+    // target opens without an href -- exactly like the pre-existing tests
+    // that exercise it, which never modelled hrefs at all.
     const driftTarget = this.page.config.staleTileClickTargets?.[this.ariaLabel];
-    openTileInFake(this.page, driftTarget ?? this.ariaLabel);
+    if (driftTarget) openTileInFake(this.page, driftTarget, undefined);
+    else openTileInFake(this.page, this.ariaLabel, this.href);
   }
 }
 
@@ -283,13 +339,18 @@ class FakeTileLink {
  * scrolling at all. Trashed labels are excluded (a deleted photo is gone
  * from the results, never revisited).
  */
+// Returns the raw tile objects (not flattened to aria-label strings) -- see
+// performTrash's header for why: two tiles can share an aria-label (Oliver's
+// real duplicate library items) but must be independently indexable by
+// IDENTITY (href, falling back to aria-label) so trashing one doesn't also
+// remove the other from this order.
 function fullOrderedTiles(page) {
   const query = page.activeQuery;
   const base = page.config.searchResults[query] ?? [];
   const reveals = (page.config.scrollReveals[query] ?? []).flat();
   return [...base, ...reveals]
-    .map((t) => (typeof t === 'string' ? t : t.ariaLabel))
-    .filter((label) => !page.trashedLabels.has(label));
+    .map((t) => (typeof t === 'string' ? { ariaLabel: t, href: undefined } : t))
+    .filter((t) => !page.trashedIdentities.has(identityOf(t)));
 }
 
 /**
@@ -298,20 +359,39 @@ function fullOrderedTiles(page) {
  * explicitly (see walkPhotoView's `advancedByDelete`) -- the view can
  * auto-advance to the next photo in the day BY ITSELF, without any
  * ArrowRight press. The next-tile lookup must run BEFORE marking the current
- * label trashed: fullOrderedTiles() filters trashed labels out, so computing
- * "what comes after me" AFTER the filter would never find the current label
- * at all (indexOf returns -1). If there's no next tile (this was the day's
- * last one), the view closes instead -- openedAriaLabel goes null, same as
- * an ordinary close, which moveToTrash's settled() check already handles
- * (`!now && panelTextBefore` reads as "settled").
+ * IDENTITY trashed: fullOrderedTiles() filters trashed identities out, so
+ * computing "what comes after me" AFTER the filter would never find the
+ * current tile at all (findIndex returns -1). If there's no next tile (this
+ * was the day's last one), the view closes instead -- openedAriaLabel/
+ * openedIdentity go null, same as an ordinary close, which moveToTrash's
+ * settled() check already handles (`!now && panelTextBefore` reads as
+ * "settled").
+ *
+ * Uses openedIdentity (href, falling back to aria-label), NOT openedAriaLabel,
+ * to find "me" in `ordered` -- two tiles can share an aria-label (Oliver's
+ * real duplicate library items), and indexOf-by-label would always find the
+ * FIRST such tile regardless of which one is actually open, silently
+ * trashing/advancing from the wrong element.
  */
 function performTrash(page) {
-  const label = page.openedAriaLabel;
-  if (label == null) return;
+  const identity = page.openedIdentity;
+  if (identity == null) return;
   const ordered = fullOrderedTiles(page);
-  const idx = ordered.indexOf(label);
-  page.trashedLabels.add(label);
-  page.openedAriaLabel = idx !== -1 && idx + 1 < ordered.length ? ordered[idx + 1] : null;
+  const idx = ordered.findIndex((t) => identityOf(t) === identity);
+  page.trashedIdentities.add(identity);
+  // Models the real "Moved to trash" toast Google Photos shows immediately
+  // after a delete (moveToTrash's settled() checks for it via a `text=/moved
+  // to (trash|bin)/i` locator). Needed for the duplicate-copy case
+  // (2026-09-12): auto-advancing onto a photo with BYTE-IDENTICAL panel text
+  // (a true duplicate of the one just trashed) makes settled()'s
+  // content-diff check alone report "not settled" even though the deletion
+  // genuinely took -- the toast is the orthogonal, content-independent
+  // signal that saves this live. Cleared the moment anything else reads it
+  // (visibleFor below), mirroring a real toast that only flashes once.
+  page.justTrashedToastVisible = true;
+  const next = idx !== -1 && idx + 1 < ordered.length ? ordered[idx + 1] : null;
+  page.openedAriaLabel = next ? next.ariaLabel : null;
+  page.openedIdentity = next ? identityOf(next) : null;
 }
 
 /**
@@ -333,20 +413,22 @@ function performTrash(page) {
  * "did not advance", which is NOT the same as "no more photos".
  */
 function hasNextPhoto(page) {
-  const label = page.openedAriaLabel;
-  if (label == null) return false;
+  const identity = page.openedIdentity;
+  if (identity == null) return false;
   const ordered = fullOrderedTiles(page);
-  const idx = ordered.indexOf(label);
+  const idx = ordered.findIndex((t) => identityOf(t) === identity);
   return idx !== -1 && idx + 1 < ordered.length;
 }
 
 function advanceToNextTile(page) {
-  const label = page.openedAriaLabel;
-  if (label == null) return;
+  const identity = page.openedIdentity;
+  if (identity == null) return;
   const ordered = fullOrderedTiles(page);
-  const idx = ordered.indexOf(label);
+  const idx = ordered.findIndex((t) => identityOf(t) === identity);
   if (idx === -1 || idx + 1 >= ordered.length) return; // unknown position, or already the last tile -- no next photo
-  page.openedAriaLabel = ordered[idx + 1];
+  const next = ordered[idx + 1];
+  page.openedAriaLabel = next.ariaLabel;
+  page.openedIdentity = identityOf(next);
 }
 
 /**
@@ -382,14 +464,16 @@ export function createFakePage(config = {}) {
     searchLog: [], // every date-search query actually submitted, in order
     activeQuery: null,
     openedAriaLabel: null,
+    openedIdentity: null, // href, falling back to aria-label -- see openTileInFake()'s header
     openedTileCount: 0,
     infoPanelOpen: false,
-    trashedLabels: new Set(),
+    trashedIdentities: new Set(), // keyed by identity (href, falling back to aria-label), not aria-label alone -- see tilesInGrid()'s header
     revealedCount: 0,
     windowStart: 0, // index into tilesInGrid(page) where the mounted window (windowedTiles) currently begins -- see mouse.wheel below
     recollectCount: {},
     escapePresses: 0,
     infoPressesSwallowed: 0, // count of "i" presses dropped so far, capped by config.swallowInfoPressesCount
+    justTrashedToastVisible: false, // see performTrash() -- flashes true for exactly one isVisible() read after a trash
     _closed: false,
     isClosed() {
       return page._closed === true;
@@ -406,6 +490,7 @@ export function createFakePage(config = {}) {
         if (key === 'Escape') {
           page.escapePresses += 1;
           page.openedAriaLabel = null;
+          page.openedIdentity = null;
         }
         if (key === 'i') {
           // Models the live-observed lost-keystroke bug: with the mimicry
@@ -426,6 +511,7 @@ export function createFakePage(config = {}) {
         if (key === 'Enter') {
           page.activeQuery = page.pendingTypedText ?? null;
           page.openedAriaLabel = null;
+          page.openedIdentity = null;
           page.revealedCount = 0;
           page.windowStart = 0; // fresh grid for the new search -- mounted window resets too
           if (page.activeQuery != null) page.searchLog.push(page.activeQuery);
@@ -515,11 +601,11 @@ export function createFakePage(config = {}) {
         // after a scroll reveal (see "scrolling reveals more tiles" in
         // worker.test.mjs) would read as a StaleTileError even though it's
         // genuinely there. `unopenableLabels` models a tile that's on-screen
-        // (findTileByLabel would find it) but that the identity-scoped
-        // selector can never resolve -- see the "unreachable tile" test.
+        // (findTile would find it) but that the identity-scoped selector can
+        // never resolve -- see the "unreachable tile" test.
         const label = ariaLabelFromSelector(selector);
         if (isUnopenable(page, label)) return 0;
-        return findTileByLabel(page, label) ? 1 : 0;
+        return findTile(page, { ariaLabel: label, href: hrefFromSelector(selector) }) ? 1 : 0;
       }
       if (/aria-label="Open info"/i.test(selector)) {
         return page.config.infoButtonFound ? 1 : 0;
@@ -548,7 +634,9 @@ export function createFakePage(config = {}) {
         all = [...all].reverse();
       }
 
-      return all.map((tile, i) => new FakeTileLink(page, typeof tile === 'string' ? tile : tile.ariaLabel, i));
+      return all.map(
+        (tile, i) => new FakeTileLink(page, typeof tile === 'string' ? tile : tile.ariaLabel, i, typeof tile === 'string' ? undefined : tile.href)
+      );
     },
     attrFor() {
       return null; // tiles resolve their own aria-label via FakeTileLink
@@ -566,6 +654,14 @@ export function createFakePage(config = {}) {
      * after walking a date the photo view covers the search box until Escape.
      */
     visibleFor(selector) {
+      if (/moved to/i.test(selector)) {
+        // One-shot: the real toast fades after a moment, and worker.mjs's
+        // settled() only needs to catch it once. Clearing here (rather than
+        // on a timer) keeps this deterministic for the fake.
+        const wasVisible = page.justTrashedToastVisible;
+        page.justTrashedToastVisible = false;
+        return wasVisible;
+      }
       if (isTileIdentitySelector(selector)) {
         // Same "grid is behind the photo view" gating as countFor's identity
         // branch above -- openTile() also calls isVisible() after count(),
@@ -574,7 +670,7 @@ export function createFakePage(config = {}) {
         if (photoOpen(page)) return false;
         const label = ariaLabelFromSelector(selector);
         if (isUnopenable(page, label)) return false;
-        const hit = findTileByLabel(page, label);
+        const hit = findTile(page, { ariaLabel: label, href: hrefFromSelector(selector) });
         return hit ? (typeof hit === 'string' ? true : hit.hidden !== true) : false;
       }
       if (/aria-label\*?="Search|placeholder\*?="Search/i.test(selector)) {

@@ -153,15 +153,27 @@ test('every visible tile is walked: a job whose photo is at the LAST tile is sti
     const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
     assert.equal(tileClicks.length, 1, `expected exactly ONE grid tile-click (the first tile), got: ${JSON.stringify(tileClicks)}`);
     assert.equal(tileClicks[0], `tile-click:${labels[0]}`, 'the ONE grid click must be the date\'s first tile');
+    // TILE_COUNT - 1 presses to walk from tile 0 to the last (matching) tile,
+    // PLUS one more (2026-09-12 duplicate-detection change): the walk no
+    // longer stops the instant every job is matched -- a second copy of a job
+    // (Oliver's real duplicate library items) could be anywhere else in the
+    // day, so it keeps trying to advance until it hits the genuine end of the
+    // day. That one extra attempt past the last tile finds no next photo and
+    // stops -- see the next test for the "several untouched tiles after the
+    // match" shape of the same behavior.
     const arrowPresses = page.log.filter((l) => l === 'key:ArrowRight').length;
-    assert.equal(arrowPresses, TILE_COUNT - 1, `expected ${TILE_COUNT - 1} ArrowRight presses to walk from tile 0 to the last tile, got ${arrowPresses}`);
+    assert.equal(arrowPresses, TILE_COUNT, `expected ${TILE_COUNT - 1} presses to reach the last tile plus 1 to confirm no further tile follows it, got ${arrowPresses}`);
   });
 });
 
-// REWRITTEN 2026-09-01: same fingerprint update as above -- "stop once
-// matched" now means "stop pressing ArrowRight once matched", not "stop
-// grid-clicking tiles".
-test('the walk stops as soon as every job is matched, without walking past it', async () => {
+// REWRITTEN 2026-09-12 (duplicate-detection change, see module header's
+// matchedJobs comments): once ANY job is matched, the walk no longer stops
+// early -- it keeps stepping through the rest of the day looking for a
+// further copy of that same job (Oliver's real duplicate library items),
+// stopping only at the genuine end of the day or MAX_STEPS_PER_DATE. This
+// test now proves the opposite of its original name: the walk does NOT stop
+// once the only job is matched, it walks every remaining tile.
+test('once matched, the walk keeps going to the end of the day looking for duplicate copies, rather than stopping early', async () => {
   await withTempQueue(async (queue) => {
     const { job } = queue.enqueue(IMG_1433_JOB);
     const labels = [
@@ -187,8 +199,191 @@ test('the walk stops as soon as every job is matched, without walking past it', 
     assert.equal(stillUnmatched.length, 0);
     const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
     assert.deepEqual(tileClicks, [`tile-click:${labels[0]}`], 'only the first tile is ever grid-clicked');
+    // A->B costs one ArrowRight (the match). Trashing B then auto-advances
+    // the view straight onto C at ZERO cost (the fakePage's performTrash
+    // models the same live auto-advance walkPhotoView's advancedByDelete
+    // handles -- see that test below). From C: one more ArrowRight reaches D,
+    // and a final attempt past D finds nothing and ends the walk. Total: 3 --
+    // C and D are visited (and checked for a duplicate copy of the matched
+    // job) even though the only job was already matched at B.
     const arrowPresses = page.log.filter((l) => l === 'key:ArrowRight').length;
-    assert.equal(arrowPresses, 1, 'must ArrowRight exactly once (A -> B, the match) and stop -- never walk on to C or D');
+    assert.equal(arrowPresses, 3, 'must walk on through C and D looking for a duplicate copy, then confirm there is no further tile after D');
+  });
+});
+
+// --- Duplicate-copy detection (2026-09-12) --------------------------------
+// Oliver has real duplicate library items: a photo downloaded to his phone
+// and separately re-uploaded by a backup tool gives Google Photos TWO
+// distinct items with the same filename+dims on the same search date. The
+// worker must trash every copy it finds on that date's search, not just the
+// first one the walk happens to reach -- while never guessing (a same-name,
+// DIFFERENT-dims photo on the same date must never be swept up as if it were
+// a copy).
+
+test('two copies of the same job on one date (identical filename+dims, different tiles): both get trashed and the job is done', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const labels = [
+      'Photo - Portrait - tile-A (first copy)',
+      'Photo - Portrait - tile-B (unrelated)',
+      'Photo - Portrait - tile-C (second copy, re-uploaded duplicate)',
+    ];
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': labels.map((ariaLabel) => ({ ariaLabel })) },
+      panelTextByLabel: {
+        'August 5, 2026': {
+          // Both A and C are IMG_1433.HEIC at the same dimensions -- two
+          // distinct Google Photos items behind two distinct tiles (this is
+          // exactly what dedupeTilesByAriaLabel would NOT collapse, since
+          // the aria-labels here are deliberately distinct -- see the report
+          // for the narrower case where they'd be identical too).
+          [labels[0]]: IMG_1433_BLOCK,
+          [labels[1]]: panelBlock('IMG_0002.HEIC', 1000, 1000),
+          [labels[2]]: IMG_1433_BLOCK,
+        },
+      },
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'the job is done once every copy on the date is accounted for');
+    const record = queue.getById(job.id);
+    assert.equal(record.status, 'trashed');
+    assert.equal(record.copiesTrashed, 2, 'the job record must reflect BOTH copies trashed, not just the first');
+    // Two real '#' deletions -- the unrelated B tile must never be touched.
+    const deletions = page.log.filter((l) => l === 'key:#').length;
+    assert.equal(deletions, 2, 'both the first and second copy must actually be trashed');
+  });
+});
+
+test('same filename, DIFFERENT dimensions on the same date: never swept up as a duplicate copy', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB); // 2316x3088
+    const labels = [
+      'Photo - Portrait - tile-A (real copy)',
+      'Photo - Portrait - tile-B (same filename, different photo entirely)',
+    ];
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': labels.map((ariaLabel) => ({ ariaLabel })) },
+      panelTextByLabel: {
+        'August 5, 2026': {
+          [labels[0]]: IMG_1433_BLOCK, // 2316x3088 -- the real match
+          // Same filename, but different pixel dimensions (neither straight
+          // nor transposed match) -- e.g. a filename collision from a reset
+          // camera counter. dimensionsAgree() must refuse this, exactly the
+          // same "never guess" rule that already governs the FIRST match.
+          [labels[1]]: panelBlock('IMG_1433.HEIC', 1200, 1600),
+        },
+      },
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0);
+    const record = queue.getById(job.id);
+    assert.equal(record.status, 'trashed');
+    assert.equal(record.copiesTrashed, 1, 'the dimension-mismatched tile must NOT be counted as a second copy');
+    const deletions = page.log.filter((l) => l === 'key:#').length;
+    assert.equal(deletions, 1, 'only the genuinely matching tile is ever trashed');
+  });
+});
+
+// The aria fast path's own ambiguity check (planAriaMatches: exactly one
+// candidate tile at the predicted second, or defer) is what a TRUE duplicate
+// hits first live -- a re-uploaded copy shares its original's EXIF capture
+// time down to the second, so it predicts to the SAME slot as the original
+// and makes that job's slot ambiguous (candidates.length > 1), deferring the
+// WHOLE job to the exhaustive walk rather than ever risking the aria path
+// picking one of the two arbitrarily. This proves the walk it falls through
+// to then finds and trashes BOTH.
+test('duplicate via the aria pre-match path: an identical-second collision defers to the walk, which trashes both copies', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB); // predicts to Aug 5, 6:54:07 PM local at +6h offset
+    const { job: calibrationJob } = queue.enqueue(IMG_1441_JOB); // unambiguous second pair, needed so calibrateOffsetSeconds has 2 agreeing pairs
+    const dupLabelA = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
+    const dupLabelB = 'Photo - Landscape - Aug 5, 2026, 6:54:07 PM'; // distinct aria-label, SAME predicted second -- the collision
+    const calibrationLabel = 'Photo - Portrait - Aug 5, 2026, 7:31:07 PM';
+    const page = createFakePage({
+      searchResults: {
+        'August 5, 2026': [{ ariaLabel: dupLabelA }, { ariaLabel: dupLabelB }, { ariaLabel: calibrationLabel }],
+      },
+      panelTextByLabel: {
+        'August 5, 2026': {
+          [dupLabelA]: IMG_1433_BLOCK,
+          [dupLabelB]: IMG_1433_BLOCK, // the duplicate copy: identical filename+dims
+          [calibrationLabel]: IMG_1441_BLOCK,
+        },
+      },
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job, calibrationJob], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0);
+    assert.equal(queue.getById(calibrationJob.id).status, 'trashed', 'the unambiguous calibration job resolves via the aria fast path');
+    const record = queue.getById(job.id);
+    assert.equal(record.status, 'trashed');
+    assert.equal(record.copiesTrashed, 2, 'both same-second copies must be trashed once the collision defers to the walk');
+    const deletions = page.log.filter((l) => l === 'key:#').length;
+    assert.equal(deletions, 3, 'the calibration job (1) plus both duplicate copies (2) — total 3 deletions');
+  });
+});
+
+// 2026-09-12 FOLLOW-UP: this is Oliver's ACTUAL common case, not the test
+// above's manufactured collision. A photo downloaded to his phone and
+// separately re-uploaded by a backup tool carries the SAME EXIF capture
+// second, so Google Photos renders the SAME aria-label text for both grid
+// tiles ("Photo - Portrait - Aug 5, 2026, 6:54:07 PM") -- and it's usually
+// the ONLY job on that date (one deletion, one date search), so there's no
+// second job around to force the exhaustive walk if the aria path resolves
+// this one. Before dedupeTilesByIdentity (matcher.mjs), collectResultTiles
+// deduped by aria-label ALONE, silently collapsing the two distinct DOM
+// tiles (different hrefs) into ONE entry before planAriaMatches ever saw
+// them -- so the aria path found exactly 1 candidate, "resolved" the job,
+// and the second copy was NEVER independently discovered by any path. Now
+// dedupeTilesByIdentity keeps both (distinct hrefs -> distinct identity), so
+// planAriaMatches sees 2 candidates at the same predicted second, defers to
+// the walk, and the walk (tileLocatorFor addressing by href+aria-label, and
+// fakePage's identity-based fullOrderedTiles/performTrash) can open and
+// trash each one independently.
+test('duplicate via the aria pre-match path: two tiles with an IDENTICAL aria-label but DISTINCT hrefs are two real items, both trashed', async () => {
+  await withTempQueue(async (queue) => {
+    // Deliberately ONE job on this date -- the realistic shape: without a
+    // second job to leave `remaining` non-empty, the OLD aria-label-only
+    // dedup would let the aria path "fully resolve" the date after trashing
+    // just one of the two duplicates, never running the walk at all.
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const { job: calibrationJob } = queue.enqueue(IMG_1441_JOB); // needed only so calibrateOffsetSeconds has 2 agreeing (job, tile) pairs -- see planAriaMatches
+    const dupLabel = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
+    const calibrationLabel = 'Photo - Portrait - Aug 5, 2026, 7:31:07 PM';
+    const page = createFakePage({
+      searchResults: {
+        'August 5, 2026': [
+          { ariaLabel: dupLabel, href: './search/photo/AAA' },
+          { ariaLabel: dupLabel, href: './search/photo/BBB' }, // IDENTICAL aria-label, DIFFERENT href -- two real Google Photos items
+          { ariaLabel: calibrationLabel, href: './search/photo/CAL' },
+        ],
+      },
+      panelTextByLabel: {
+        'August 5, 2026': {
+          [dupLabel]: IMG_1433_BLOCK, // both AAA and BBB render this SAME panel text -- that's what "duplicate" means
+          [calibrationLabel]: IMG_1441_BLOCK,
+        },
+      },
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job, calibrationJob], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0);
+    assert.equal(queue.getById(calibrationJob.id).status, 'trashed', 'the unambiguous calibration job still resolves via the aria fast path');
+    const record = queue.getById(job.id);
+    assert.equal(record.status, 'trashed');
+    assert.equal(
+      record.copiesTrashed,
+      2,
+      'AAA and BBB are two distinct Google Photos items (different hrefs) despite sharing an aria-label -- both must be trashed, not collapsed into one'
+    );
+    const deletions = page.log.filter((l) => l === 'key:#').length;
+    assert.equal(deletions, 3, 'calibration (1) plus both duplicate copies (2) — total 3 deletions');
   });
 });
 
@@ -957,10 +1152,14 @@ test('after a successful trash, traversal does not skip the following photo (the
     assert.equal(queue.getById(jobA.id).status, 'trashed');
     assert.equal(queue.getById(jobB.id).status, 'trashed');
     // The fingerprint: trashing A auto-advances the view straight onto B, and
-    // trashing B auto-advances onto C -- so reaching and confirming BOTH
-    // matches costs ZERO ArrowRight presses.
+    // trashing B auto-advances onto C -- reaching and confirming BOTH matches
+    // costs ZERO ArrowRight presses. C is a non-match, and (2026-09-12
+    // duplicate-detection change) the walk keeps going past it looking for a
+    // further copy of A or B rather than stopping the instant both are
+    // matched -- that costs exactly ONE press (the failed attempt to advance
+    // past C, the actual last tile).
     const arrowPresses = page.log.filter((l) => l === 'key:ArrowRight').length;
-    assert.equal(arrowPresses, 0, 'job A auto-advances directly onto job B, and job B onto C; no ArrowRight is ever needed');
+    assert.equal(arrowPresses, 1, 'job A auto-advances directly onto job B, and job B onto C; the only ArrowRight is the failed attempt past C');
   });
 });
 
