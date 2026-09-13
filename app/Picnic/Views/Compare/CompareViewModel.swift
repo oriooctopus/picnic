@@ -100,9 +100,19 @@ final class CompareViewModel: ObservableObject {
 
     /// Per-photo resolution: every rejected member is cued for deletion and
     /// every accepted member is marked kept, in one undoable batch.
-    /// Unmarked members are deliberately left untouched — they stay
-    /// unsorted in the deck rather than being inferred into either bucket,
-    /// which is what makes marking a subset meaningful. Rejected members go
+    ///
+    /// Unmarked members depend on which marks were made:
+    /// - Accepts only (no trash marks): "keep these, lose the rest" — every
+    ///   unmarked member is cued for deletion. This is the core Compare
+    ///   gesture (thumbs-up the best shot, confirm, duplicates gone). The
+    ///   2026-09-04 multi-select rewrite dropped it by accident, leaving
+    ///   accept-one-and-confirm a no-op for the rest of the group.
+    /// - Any trash mark present: unmarked members stay unsorted. The user
+    ///   is picking out specific bad shots ("delete just this one of
+    ///   five"), so sweeping the untouched ones into the bin would delete
+    ///   photos they never judged.
+    ///
+    /// Rejected members go
     /// into the deck's pending-delete cue via `onResolve`, exactly like a
     /// swipe-left, and are only actually deleted later when the user presses
     /// the deck's X. `onResolve` alone carries every write this resolution
@@ -113,7 +123,12 @@ final class CompareViewModel: ObservableObject {
         isResolving = true
         defer { isResolving = false }
 
-        let toDelete = group.assets.filter { rejectedAssetIDs.contains($0.localIdentifier) }
+        let deleteUnmarked = rejectedAssetIDs.isEmpty
+        let toDelete = group.assets.filter {
+            let id = $0.localIdentifier
+            return rejectedAssetIDs.contains(id)
+                || (deleteUnmarked && !acceptedAssetIDs.contains(id))
+        }
         let kept = group.assets.filter { acceptedAssetIDs.contains($0.localIdentifier) }
 
         onResolve(toDelete, kept, group.id)

@@ -62,8 +62,10 @@ All in `/home/esme/inbox/`, files `2026-08-02-1453*-IMG_138[2-9].png` and
    advance, and the last card stays put rather than wrapping. The thumbnail strip shows a green dot per kept photo
    and a red dot per photo cued for deletion. Confirming applies exactly the
    marks made: rejected members join the deck's pending-delete cue (still
-   only committed by the deck's X), accepted members are marked kept, and
-   **unmarked members are left untouched and stay unsorted in the deck**.
+   only committed by the deck's X) and accepted members are marked kept.
+   Unmarked members: **if only thumbs-ups were made, every unmarked member
+   is cued for delete** ("keep these, lose the rest"); **if any photo was
+   trashed, unmarked members stay unsorted in the deck**.
    (This supersedes the earlier "resolution is total" rule, where accepting
    one photo deleted every other member and rejecting one deleted them all —
    that made "delete just this one bad shot out of five" impossible.)

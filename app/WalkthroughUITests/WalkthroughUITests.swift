@@ -402,12 +402,11 @@ final class WalkthroughUITests: XCTestCase {
         openCompare()
         let confirmButton = acceptFirstComparePhoto()
 
-        // MARK: Also reject the second photo before confirming. Marks are
-        // now independent per photo (see CompareViewModel.confirmResolution),
-        // so an accept-only confirm cues NOTHING for delete and this test's
-        // whole point — proving Compare defers to the deck's pending-delete
-        // cue instead of showing PhotoKit's own dialog — would have nothing
-        // to observe. Paging via compare.thumb.1 (not a card swipe) sets
+        // MARK: Also reject the second photo before confirming, so this
+        // exercises the mixed-marks path (accept-only confirm is covered by
+        // test46). Either way the point is the same — proving Compare
+        // defers to the deck's pending-delete cue instead of showing
+        // PhotoKit's own dialog. Paging via compare.thumb.1 (not a card swipe) sets
         // pageIndex synchronously, same reasoning as test32/33/42 below.
         let secondThumb = app.descendants(matching: .any)["compare.thumb.1"].firstMatch
         XCTAssertTrue(secondThumb.waitForExistence(timeout: 5), "Second group member's thumbnail should exist in the bottom strip")
@@ -2609,5 +2608,39 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(thumb2.value as? String, "unsorted",
                        "This tap must have toggled photo 2's OWN mark off — proving favorite did not advance the pager away from it")
         capture("55-compare-autoadvance-favorite-no-advance", delay: 0.3)
+    }
+
+    /// Regression test for the accept-only confirm: thumbs-up ONE photo,
+    /// confirm, and every other (unmarked) member must be cued for delete.
+    /// The 2026-09-04 multi-select rewrite (b88e7ab) made unmarked members
+    /// always stay unsorted, so this core gesture silently deleted nothing
+    /// and left the duplicates in the deck. Counterpart to test42, which
+    /// proves unmarked members DO stay unsorted once any photo is trashed.
+    func test46CompareAcceptOnlyConfirmCuesEveryUnmarkedPhoto() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
+        openMayDeck()
+        let baseline = pendingCount()
+        openCompare()
+
+        let confirmButton = acceptFirstComparePhoto()
+        capture("56-compare-accept-only", delay: 0.3)
+        confirmButton.tap()
+
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 10), "Confirming should return to the deck")
+        capture("57-deck-after-accept-only-confirm", delay: 0.3)
+
+        let afterConfirm = pendingCount()
+        XCTAssertEqual(afterConfirm, baseline + 3,
+                       "Accepting 1 of the 4-photo group and confirming should cue the other 3 for delete (baseline \(baseline), observed \(afterConfirm))")
+
+        let thumb0 = app.descendants(matching: .any)["filmstrip.thumb.0"].firstMatch
+        XCTAssertTrue(thumb0.waitForExistence(timeout: 5))
+        XCTAssertEqual(thumb0.value as? String, "kept", "The accepted photo must be kept, not cued")
+        for i in 1...3 {
+            let thumb = app.descendants(matching: .any)["filmstrip.thumb.\(i)"].firstMatch
+            XCTAssertTrue(thumb.waitForExistence(timeout: 5))
+            XCTAssertEqual(thumb.value as? String, "pending", "Unmarked photo \(i) should be cued for delete after an accept-only confirm")
+        }
     }
 }
