@@ -82,6 +82,33 @@ test('filenamesAgree: case-insensitive', () => {
   assert.equal(filenamesAgree('IMG_1433.HEIC', 'IMG_1434.HEIC'), false);
 });
 
+// A March 2026 bulk re-import appended "_Original" to local filenames (see
+// PhotoLibraryService.swift git history); Google Photos' info panel still
+// shows the bare name for the same photo. 110 jobs got stuck in
+// needs_review because the exact string compare never agreed -- confirmed
+// live 2026-09-22.
+test('filenamesAgree: strips a job\'s trailing "_Original" suffix before comparing', () => {
+  assert.equal(filenamesAgree('IMG_6716_Original.HEIC', 'IMG_6716.HEIC'), true);
+  assert.equal(filenamesAgree('IMG_6716_original.heic', 'img_6716.HEIC'), true, 'case-insensitive on both sides');
+});
+
+test('filenamesAgree: "_Original" suffix does not turn a real mismatch into a match', () => {
+  assert.equal(filenamesAgree('IMG_6716_Original.HEIC', 'IMG_9999.HEIC'), false);
+});
+
+test('filenamesAgree: "_Original" only strips immediately before the extension, not mid-name', () => {
+  // Guards against over-generalizing into a fuzzy matcher -- a filename
+  // that merely CONTAINS "_Original" elsewhere must still require an exact
+  // match, per findMatchingJob's "never guess" doc comment.
+  assert.equal(filenamesAgree('IMG_Original_6716.HEIC', 'IMG_6716.HEIC'), false);
+});
+
+test('findMatchingJob: a job with an "_Original"-suffixed filename matches the panel\'s bare filename', () => {
+  const jobs = [{ id: 'a', filename: 'IMG_6716_Original.HEIC', pixelWidth: 4032, pixelHeight: 3024 }];
+  const parsed = { filename: 'IMG_6716.HEIC', pixelWidth: 4032, pixelHeight: 3024 };
+  assert.equal(findMatchingJob(jobs, parsed)?.id, 'a');
+});
+
 test('dimensionsAgree: matches straight', () => {
   const job = { pixelWidth: 3024, pixelHeight: 4032 };
   assert.equal(dimensionsAgree(job, { pixelWidth: 3024, pixelHeight: 4032 }), true);

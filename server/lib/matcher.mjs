@@ -81,8 +81,25 @@ export function parsePanelText(rawText) {
   };
 }
 
+/**
+ * A bulk re-import into the local photo library can append "_Original"
+ * immediately before the extension (e.g. IMG_6716_Original.HEIC), while
+ * Google Photos keeps the bare original name for the same photo
+ * (IMG_6716.HEIC) -- confirmed live 2026-09-22 against 110 jobs stuck in
+ * needs_review from a March 2026 re-import (see PhotoLibraryService.swift /
+ * worker.mjs git history for the re-import itself; no need to touch the
+ * Swift side). Strip exactly that known suffix before comparing. This is
+ * narrow on purpose, not a fuzzy matcher: any other divergence (a real
+ * filename mismatch) still fails, preserving findMatchingJob's exact-match
+ * philosophy.
+ */
+function stripOriginalSuffix(name) {
+  return name.replace(/_original(?=\.[^.]+$)/i, '');
+}
+
 export function filenamesAgree(a, b) {
-  return typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  return stripOriginalSuffix(a).toLowerCase() === stripOriginalSuffix(b).toLowerCase();
 }
 
 /**
