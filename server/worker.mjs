@@ -1552,11 +1552,28 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'pho
   }
 }
 
+// Runs `work()` and forces the process to exit once it settles, success or
+// failure, instead of relying on Node's event loop to empty naturally. The
+// worker's CDP connection (chromium.connectOverCDP, deliberately never
+// closed — see the comment on browser.close() above) keeps an open WebSocket
+// handle alive for the whole run, so on any error path where runWorker()
+// catches internally and returns instead of throwing (e.g. the
+// openInfoPanelOnce timeout), the old code — `runWorker(args).catch(...)`
+// with no forced exit — would just sit there forever with near-zero CPU,
+// never re-triggering autodrain's reschedule. Exported for testing.
+export async function exitAfterSettled(work) {
+  try {
+    await work();
+  } catch (err) {
+    loud(`BLOCKER: unhandled worker failure: ${err.stack || err}`);
+    process.exitCode = 1;
+  } finally {
+    process.exit(process.exitCode ?? 0);
+  }
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = parseArgs(process.argv.slice(2));
   if (args.slow) SLOW = true;
-  runWorker(args).catch((err) => {
-    loud(`BLOCKER: unhandled worker failure: ${err.stack || err}`);
-    process.exit(1);
-  });
+  exitAfterSettled(() => runWorker(args));
 }

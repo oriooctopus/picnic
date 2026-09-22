@@ -1,11 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import { JobQueue } from '../lib/queue.mjs';
 import { groupJobsByDate } from '../lib/matcher.mjs';
 import { createFakePage } from './helpers/fakePage.mjs';
+
+const WORKER_MJS_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'worker.mjs');
 
 // Must be set BEFORE worker.mjs is evaluated (it reads the env var once, at
 // module load, into a top-level FAST_DELAYS const) — dynamic import lets us
@@ -24,6 +28,7 @@ const {
   EMPTY_SEARCH_RETRIES,
   parseArgs,
   stealthDelayRange,
+  exitAfterSettled,
 } = await import('../worker.mjs');
 
 async function withTempQueue(fn) {
@@ -1398,3 +1403,155 @@ for (const walk of ['photo', 'grid']) {
     });
   });
 }
+
+// --- exitAfterSettled: the worker-never-terminates regression ------------
+//
+// Confirmed live (2026-09-22, worker-runs/2026-09-22T13-20-18.443Z.log and
+// .../13-51-24.122Z.log): runWorker's own try/catch swallows errors (sets
+// process.exitCode = 1, then returns normally instead of re-throwing), so
+// the top-level `runWorker(args).catch(...)` never fired, and the still-open
+// CDP WebSocket (chromium.connectOverCDP — deliberately never closed, since
+// browser.close() would kill Oliver's real Chrome) kept the event loop alive
+// forever. The child process sat idle for 30+ minutes until manually killed.
+//
+// exitAfterSettled fixes this by always calling process.exit() once work()
+// settles, on every path (resolve, resolve-with-exitCode-already-set, or
+// reject) — see the comment above its definition in worker.mjs.
+
+function spawnNode(scriptPath) {
+  return spawn(process.execPath, [scriptPath], { stdio: 'ignore' });
+}
+
+/** Resolves true if the child is STILL alive `ms` after spawning (i.e. hung), then kills it. */
+function stillRunningAfter(scriptPath, ms) {
+  return new Promise((resolve) => {
+    const child = spawnNode(scriptPath);
+    let exited = false;
+    child.on('exit', () => {
+      exited = true;
+    });
+    setTimeout(() => {
+      resolve(!exited);
+      // Clean up regardless of outcome -- this is the process we expect
+      // (and want) to still be hanging on its open handle.
+      child.kill('SIGKILL');
+    }, ms);
+  });
+}
+
+/** Resolves once the child exits on its own, or times out (and is force-killed) after `timeoutMs`. */
+function waitForExit(scriptPath, timeoutMs) {
+  return new Promise((resolve) => {
+    const child = spawnNode(scriptPath);
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      resolve({ timedOut: true, code: null });
+    }, timeoutMs);
+    child.on('exit', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ timedOut: false, code });
+    });
+  });
+}
+
+test('exitAfterSettled: process.exit(0) on a clean success', async () => {
+  const originalExit = process.exit;
+  const originalExitCode = process.exitCode;
+  process.exitCode = undefined;
+  const exitCalls = [];
+  process.exit = (code) => exitCalls.push(code);
+  try {
+    await exitAfterSettled(async () => 'ok');
+    assert.deepEqual(exitCalls, [0]);
+  } finally {
+    process.exit = originalExit;
+    process.exitCode = originalExitCode;
+  }
+});
+
+test('exitAfterSettled: work() that sets process.exitCode=1 and RETURNS NORMALLY (runWorker\'s own internal catch shape — openInfoPanelOnce timeout, etc.) still forces exit(1)', async () => {
+  const originalExit = process.exit;
+  const originalExitCode = process.exitCode;
+  process.exitCode = undefined;
+  const exitCalls = [];
+  process.exit = (code) => exitCalls.push(code);
+  try {
+    await exitAfterSettled(async () => {
+      // Mirrors runWorker's `catch (err) { loud(...); process.exitCode = 1; }`
+      // — the error is swallowed, not re-thrown, which is exactly what made
+      // the old `.catch()`-only wrapper never fire.
+      process.exitCode = 1;
+    });
+    assert.deepEqual(exitCalls, [1]);
+  } finally {
+    process.exit = originalExit;
+    process.exitCode = originalExitCode;
+  }
+});
+
+test('exitAfterSettled: a work() that THROWS is caught and forces exit(1)', async () => {
+  const originalExit = process.exit;
+  const originalExitCode = process.exitCode;
+  process.exitCode = undefined;
+  const exitCalls = [];
+  process.exit = (code) => exitCalls.push(code);
+  try {
+    await exitAfterSettled(async () => {
+      throw new Error('boom');
+    });
+    assert.deepEqual(exitCalls, [1]);
+  } finally {
+    process.exit = originalExit;
+    process.exitCode = originalExitCode;
+  }
+});
+
+test('regression: an open handle (standing in for the never-closed CDP socket) hangs the process forever WITHOUT a forced exit, but exitAfterSettled exits promptly despite it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'picnic-worker-exit-test-'));
+  try {
+    // OLD shape (what worker.mjs used to do at its bottom): `work().catch(...)`
+    // with nothing forcing a real exit. A live handle -- here a plain
+    // setInterval, standing in for the CDP WebSocket connectOverCDP leaves
+    // open -- keeps Node's event loop non-empty, so the process never exits
+    // on its own. This is the counterfactual proof: without the fix, this
+    // exact shape hangs.
+    const oldPath = join(dir, 'old-shape.mjs');
+    writeFileSync(
+      oldPath,
+      `
+      const work = async () => {
+        setInterval(() => {}, 1000000);
+      };
+      work().catch(() => {
+        process.exitCode = 1;
+      });
+      `
+    );
+
+    // NEW shape: the real exitAfterSettled from worker.mjs, same open handle.
+    const newPath = join(dir, 'new-shape.mjs');
+    writeFileSync(
+      newPath,
+      `
+      import { exitAfterSettled } from ${JSON.stringify(WORKER_MJS_PATH)};
+      exitAfterSettled(async () => {
+        setInterval(() => {}, 1000000);
+      });
+      `
+    );
+
+    const oldStillHanging = await stillRunningAfter(oldPath, 1500);
+    assert.equal(oldStillHanging, true, 'old shape (no forced exit) must still be hanging on the open handle after 1.5s');
+
+    const newResult = await waitForExit(newPath, 5000);
+    assert.equal(newResult.timedOut, false, 'new shape (exitAfterSettled) must exit on its own despite the open handle');
+    assert.equal(newResult.code, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
