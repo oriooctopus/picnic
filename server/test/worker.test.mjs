@@ -2744,3 +2744,89 @@ test('walkTimeline: trashing the last LOADED photo closes the viewer -- the walk
     assert.equal(queue.getById(job2.id).status, 'trashed');
   });
 });
+
+// ============================================================================
+// ROUND 8 (2026-09-25 live finding): two full walks each logged exactly 198
+// "UNREADABLE" photos, none of the 8 remaining jobs' filenames ever read.
+// Oliver's own probe of 5 of those photo URLs showed the panel was OPEN the
+// whole time (its "Details" heading rendered) but the FIELDS (capture date,
+// filename, dimensions) took up to ~9s longer to render -- the recovery loop
+// couldn't tell "open but loading" apart from "closed" and pressed 'i'/
+// clicked "Open info" every round regardless, which CLOSES an already-open
+// panel and restarts the render from nothing, forever.
+// ============================================================================
+
+test('waitForTimelineAdvanceConfirmed / openInfoPanelOnce: the panel is OPEN but still LOADING ("Details" heading only, no fields yet) -- polls without ever toggling, and reads the full text once it renders', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_9910.HEIC', creationDate: '2026-09-10T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = dateTimelineTile('load1', 'Sep', 11);
+    const tile2 = dateTimelineTile('load2', 'Sep', 10);
+    // A 3rd tile PAST the stop boundary (job1's date minus the 2-day
+    // buffer, i.e. before Sep 8) so trashing tile2 auto-advances normally
+    // onto a REAL next tile and the walk stops cleanly via its own date
+    // check -- avoids a genuinely-closed "no next tile" end-of-library
+    // recovery (a DIFFERENT, already-covered code path, see the "GENUINELY
+    // closed" test below) from adding unrelated toggle activity to this
+    // test's own togglesWhileOpen assertion.
+    const tile3 = dateTimelineTile('load3', 'Sep', 5);
+    const panelText = {
+      [tile1.ariaLabel]: timelinePanelText('IMG_9909.HEIC', 'Sep', 11),
+      [tile2.ariaLabel]: timelinePanelText('IMG_9910.HEIC', 'Sep', 10),
+      [tile3.ariaLabel]: timelinePanelText('IMG_9908.HEIC', 'Sep', 5),
+    };
+    const page = createFakePage({
+      timelineTiles: [tile1, tile2, tile3],
+      timelinePanelTextByLabel: panelText,
+      // Every fresh photo (tile1's own opening via openInfoPanelOnce, tile2's
+      // arrival via waitForTimelineAdvanceConfirmed's recovery loop, AND
+      // tile3's trash-driven auto-advance arrival) shows "Details" only for
+      // the first 30 reads before the real text -- exercises every fixed
+      // call site in one walk. 30 (not a smaller number) matters: under
+      // FAST_DELAYS a handful of loading reads resolve within Phase A's own
+      // passive poll alone, never reaching the recovery loop this test
+      // actually targets -- empirically confirmed by mutation-testing this
+      // exact fixture (5 reads passed even with the fix's toggle-guard
+      // DISABLED, proving nothing; 30 correctly fails when disabled).
+      timelinePanelDetailsOnlyReads: 30,
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, [job1], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'the job must still be found once the slow-loading panel finishes rendering');
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.equal(
+      page.togglesWhileOpen ?? 0,
+      0,
+      'must never press "i" / click "Open info" while the panel is open but merely loading -- doing so CLOSES it (the exact live bug)'
+    );
+  });
+});
+
+test('waitForTimelineAdvanceConfirmed / openInfoPanelOnce: a GENUINELY closed panel (no Details heading at all) still gets reopened -- open-but-loading detection does not suppress real recovery', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_9920.HEIC', creationDate: '2026-09-10T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = dateTimelineTile('closed1', 'Sep', 11);
+    const tile2 = dateTimelineTile('closed2', 'Sep', 10);
+    const panelText = {
+      [tile1.ariaLabel]: timelinePanelText('IMG_9919.HEIC', 'Sep', 11),
+      [tile2.ariaLabel]: timelinePanelText('IMG_9920.HEIC', 'Sep', 10),
+    };
+    const page = createFakePage({
+      timelineTiles: [tile1, tile2],
+      timelinePanelTextByLabel: panelText,
+      // tile2's arrival CLOSES the panel entirely (no Details heading at
+      // all, distinct from the details-only "loading" case above) --
+      // recovery must still actively reopen it.
+      timelinePanelClosesOnLabels: [tile2.ariaLabel],
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, [job1], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'the job must still be found once the genuinely closed panel is reopened');
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.ok(
+      page.log.some((l) => l === 'key:i' || l.includes('Open info')),
+      `expected a real reopen action (key press or "Open info" click) in the log, got: ${JSON.stringify(page.log)}`
+    );
+  });
+});

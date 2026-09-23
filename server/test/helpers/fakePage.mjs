@@ -252,14 +252,24 @@ function tilesInTimeline(page) {
  * tolerant of both text shapes without touching those fixtures.
  */
 function classifyPanelText(text) {
-  if (!text) return { detailsAndFile: [], dimsAndFile: [], fileOnly: [] };
+  const empty = { detailsAndFile: [], dimsAndFile: [], fileOnly: [], detailsHeadingOnly: [] };
+  if (!text) return empty;
   const DIMS = /\d{3,5}\s*[×x]\s*\d{3,5}/;
   const FILE = /[A-Za-z0-9._-]+\.(HEIC|JPG|JPEG|PNG|MOV|MP4)/i; // no trailing \b -- see header above
   const DETAILS = /Details/;
-  if (!FILE.test(text)) return { detailsAndFile: [], dimsAndFile: [], fileOnly: [] };
-  if (DETAILS.test(text)) return { detailsAndFile: [text], dimsAndFile: [], fileOnly: [] };
-  if (DIMS.test(text)) return { detailsAndFile: [], dimsAndFile: [text], fileOnly: [] };
-  return { detailsAndFile: [], dimsAndFile: [], fileOnly: [text] };
+  if (!FILE.test(text)) {
+    // ROUND 8 (2026-09-25 live finding): a visible "Details" heading with NO
+    // filename yet is the panel OPEN but still LOADING -- distinct from
+    // CLOSED (no Details heading at all). See isPanelOpenButLoading's own
+    // header in worker.mjs for the live bug this models: Oliver's probe
+    // showed the Details container's innerText was JUST "Details" for up to
+    // ~9s after opening before the full panel rendered.
+    if (/^Details\b/.test(text.trim())) return { ...empty, detailsHeadingOnly: [text] };
+    return empty;
+  }
+  if (DETAILS.test(text)) return { detailsAndFile: [text], dimsAndFile: [], fileOnly: [], detailsHeadingOnly: [] };
+  if (DIMS.test(text)) return { detailsAndFile: [], dimsAndFile: [text], fileOnly: [], detailsHeadingOnly: [] };
+  return { detailsAndFile: [], dimsAndFile: [], fileOnly: [text], detailsHeadingOnly: [] };
 }
 
 /**
@@ -274,12 +284,14 @@ function classifyPanelText(text) {
  * "date lines outside the filename element" test in worker.test.mjs).
  */
 function panelTextCandidateSets(value) {
-  if (value == null) return { detailsAndFile: [], dimsAndFile: [], fileOnly: [] };
+  const empty = { detailsAndFile: [], dimsAndFile: [], fileOnly: [], detailsHeadingOnly: [] };
+  if (value == null) return empty;
   if (typeof value === 'string') return classifyPanelText(value);
   return {
     detailsAndFile: value.detailsAndFile ?? [],
     dimsAndFile: value.dimsAndFile ?? [],
     fileOnly: value.fileOnly ?? [],
+    detailsHeadingOnly: value.detailsHeadingOnly ?? [],
   };
 }
 
@@ -310,6 +322,13 @@ function timelinePanelTextFor(page) {
     page._timelinePanelIdentity = currentIdentity;
     page._timelinePendingRenderDelay = page.config.timelinePanelRenderDelayReads ?? 0;
     page._timelinePendingStaleReads = page._timelinePanelPrevText ? page.config.timelineStaleReadsAfterAdvance ?? 0 : 0;
+    // ROUND 8 (2026-09-25 live finding): the first N reads after a transition
+    // show the "Details" HEADING rendered but its fields not yet -- see
+    // classifyPanelText's own header for the exact live symptom this models.
+    // Distinct from timelinePanelRenderDelayReads above, which models
+    // nothing being visible AT ALL yet (a closed-looking panel); this models
+    // a genuinely OPEN, merely still-loading one.
+    page._timelinePendingDetailsOnly = page.config.timelinePanelDetailsOnlyReads ?? 0;
     page._timelinePanelRealText = page.config.timelinePanelTextByLabel?.[page.openedAriaLabel] ?? '';
   }
   // A fixture can configure an OBJECT (explicit candidate-set shape, see
@@ -326,6 +345,15 @@ function timelinePanelTextFor(page) {
   if (page._timelinePendingRenderDelay > 0) {
     page._timelinePendingRenderDelay -= 1;
     return '';
+  }
+  if (page._timelinePendingDetailsOnly > 0) {
+    page._timelinePendingDetailsOnly -= 1;
+    // An explicit candidate-set object (see panelTextCandidateSets' header)
+    // rather than a plain string -- a bare "Details" string would ALSO
+    // classify this way via classifyPanelText's own round-8 branch, but
+    // returning the object directly here keeps this phase's behaviour
+    // independent of that string-classification path entirely.
+    return { detailsHeadingOnly: ['Details'] };
   }
   if (page._timelinePendingStaleReads > 0) {
     // A trailing-space marker (not just the raw previous text verbatim)
@@ -836,6 +864,15 @@ export function createFakePage(config = {}) {
             // Was open -- 'i' always closes it. Unaffected by
             // `timelinePanelReopenFailuresBeforeSuccess` below, which only
             // ever models an OPEN attempt failing, never a close.
+            // ROUND 8 (2026-09-25 live finding): toggling an OPEN panel is
+            // never correct, whether the panel is fully rendered or still
+            // "Details"-only loading -- tracked here (not gated on the
+            // loading state specifically) so a test can assert "zero
+            // toggles happened at all" while a read is in progress, the
+            // exact live bug (waitForTimelineAdvanceConfirmed's recovery
+            // loop closing an already-open-but-loading panel every round,
+            // so it could never finish rendering).
+            page.togglesWhileOpen = (page.togglesWhileOpen ?? 0) + 1;
             page.infoPanelOpen = false;
           } else {
             attemptOpenInfoPanel(page);
@@ -991,7 +1028,9 @@ export function createFakePage(config = {}) {
       // since neither of those callers does anything with an unexpected
       // shape beyond an occasional VERBOSE-only log line.
       page.log.push('evaluate:panelText');
-      if (!page.infoPanelOpen || page.openedAriaLabel == null) return { detailsAndFile: [], dimsAndFile: [], fileOnly: [] };
+      if (!page.infoPanelOpen || page.openedAriaLabel == null) {
+        return { detailsAndFile: [], dimsAndFile: [], fileOnly: [], detailsHeadingOnly: [] };
+      }
       // 2026-09-22: the timeline has no `activeQuery` to key panel text off
       // (it's never reached via search) -- `timelinePanelTextByLabel` is a
       // flat ariaLabel->text map instead of the grid's query-nested shape.
@@ -1179,7 +1218,21 @@ export function createFakePage(config = {}) {
       return false;
     },
     async onClick(selector) {
-      if (/aria-label="Open info"/i.test(selector)) attemptOpenInfoPanel(page);
+      if (/aria-label="Open info"/i.test(selector)) {
+        // ROUND 8 (2026-09-25 live finding): the "Open info" button is a
+        // TOGGLE just like 'i' -- clicking it while the panel is already
+        // open closes it (see the 'i' keyboard handler's identical
+        // togglesWhileOpen tracking, above, for the live bug this models).
+        // Pre-round-8 this branch only ever modelled a genuinely-closed
+        // panel being opened, since no earlier fixture needed the toggle-
+        // closes-an-open-panel behaviour exercised via the BUTTON path.
+        if (page.infoPanelOpen) {
+          page.togglesWhileOpen = (page.togglesWhileOpen ?? 0) + 1;
+          page.infoPanelOpen = false;
+        } else {
+          attemptOpenInfoPanel(page);
+        }
+      }
       // Toolbar fallback click ALSO only opens the dialog now -- see the '#'
       // handler's comment above. `trashDialogNeverAppears` models the
       // confirmed-live false positive (job B4D8DDA7...): the click resolves

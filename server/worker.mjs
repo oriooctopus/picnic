@@ -645,16 +645,31 @@ async function openInfoPanelOnce(page) {
   let attempts = 0;
   while (Date.now() < deadline) {
     await pollDelay();
-    const text = await readPanelText(page);
+    // A SINGLE read decides both "is there a filename" and "is this open
+    // but still loading" -- see waitForTimelineAdvanceConfirmed's Phase B
+    // (worker.mjs) for the exact race two SEPARATE reads produce (the panel
+    // can finish loading in the instant between them) and why this function
+    // must not repeat it.
+    const candidateSets = await readPanelCandidateSets(page);
+    const text = selectPanelText(candidateSets);
     if (parsePanelText(text).filename) {
       await stealthDelay(800, 2000); // "dwell reading the panel" — pure mimicry, off unless --slow
       return;
     }
+    attempts += 1;
+    // ROUND 8 (2026-09-25 live finding): a visible "Details" heading with NO
+    // filename yet means the panel is genuinely OPEN but still LOADING, not
+    // closed -- see isPanelOpenButLoading's own header for the live evidence
+    // (Details-only for up to ~9s). Pressing 'i'/clicking "Open info" here
+    // would CLOSE an already-open panel (this function's own sticky-toggle
+    // rule two lines below the header), restarting the render from nothing
+    // every time -- exactly the bug this branch exists to stop. Just keep
+    // polling; do NOT toggle/re-press while loading.
+    if ((candidateSets.detailsHeadingOnly ?? []).length > 0) continue;
     // Re-press rather than trusting the single keystroke above: if it landed
     // mid-transition it was simply lost, and polling forever for a panel that
     // was never opened is the failure this replaces. Re-press on a slower
     // cadence than the poll so we never toggle it shut again immediately.
-    attempts += 1;
     if (attempts % 8 === 0) {
       await page.keyboard.press('i');
     }
@@ -713,28 +728,43 @@ export function selectPanelText({ detailsAndFile = [], dimsAndFile = [], fileOnl
   return '';
 }
 
-async function readPanelText(page) {
-  // Verified live: the details block is an unlabelled div, found by content
-  // rather than a selector, which Google does not give us a stable one for.
-  // The FILTERING happens here, DOM-side inside evaluate() (cheap: a real
-  // Google Photos page carries hundreds of div/c-wiz/aside elements, and
-  // only the handful that actually match ever cross back over the bridge)
-  // -- the actual TIERED DECISION is selectPanelText() above, kept OUTSIDE
-  // evaluate() specifically so it's unit-testable.
-  //
-  // VISIBLE-ONLY (2026-09-23 live finding): a 449-photo run showed the
-  // SAME stale filename ("IMG_2201.PNG") read back on ~10 different
-  // photos scattered across that run -- some element holding an EARLIER
-  // photo's text was still present in the DOM (a prior viewer instance,
-  // or a panel Google keeps around hidden) and occasionally won the
-  // smallest-element tiebreak over the CURRENT, genuinely visible panel.
-  // offsetWidth/offsetHeight > 0 excludes a hidden/collapsed element the
-  // same way jQuery's :visible does, without needing a stable selector for
-  // "the current viewer" that Google doesn't expose. This can't fully
-  // replace the filename-must-change poll (waitForTimelineAdvanceConfirmed)
-  // -- a stale-but-currently-visible element is still possible -- so both
-  // defenses stay in place together.
-  const candidateSets = await page
+/**
+ * Shared DOM read behind both readPanelText and isPanelOpenButLoading below
+ * -- one evaluate() round trip serves both questions ("what does the panel
+ * say" and "is it open but still rendering"), since they're the SAME
+ * underlying DOM scan. Verified live: the details block is an unlabelled
+ * div, found by content rather than a selector, which Google does not give
+ * us a stable one for. The FILTERING happens here, DOM-side inside
+ * evaluate() (cheap: a real Google Photos page carries hundreds of
+ * div/c-wiz/aside elements, and only the handful that actually match ever
+ * cross back over the bridge) -- the actual TIERED DECISION is
+ * selectPanelText() above, kept OUTSIDE evaluate() specifically so it's
+ * unit-testable.
+ *
+ * VISIBLE-ONLY (2026-09-23 live finding): a 449-photo run showed the SAME
+ * stale filename ("IMG_2201.PNG") read back on ~10 different photos
+ * scattered across that run -- some element holding an EARLIER photo's text
+ * was still present in the DOM (a prior viewer instance, or a panel Google
+ * keeps around hidden) and occasionally won the smallest-element tiebreak
+ * over the CURRENT, genuinely visible panel. offsetWidth/offsetHeight > 0
+ * excludes a hidden/collapsed element the same way jQuery's :visible does,
+ * without needing a stable selector for "the current viewer" that Google
+ * doesn't expose. This can't fully replace the filename-must-change poll
+ * (waitForTimelineAdvanceConfirmed) -- a stale-but-currently-visible
+ * element is still possible -- so both defenses stay in place together.
+ *
+ * `detailsHeadingOnly` (2026-09-25, round 8 live finding): a visible
+ * element whose text STARTS WITH "Details" but carries no filename yet --
+ * Oliver's own probe of 5 of the 198 "UNREADABLE" photos from two full live
+ * runs showed the Details container's innerText was JUST "Details" for up
+ * to ~9s right after the panel opened, before the full panel (capture date,
+ * filename, dimensions...) rendered. This is the panel OPEN but still
+ * LOADING -- structurally different from CLOSED (no visible Details
+ * heading at all), a distinction isPanelOpenButLoading exists to draw so
+ * its callers stop mistaking "still loading" for "needs reopening".
+ */
+async function readPanelCandidateSets(page) {
+  return page
     .evaluate(() => {
       const DIMS = /\d{3,5}\s*[\u00d7x]\s*\d{3,5}/;
       const FILE = /[A-Za-z0-9._-]+\.(HEIC|JPG|JPEG|PNG|MOV|MP4)\b/i;
@@ -747,10 +777,36 @@ async function readPanelText(page) {
         detailsAndFile: all.filter((t) => DETAILS.test(t) && FILE.test(t)),
         dimsAndFile: all.filter((t) => DIMS.test(t) && FILE.test(t)),
         fileOnly: all.filter((t) => FILE.test(t)),
+        detailsHeadingOnly: all.filter((t) => /^Details\b/.test(t.trim()) && !FILE.test(t)),
       };
     })
-    .catch(() => ({ detailsAndFile: [], dimsAndFile: [], fileOnly: [] }));
-  return selectPanelText(candidateSets);
+    .catch(() => ({ detailsAndFile: [], dimsAndFile: [], fileOnly: [], detailsHeadingOnly: [] }));
+}
+
+async function readPanelText(page) {
+  return selectPanelText(await readPanelCandidateSets(page));
+}
+
+/**
+ * True when the info panel is genuinely OPEN but its fields haven't
+ * rendered yet -- see readPanelCandidateSets' own header (detailsHeadingOnly)
+ * for the live evidence this exists to act on. Callers (waitForTimeline-
+ * AdvanceConfirmed's recovery loop, openInfoPanelOnce) must NEVER press
+ * 'i'/click "Open info" in this state -- toggling an ALREADY-OPEN panel
+ * CLOSES it (openInfoPanelOnce's own sticky-toggle rule), which is exactly
+ * what produced 198 "UNREADABLE" photos across two full live runs: the
+ * recovery loop kept "reopening" a panel that was never actually closed,
+ * so it could never finish loading. The correct response here is simply to
+ * keep POLLING, not to act.
+ */
+async function isPanelOpenButLoading(page) {
+  const candidateSets = await readPanelCandidateSets(page);
+  // `?? []`: readPanelCandidateSets' own evaluate() callback always includes
+  // detailsHeadingOnly, but several existing direct-seam tests hand-build a
+  // minimal page mock predating this field (evaluate() returning only
+  // {detailsAndFile, dimsAndFile, fileOnly}) -- treat an absent field as "no
+  // evidence of loading" rather than throwing.
+  return (candidateSets.detailsHeadingOnly ?? []).length > 0;
 }
 
 /**
@@ -1853,20 +1909,33 @@ const PANEL_RECOVERY_ROUND_WAIT_MS = 1500;
  *      (see point 4).
  *   2. Once the URL has moved, read the panel. If it already has a
  *      filename, skip straight to step 3's staleness check.
- *   3. Otherwise -- PANEL-RECOVERY LOOP (2026-09-24, round 4): a live run
- *      showed the panel can stay genuinely unreadable across MULTIPLE
- *      recovery attempts, and the single keyboard-only reopen an earlier
- *      version of this function tried can itself fail outright (a real
- *      run's activeElement ended up BUTTON[Open info] afterward -- the
- *      click path got as far as landing focus on the button but the panel
- *      still hadn't rendered, or 'i' toggled an already-open panel shut
- *      mid-render). For up to MAX_PANEL_RECOVERY_ROUNDS rounds: PREFER
- *      clicking a VISIBLE "Open info" control over pressing 'i' -- 'i' on
- *      an ALREADY-OPEN panel CLOSES it (openInfoPanelOnce's own
- *      sticky-toggle behaviour), so blindly keying risks flipping a panel
- *      that's merely slow to render shut mid-open; 'i' is only used when
- *      no visible button exists to click. Waits a real
- *      PANEL_RECOVERY_ROUND_WAIT_MS between rounds, then re-reads.
+ *   3. Otherwise -- PANEL-RECOVERY LOOP (2026-09-24, round 4; REWORKED
+ *      2026-09-25, round 8): a live run showed the panel can stay genuinely
+ *      unreadable across MULTIPLE recovery attempts, and the single
+ *      keyboard-only reopen an earlier version of this function tried can
+ *      itself fail outright (a real run's activeElement ended up
+ *      BUTTON[Open info] afterward -- the click path got as far as landing
+ *      focus on the button but the panel still hadn't rendered, or 'i'
+ *      toggled an already-open panel shut mid-render).
+ *
+ *      ROUND 8: that "still hadn't rendered" case turned out to be the
+ *      COMMON one, not a rare edge -- Oliver's own probe of 5 of 198
+ *      "UNREADABLE" photos from two full live runs showed the panel was
+ *      OPEN the whole time (its "Details" heading rendered) but the FIELDS
+ *      took up to ~9s longer to fill in, which reads identically to CLOSED
+ *      from a bare "no filename yet" check. Every round now checks
+ *      isPanelOpenButLoading FIRST: if the panel is open-but-loading, this
+ *      does NOTHING but wait and re-read (bounded by its own ~15s deadline)
+ *      -- clicking/keying here would CLOSE an already-open panel
+ *      (openInfoPanelOnce's own sticky-toggle rule) and restart the render
+ *      from nothing, which is exactly what produced all 198 of those
+ *      photos. Only a GENUINELY closed panel (no visible Details heading at
+ *      all) gets the original click-preferred-over-key reopen, bounded by
+ *      MAX_PANEL_RECOVERY_ROUNDS -- PREFER clicking a VISIBLE "Open info"
+ *      control over pressing 'i' there too, for the same close-on-toggle
+ *      reason; 'i' is only used when no visible button exists to click.
+ *      Waits a real PANEL_RECOVERY_ROUND_WAIT_MS between rounds either way,
+ *      then re-reads.
  *   4. If the panel is STILL unreadable after every round, this is no
  *      longer treated as "not yet confirmed" the way it used to be --
  *      the URL DID change, we genuinely are on a different, real photo,
@@ -1911,14 +1980,59 @@ export async function waitForTimelineAdvanceConfirmed(page, beforeUrl, previousT
     filename = parsePanelText(text).filename;
   }
 
-  // PHASE B -- bounded active-recovery loop (2026-09-24, round 4 fix):
-  // engages ONLY when Phase A's whole window elapsed with the panel still
-  // genuinely EMPTY (not merely stale-but-present, which Phase A already
-  // handles) -- a different problem needing real DOM actions, not more
-  // passive waiting.
-  for (let round = 0; round < MAX_PANEL_RECOVERY_ROUNDS && !filename; round++) {
+  // PHASE B -- bounded active-recovery loop (2026-09-24, round 4; REWORKED
+  // 2026-09-25, round 8): engages ONLY when Phase A's whole window elapsed
+  // with the panel still genuinely EMPTY (not merely stale-but-present,
+  // which Phase A already handles).
+  //
+  // ROUND 8 LIVE FINDING: two genuinely different reasons produce an
+  // IDENTICAL "no filename yet" symptom. Oliver's own probe of 5 of 198
+  // "UNREADABLE" photos across two full live runs showed the panel was
+  // actually OPEN the whole time -- its Details heading rendered, but the
+  // FIELDS (capture date, filename, dimensions) took up to ~9s longer to
+  // fill in. The OLD version of this loop couldn't tell that apart from a
+  // genuinely CLOSED panel and pressed 'i'/clicked "Open info" every round
+  // regardless -- which CLOSES an already-open panel (this function's own
+  // header, step 3's toggle rule) and restarts the render from nothing,
+  // forever, exactly why those 198 photos never finished loading across TWO
+  // separate full walks. isPanelOpenButLoading distinguishes the two cases
+  // every round: open-but-loading gets NO action at all, just another
+  // wait+reread (bounded by its own ~15s deadline, matching
+  // openInfoPanelOnce's identical wait for the identical symptom); a
+  // genuinely CLOSED panel still gets the original click-preferred-over-key
+  // reopen, bounded by MAX_PANEL_RECOVERY_ROUNDS exactly as round 4 left it.
+  const phaseBDeadline = Date.now() + (FAST_DELAYS ? 50 : 15000);
+  let closedRecoveryRounds = 0;
+  while (!filename && Date.now() < phaseBDeadline) {
+    // A SINGLE read decides everything for this round -- filename AND
+    // open-but-loading come from the SAME candidateSets, never two separate
+    // evaluate() calls. Checking them separately (an earlier version of
+    // this loop did: isPanelOpenButLoading() first, act, THEN a fresh
+    // readPanelText() only in the fallthrough) left a real race: the panel
+    // can finish loading in the instant BETWEEN those two calls, so the
+    // first call correctly reports "not loading anymore" while the second,
+    // late check has no way to know a filename ALSO just appeared -- caught
+    // empirically (not by inspection) by a mutation-adjacent stress run
+    // that saw an occasional wrongful toggle immediately after a panel
+    // finished rendering, on the exact round where "loading" flipped to
+    // "loaded". Reading once and branching on that one snapshot removes the
+    // window entirely.
+    const candidateSets = await readPanelCandidateSets(page);
+    text = selectPanelText(candidateSets);
+    filename = parsePanelText(text).filename;
+    if (filename) break;
+    if ((candidateSets.detailsHeadingOnly ?? []).length > 0) {
+      // Genuinely open, still loading -- see isPanelOpenButLoading's own
+      // header for the live evidence. Just wait and try again; NEVER
+      // touch the toggle here.
+      if (VERBOSE) console.log('    [timeline] panel open but still loading -- waiting, no toggle');
+      await sleep(FAST_DELAYS ? 0 : PANEL_RECOVERY_ROUND_WAIT_MS);
+      continue;
+    }
+    if (closedRecoveryRounds >= MAX_PANEL_RECOVERY_ROUNDS) break;
+    closedRecoveryRounds += 1;
     if (VERBOSE) {
-      console.log(`    [timeline] panel unreadable after URL change, recovery round ${round + 1}/${MAX_PANEL_RECOVERY_ROUNDS}`);
+      console.log(`    [timeline] panel unreadable after URL change, recovery round ${closedRecoveryRounds}/${MAX_PANEL_RECOVERY_ROUNDS}`);
     }
     const openInfoButton = page.locator(OPEN_INFO_SELECTOR).first();
     if (await openInfoButton.isVisible().catch(() => false)) {
@@ -1929,8 +2043,6 @@ export async function waitForTimelineAdvanceConfirmed(page, beforeUrl, previousT
       await page.keyboard.press('i');
     }
     await sleep(FAST_DELAYS ? 0 : PANEL_RECOVERY_ROUND_WAIT_MS);
-    text = await readPanelText(page);
-    filename = parsePanelText(text).filename;
   }
 
   if (!filename) {
