@@ -5,6 +5,7 @@ import {
   filenamesAgree,
   dimensionsAgree,
   findMatchingJob,
+  basenameAgreesWithinCaptureWindow,
   utcDateOf,
   shiftDateDays,
   formatSearchDate,
@@ -227,6 +228,77 @@ test('findMatchingJob: a panel with no dimensions at all (info panel never rende
   const jobs = [{ id: 'a', filename: 'IMG_6636.JPG', pixelWidth: 1170, pixelHeight: 1111 }];
   const parsed = { filename: 'IMG_6636.JPG', pixelWidth: null, pixelHeight: null };
   assert.equal(findMatchingJob(jobs, parsed)?.id, 'a');
+});
+
+// ============================================================================
+// ROUND 7 (2026-09-25 live finding): live run 9 (f3ea689) walked the WHOLE
+// library correctly and stopped past the oldest job -- but 4 of the 12 still
+// unmatched jobs WERE read by the walk and refused, because they're phone
+// re-import EDITS (job filenames end "..._Original.JPG") while Google Photos
+// still holds the ORIGINAL, unedited file under a DIFFERENT extension (the
+// panel reads "IMG_6636.PNG", not "...JPG" at all -- not a typo, a permanent
+// structural mismatch this specific re-import always produces).
+// basenameAgreesWithinCaptureWindow (lib/matcher.mjs) is the fix: base name
+// agrees + extension differs + panel captureDateMs within 3 minutes of the
+// job's own creationDate. The four pairs below are the EXACT live evidence.
+// ============================================================================
+
+test('findMatchingJob: LIVE PAIR IMG_6636 -- base name agrees, extension differs (JPG vs PNG), captureDate within the window -> matches', () => {
+  const jobs = [{ id: 'a', filename: 'IMG_6636_Original.JPG', creationDate: '2026-03-18T04:59:00.000Z' }];
+  const parsed = { filename: 'IMG_6636.PNG', captureDateMs: Date.parse('2026-03-18T04:59:00.000Z') };
+  assert.equal(findMatchingJob(jobs, parsed)?.id, 'a');
+});
+
+test('findMatchingJob: LIVE PAIR IMG_6664 -- base name agrees, extension differs, captureDate within the window -> matches', () => {
+  const jobs = [{ id: 'a', filename: 'IMG_6664_Original.JPG', creationDate: '2026-03-21T02:58:00.000Z' }];
+  const parsed = { filename: 'IMG_6664.PNG', captureDateMs: Date.parse('2026-03-21T02:58:00.000Z') };
+  assert.equal(findMatchingJob(jobs, parsed)?.id, 'a');
+});
+
+test('findMatchingJob: LIVE PAIR IMG_6686 -- base name agrees, extension differs, captureDate within the window -> matches', () => {
+  const jobs = [{ id: 'a', filename: 'IMG_6686_Original.JPG', creationDate: '2026-03-23T18:19:00.000Z' }];
+  const parsed = { filename: 'IMG_6686.PNG', captureDateMs: Date.parse('2026-03-23T18:19:00.000Z') };
+  assert.equal(findMatchingJob(jobs, parsed)?.id, 'a');
+});
+
+test('findMatchingJob: LIVE PAIR IMG_6562 -- the panel read 1 MINUTE off the job\'s creationDate (21:16 vs job\'s 21:15) still matches within the window', () => {
+  const jobs = [{ id: 'a', filename: 'IMG_6562_Original.JPG', creationDate: '2026-03-11T21:15:00.000Z' }];
+  const parsed = { filename: 'IMG_6562.PNG', captureDateMs: Date.parse('2026-03-11T21:16:00.000Z') };
+  assert.equal(findMatchingJob(jobs, parsed)?.id, 'a');
+});
+
+test('findMatchingJob: LIVE PAIR IMG_6562 -- a SECOND, genuinely different copy 2 HOURS off (19:16) must NOT match, only the 21:16 one may', () => {
+  const jobs = [{ id: 'a', filename: 'IMG_6562_Original.JPG', creationDate: '2026-03-11T21:15:00.000Z' }];
+  const parsed = { filename: 'IMG_6562.PNG', captureDateMs: Date.parse('2026-03-11T19:16:00.000Z') };
+  assert.equal(findMatchingJob(jobs, parsed), null, 'a copy 2 hours off the job\'s own creationDate must never be guessed as the same photo');
+});
+
+test('basenameAgreesWithinCaptureWindow: base name agrees and extension differs, but captureDateMs is MISSING entirely -> no match (no time evidence to gate on)', () => {
+  const job = { filename: 'IMG_6636_Original.JPG', creationDate: '2026-03-18T04:59:00.000Z' };
+  const parsed = { filename: 'IMG_6636.PNG', captureDateMs: null };
+  assert.equal(basenameAgreesWithinCaptureWindow(job, parsed), false);
+  assert.equal(findMatchingJob([{ id: 'a', ...job }], parsed), null, 'the base-name path must never guess without a captureDate to check');
+});
+
+test('basenameAgreesWithinCaptureWindow: a DIFFERENT base name never matches, even with the extension differing and captureDate agreeing exactly', () => {
+  const job = { filename: 'IMG_6636_Original.JPG', creationDate: '2026-03-18T04:59:00.000Z' };
+  const parsed = { filename: 'IMG_9999.PNG', captureDateMs: Date.parse('2026-03-18T04:59:00.000Z') };
+  assert.equal(basenameAgreesWithinCaptureWindow(job, parsed), false);
+  assert.equal(findMatchingJob([{ id: 'a', ...job }], parsed), null);
+});
+
+test('basenameAgreesWithinCaptureWindow: the SAME extension never uses this path -- that is filenamesAgree\'s job, and a genuine base+extension mismatch (different filenames) still correctly refuses', () => {
+  // Same base, same extension, but the FULL filenames differ in a way that
+  // isn't just _Original -- e.g. a totally different job. filenamesAgree()
+  // already refuses this; basenameAgreesWithinCaptureWindow must not create
+  // a second, looser path to the same wrong conclusion.
+  const job = { filename: 'IMG_6636_Original.PNG', creationDate: '2026-03-18T04:59:00.000Z' };
+  const parsed = { filename: 'IMG_6636.PNG', captureDateMs: Date.parse('2026-03-18T04:59:00.000Z') };
+  // This one SHOULD match, but via filenamesAgree (same extension, base
+  // name agrees after stripping _Original) -- confirming the two paths
+  // don't double-count or conflict when both extensions genuinely agree.
+  assert.equal(findMatchingJob([{ id: 'a', ...job }], parsed)?.id, 'a');
+  assert.equal(basenameAgreesWithinCaptureWindow(job, parsed), false, 'same extension must never be treated as the extension-tolerant case');
 });
 
 test('findMatchingJob: two queued jobs sharing a filename on the same date window remain ambiguous -> no match, even though only one filename is on the panel', () => {

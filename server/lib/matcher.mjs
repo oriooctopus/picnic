@@ -234,6 +234,59 @@ export function filenamesAgree(a, b) {
   return stripOriginalSuffix(a).toLowerCase() === stripOriginalSuffix(b).toLowerCase();
 }
 
+/** `stripOriginalSuffix` plus the extension itself, lowercased -- shared by basenameAgreesWithinCaptureWindow's two comparisons below. */
+function baseNameNoExtension(name) {
+  return stripOriginalSuffix(name).replace(/\.[^.]+$/, '').toLowerCase();
+}
+
+/** The bare extension (no leading dot), lowercased; '' if there isn't one. */
+function extensionOf(name) {
+  const m = /\.([^.]+)$/.exec(name);
+  return m ? m[1].toLowerCase() : '';
+}
+
+// Panel captures only MINUTE precision (matcher.mjs's captureDatePattern --
+// no seconds field at all), so a genuine same-photo pair can legitimately
+// read 1 minute apart depending on which side of a minute boundary each
+// timestamp source rounds to. 3 minutes covers that with margin while still
+// rejecting the real 2026-09-25 live evidence this exists for: two DISTINCT
+// copies of "IMG_6562" sat a full 2 HOURS apart (T21:15 vs T19:16) -- only
+// the one within minutes of the job's own creationDate may ever match.
+const EXTENSION_TOLERANT_WINDOW_MS = 3 * 60 * 1000;
+
+/**
+ * A job also matches a panel read when the BASE name agrees (after
+ * stripping _Original and the extension) but the EXTENSION itself differs --
+ * live finding 2026-09-25: 4 jobs from a phone re-import are EDITED exports
+ * (job filenames end "..._Original.JPG"), while Google Photos still holds
+ * the ORIGINAL, unedited file under its own extension (the panel reads
+ * "IMG_6636.PNG" while the job says "IMG_6636_Original.JPG"). This is not a
+ * typo or drift -- it's a permanent, structural difference this specific
+ * re-import always produces, so the exact-match filenamesAgree() above
+ * correctly refuses these forever; they were stuck in needs_review with no
+ * other path to ever confirm them.
+ *
+ * Extension tolerance ALONE would be too loose -- many unrelated photos can
+ * share a base name across different exports/extensions -- so this also
+ * requires the panel's captureDateMs to land within
+ * EXTENSION_TOLERANT_WINDOW_MS of the job's own creationDate (see that
+ * constant's header for the exact live evidence this window size is tuned
+ * against). A read with no captureDateMs at all (matcher.mjs's
+ * parseCaptureDateMs can legitimately return null -- see its own header)
+ * has no time evidence to gate on and NEVER matches via this path --
+ * exact-filename matching, unaffected by any of this, remains the only way
+ * such a read can ever match.
+ */
+export function basenameAgreesWithinCaptureWindow(job, parsed) {
+  if (parsed.captureDateMs == null) return false;
+  if (typeof job?.filename !== 'string' || typeof parsed.filename !== 'string') return false;
+  if (extensionOf(job.filename) === extensionOf(parsed.filename)) return false; // same extension -> filenamesAgree()'s job, not this one's
+  if (baseNameNoExtension(job.filename) !== baseNameNoExtension(parsed.filename)) return false;
+  const jobMs = new Date(job.creationDate).getTime();
+  if (!Number.isFinite(jobMs)) return false;
+  return Math.abs(parsed.captureDateMs - jobMs) <= EXTENSION_TOLERANT_WINDOW_MS;
+}
+
 /**
  * Dimensions agree either as-reported or transposed -- Google Photos can
  * report W x H the other way round relative to the job's pixelWidth/
@@ -270,10 +323,21 @@ export function dimensionsAgree(job, parsed) {
  *
  * The "never guess" rule is unchanged: zero or more than one candidate job
  * agreeing on filename => null.
+ *
+ * 2026-09-25: a candidate job can ALSO agree via basenameAgreesWithinCapture-
+ * Window (same base name, different extension, captureDateMs within its own
+ * tight window -- see that function's own header for the live re-import
+ * case this exists for). Both kinds of agreement feed the SAME pool before
+ * the ambiguity check runs, so a job that would exact-match AND a different
+ * job that would only base-name-match against the same read still correctly
+ * refuse as ambiguous (0 or >1 => null), exactly like two exact-filename
+ * matches always have.
  */
 export function findMatchingJob(jobs, parsed) {
   if (!parsed || !parsed.filename) return null;
-  const matches = jobs.filter((job) => filenamesAgree(job.filename, parsed.filename));
+  const matches = jobs.filter(
+    (job) => filenamesAgree(job.filename, parsed.filename) || basenameAgreesWithinCaptureWindow(job, parsed)
+  );
   return matches.length === 1 ? matches[0] : null;
 }
 
