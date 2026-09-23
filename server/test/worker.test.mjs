@@ -666,7 +666,7 @@ test('moveToTrash: confirm dialog NEVER becomes visible (neither the \'#\' short
     },
   };
 
-  const confirmed = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
+  const { confirmed } = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
 
   assert.equal(confirmed, false, 'a confirm dialog that never appears must never read as a confirmed trash');
 });
@@ -704,7 +704,7 @@ test('moveToTrash: confirm dialog shown and clicked, followed by the "moved to t
     evaluate: async () => ({ detailsAndFile: [], dimsAndFile: [], fileOnly: [] }), // panel text never changes -- the toast alone must be sufficient
   };
 
-  const confirmed = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
+  const { confirmed } = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
 
   assert.equal(confirmed, true, 'a genuinely shown-and-clicked dialog followed by the toast must confirm');
 });
@@ -753,7 +753,7 @@ test('moveToTrash: the confirm dialog button DETACHES on the first click but the
     evaluate: async () => ({ detailsAndFile: [], dimsAndFile: [], fileOnly: [] }),
   };
 
-  const confirmed = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
+  const { confirmed } = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
 
   assert.equal(confirmed, true, 'a detach mid-click with the dialog still up must retry and confirm, not throw');
   assert.equal(clickAttempts, 2, 'expected exactly one retry after the first detach');
@@ -794,7 +794,7 @@ test('moveToTrash: the confirm dialog button DETACHES on the first click because
     evaluate: async () => ({ detailsAndFile: [], dimsAndFile: [], fileOnly: [] }),
   };
 
-  const confirmed = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
+  const { confirmed } = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
 
   assert.equal(confirmed, true, 'a detach whose dialog is already gone WITH toast evidence must confirm without a further retry click');
   assert.equal(clickAttempts, 1, 'must not retry once gone-with-evidence is recognized');
@@ -1899,9 +1899,9 @@ test('walkTimeline: duplicate copies of the same job are both trashed', async ()
   await withTempQueue(async (queue) => {
     const { job } = queue.enqueue({ filename: 'IMG_6060.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
 
-    const copyA = timelineTile('copyA');
-    const copyB = timelineTile('copyB');
-    const filler = timelineTile('filler');
+    const copyA = dateTimelineTile('copyA', 'Aug', 20);
+    const copyB = dateTimelineTile('copyB', 'Aug', 18);
+    const filler = dateTimelineTile('filler', 'Aug', 19);
     const tiles = [copyA, filler, copyB]; // a non-matching photo sits BETWEEN the two copies
     const panelText = {
       [copyA.ariaLabel]: timelinePanelText('IMG_6060.HEIC', 'Aug', 20),
@@ -1930,8 +1930,8 @@ test('walkTimeline: trashing a photo does not skip the one right after it (no-sk
     const { job: jobA } = queue.enqueue({ filename: 'IMG_7001.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
     const { job: jobB } = queue.enqueue({ filename: 'IMG_7002.HEIC', creationDate: '2026-08-19T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
 
-    const tileA = timelineTile('tileA');
-    const tileB = timelineTile('tileB');
+    const tileA = dateTimelineTile('tileA', 'Aug', 20);
+    const tileB = dateTimelineTile('tileB', 'Aug', 19);
     const tiles = [tileA, tileB];
     const panelText = {
       [tileA.ariaLabel]: timelinePanelText('IMG_7001.HEIC', 'Aug', 20),
@@ -2069,8 +2069,8 @@ test('walkTimeline: a STALE read right after advancing (still shows the previous
     // catching up.
     const { job: job1 } = queue.enqueue({ filename: 'IMG_2932.JPG', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
     const { job: job2 } = queue.enqueue({ filename: 'IMG_2931.HEIC', creationDate: '2026-08-19T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
-    const tile1 = timelineTile('t1');
-    const tile2 = timelineTile('t2');
+    const tile1 = dateTimelineTile('t1', 'Aug', 20);
+    const tile2 = dateTimelineTile('t2', 'Aug', 19);
     const panelText = {
       [tile1.ariaLabel]: timelinePanelText('IMG_2932.JPG', 'Aug', 20),
       [tile2.ariaLabel]: timelinePanelText('IMG_2931.HEIC', 'Aug', 19),
@@ -2106,8 +2106,8 @@ test('walkTimeline: URL-based advance confirmation -- MUTATION PROOF that revert
   await withTempQueue(async (queue) => {
     const { job: job1 } = queue.enqueue({ filename: 'IMG_2932.JPG', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
     const { job: job2 } = queue.enqueue({ filename: 'IMG_2931.HEIC', creationDate: '2026-08-19T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
-    const tile1 = timelineTile('m1');
-    const tile2 = timelineTile('m2');
+    const tile1 = dateTimelineTile('m1', 'Aug', 20);
+    const tile2 = dateTimelineTile('m2', 'Aug', 19);
     const panelText = {
       [tile1.ariaLabel]: timelinePanelText('IMG_2932.JPG', 'Aug', 20),
       [tile2.ariaLabel]: timelinePanelText('IMG_2931.HEIC', 'Aug', 19),
@@ -2260,8 +2260,8 @@ test('waitForTimelineAdvanceConfirmed: filename stays stale for SEVERAL reads (r
   await withTempQueue(async (queue) => {
     const { job: job1 } = queue.enqueue({ filename: 'IMG_2932.JPG', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
     const { job: job2 } = queue.enqueue({ filename: 'IMG_2931.HEIC', creationDate: '2026-08-19T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
-    const tile1 = timelineTile('long1');
-    const tile2 = timelineTile('long2');
+    const tile1 = dateTimelineTile('long1', 'Aug', 20);
+    const tile2 = dateTimelineTile('long2', 'Aug', 19);
     const panelText = {
       [tile1.ariaLabel]: timelinePanelText('IMG_2932.JPG', 'Aug', 20),
       [tile2.ariaLabel]: timelinePanelText('IMG_2931.HEIC', 'Aug', 19),
@@ -2307,9 +2307,9 @@ test('walkTimeline: recovers from lost keyboard focus after a failed trash-dialo
     // advanceTimelinePhotoView's recovery pass must fix.
     const { job: job1 } = queue.enqueue({ filename: 'IMG_9900.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
     const { job: job2 } = queue.enqueue({ filename: 'IMG_9901.HEIC', creationDate: '2026-08-18T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
-    const tile1 = timelineTile('focus1');
-    const filler = timelineTile('focusfiller');
-    const tile2 = timelineTile('focus2');
+    const tile1 = dateTimelineTile('focus1', 'Aug', 20);
+    const filler = dateTimelineTile('focusfiller', 'Aug', 19);
+    const tile2 = dateTimelineTile('focus2', 'Aug', 18);
     const panelText = {
       [tile1.ariaLabel]: timelinePanelText('IMG_9900.HEIC', 'Aug', 20),
       [filler.ariaLabel]: timelinePanelText('IMG_9950.HEIC', 'Aug', 19),
@@ -2360,7 +2360,7 @@ test('walkTimeline: the info panel closes on roughly half of all advances (empty
     const jobs = [];
     const closesOnLabels = [];
     for (let i = 0; i < 6; i++) {
-      const t = timelineTile(`round3-${i}`);
+      const t = dateTimelineTile(`round3-${i}`, 'Aug', 20 - i);
       const filename = `IMG_94${String(10 + i).padStart(2, '0')}.HEIC`;
       tiles.push(t);
       panelText[t.ariaLabel] = timelinePanelText(filename, 'Aug', 20 - i);
@@ -2388,8 +2388,8 @@ test('walkTimeline: a closed panel after a TRASH-driven auto-advance is also reo
   await withTempQueue(async (queue) => {
     const { job: job1 } = queue.enqueue({ filename: 'IMG_9420.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
     const { job: job2 } = queue.enqueue({ filename: 'IMG_9421.HEIC', creationDate: '2026-08-19T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
-    const tile1 = timelineTile('trashclose1');
-    const tile2 = timelineTile('trashclose2'); // the panel closes arriving HERE, via job1's trash auto-advance
+    const tile1 = dateTimelineTile('trashclose1', 'Aug', 20);
+    const tile2 = dateTimelineTile('trashclose2', 'Aug', 19); // the panel closes arriving HERE, via job1's trash auto-advance
     const panelText = {
       [tile1.ariaLabel]: timelinePanelText('IMG_9420.HEIC', 'Aug', 20),
       [tile2.ariaLabel]: timelinePanelText('IMG_9421.HEIC', 'Aug', 19),
@@ -2508,8 +2508,8 @@ test('walkTimeline: the panel refuses to open for 2 rounds then succeeds -- the 
   await withTempQueue(async (queue) => {
     const { job: job1 } = queue.enqueue({ filename: 'IMG_9500.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
     const { job: job2 } = queue.enqueue({ filename: 'IMG_9501.HEIC', creationDate: '2026-08-19T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
-    const tile1 = timelineTile('recover1');
-    const tile2 = timelineTile('recover2'); // panel closes on arrival, refuses to reopen for 2 attempts
+    const tile1 = dateTimelineTile('recover1', 'Aug', 20);
+    const tile2 = dateTimelineTile('recover2', 'Aug', 19); // panel closes on arrival, refuses to reopen for 2 attempts
     const panelText = {
       [tile1.ariaLabel]: timelinePanelText('IMG_9500.HEIC', 'Aug', 20),
       [tile2.ariaLabel]: timelinePanelText('IMG_9501.HEIC', 'Aug', 19),
@@ -2534,9 +2534,9 @@ test('walkTimeline: a photo that is PERMANENTLY unreadable does not end the walk
   await withTempQueue(async (queue) => {
     const { job: job1 } = queue.enqueue({ filename: 'IMG_9600.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
     const { job: job3 } = queue.enqueue({ filename: 'IMG_9602.HEIC', creationDate: '2026-08-18T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
-    const tile1 = timelineTile('unread1');
-    const tile2 = timelineTile('unread2'); // never opens, no matter how many rounds
-    const tile3 = timelineTile('unread3');
+    const tile1 = dateTimelineTile('unread1', 'Aug', 20);
+    const tile2 = dateTimelineTile('unread2', 'Aug', 19); // never opens, no matter how many rounds
+    const tile3 = dateTimelineTile('unread3', 'Aug', 18);
     const panelText = {
       [tile1.ariaLabel]: timelinePanelText('IMG_9600.HEIC', 'Aug', 20),
       // tile2 deliberately has NO panel text at all -- it can never render a filename.
@@ -2931,5 +2931,156 @@ test('runRevisitFromFile: --revisit-file standalone entry reads one URL per line
     }
 
     assert.equal(queue.getById(job1.id).status, 'trashed', 'the standalone --revisit-file entry must find and trash the job via the file\'s URL');
+  });
+});
+
+// ============================================================================
+// ROUND 10 (2026-09-25 SAFETY finding): a read-only audit found 37 "trashed"
+// jobs still LIVE in the library, some trashed 2-3 times by different runs.
+// Strong hypothesis: the viewer had silently moved to a DIFFERENT photo by
+// the time '#' got pressed, trashing the WRONG photo while recording the
+// ORIGINAL match as done. Two independent defenses: (1) a GUARD, re-checked
+// immediately before any trash action, refusing rather than guessing if the
+// viewer/panel no longer matches; (2) URL VERIFICATION, a fresh reload of
+// the matched photo's own URL checking for the real trash-state banner
+// (Google's own "X days left until permanently deleted"), replacing the old
+// toast/panel-change heuristic as the RECORDED status's source of truth.
+// ============================================================================
+
+test('moveToTrash: SAFETY GUARD -- the viewer has moved to a DIFFERENT photo before the trash action -- refuses to trash, never presses #', async () => {
+  // Direct seam test against the real function -- a hand-built page mock,
+  // matching the existing moveToTrash seam tests' own pattern above.
+  let hashPresses = 0;
+  const page = {
+    url: () => 'https://photos.google.com/photo/DIFFERENT-PHOTO', // NEVER matches matchedUrl below, no matter when checked
+    keyboard: {
+      press: async (key) => {
+        if (key === '#') hashPresses += 1;
+      },
+    },
+    locator: () => ({
+      first: () => ({ isVisible: async () => false, click: async () => {} }),
+      all: async () => [],
+    }),
+    viewportSize: () => ({ width: 1280, height: 800 }),
+    mouse: { click: async () => {} },
+    evaluate: async () => ({
+      detailsAndFile: ['Details\nSep 1\nMon, 1:00 PM\nGMT-04:00\nIMG_1.HEIC\n100 × 100'],
+      dimsAndFile: [],
+      fileOnly: [],
+    }),
+  };
+
+  const { confirmed, guardFailed } = await moveToTrash(page, 'PANEL TEXT', {
+    matchedUrl: 'https://photos.google.com/photo/MATCHED-PHOTO',
+    expectedFilename: 'IMG_1.HEIC',
+  });
+
+  assert.equal(confirmed, false);
+  assert.equal(guardFailed, true, 'must refuse to trash when the viewer is showing a different photo than the one that matched');
+  assert.equal(hashPresses, 0, 'must NEVER press "#" once the URL mismatch is detected -- this is what stops the wrong photo from being trashed');
+});
+
+test('moveToTrash: SAFETY GUARD -- the panel filename changed (same URL, different content) before the trash action -- refuses to trash', async () => {
+  let hashPresses = 0;
+  const page = {
+    url: () => 'https://photos.google.com/photo/MATCHED-PHOTO', // URL agrees...
+    keyboard: {
+      press: async (key) => {
+        if (key === '#') hashPresses += 1;
+      },
+    },
+    locator: () => ({
+      first: () => ({ isVisible: async () => false, click: async () => {} }),
+      all: async () => [],
+    }),
+    viewportSize: () => ({ width: 1280, height: 800 }),
+    mouse: { click: async () => {} },
+    // ...but the panel now reads a DIFFERENT filename than the one that matched.
+    evaluate: async () => ({
+      detailsAndFile: ['Details\nSep 1\nMon, 1:00 PM\nGMT-04:00\nIMG_DIFFERENT.HEIC\n100 × 100'],
+      dimsAndFile: [],
+      fileOnly: [],
+    }),
+  };
+
+  const { confirmed, guardFailed } = await moveToTrash(page, 'PANEL TEXT', {
+    matchedUrl: 'https://photos.google.com/photo/MATCHED-PHOTO',
+    expectedFilename: 'IMG_1.HEIC',
+  });
+
+  assert.equal(confirmed, false);
+  assert.equal(guardFailed, true, 'must refuse to trash when the panel filename no longer agrees, even if the URL still matches');
+  assert.equal(hashPresses, 0);
+});
+
+test('moveToTrash: verifyByUrl -- the post-trash reload of matchedUrl shows NO trash-state banner -- not confirmed', async () => {
+  let dialogVisible = false;
+  let toastVisible = false;
+  const gotoUrls = [];
+  const page = {
+    url: () => 'https://photos.google.com/photo/MATCHED-PHOTO',
+    keyboard: {
+      press: async (key) => {
+        if (key === '#') dialogVisible = true;
+      },
+    },
+    locator: (selector) => ({
+      first: () => ({
+        isVisible: async () => {
+          if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) return dialogVisible;
+          if (/moved to \(trash\|bin\)/i.test(selector)) return toastVisible;
+          if (/until permanently deleted/i.test(selector)) return false; // the photo is STILL LIVE -- no banner
+          return false;
+        },
+        click: async () => {
+          if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) {
+            dialogVisible = false;
+            toastVisible = true;
+          }
+        },
+      }),
+      all: async () => [],
+    }),
+    viewportSize: () => ({ width: 1280, height: 800 }),
+    mouse: { click: async () => {} },
+    evaluate: async () => ({
+      detailsAndFile: ['Details\nSep 1\nMon, 1:00 PM\nGMT-04:00\nIMG_1.HEIC\n100 × 100'],
+      dimsAndFile: [],
+      fileOnly: [],
+    }),
+    goto: async (url) => {
+      gotoUrls.push(url);
+    },
+  };
+
+  const { confirmed, verifiedByUrl } = await moveToTrash(page, 'PANEL TEXT', {
+    matchedUrl: 'https://photos.google.com/photo/MATCHED-PHOTO',
+    expectedFilename: 'IMG_1.HEIC',
+    verifyByUrl: true,
+  });
+
+  assert.equal(confirmed, false, 'a dialog-clicked-plus-toast trash must NOT be recorded confirmed if the URL reload finds no banner');
+  assert.equal(verifiedByUrl, false);
+  assert.ok(gotoUrls.includes('https://photos.google.com/photo/MATCHED-PHOTO'), 'must have reloaded matchedUrl to verify');
+});
+
+test('walkTimeline: normal case -- trashed and verified, matchedUrl logged on the [trashed] line', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue({ filename: 'IMG_9960.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile = dateTimelineTile('safety-normal', 'Aug', 20);
+    const page = createFakePage({
+      timelineTiles: [tile],
+      timelinePanelTextByLabel: { [tile.ariaLabel]: timelinePanelText('IMG_9960.HEIC', 'Aug', 20) },
+    });
+    const expectedUrl = `https://photos.google.com/photo/${encodeURIComponent(tile.href)}`;
+
+    const logs = await captureLogs(() => walkTimeline(page, [job], queue, { dryRun: false }));
+
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.ok(
+      logs.some((l) => l.includes('[trashed]') && l.includes('IMG_9960.HEIC') && l.includes(`url=${expectedUrl}`)),
+      `expected the [trashed] line to log the matchedUrl, got: ${JSON.stringify(logs)}`
+    );
   });
 });

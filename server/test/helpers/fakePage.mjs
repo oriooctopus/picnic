@@ -1024,6 +1024,12 @@ export function createFakePage(config = {}) {
       page.openedAriaLabel = null;
       page.openedIdentity = null;
       page.infoPanelOpen = false; // a fresh page load never carries over a previously-open panel
+      // ROUND 10 (2026-09-25, verifyTrashByUrl): reset on EVERY goto() --
+      // set back to true below only when this exact URL names an identity
+      // already in trashedIdentities. Models Google's real trash-state
+      // banner ("30 days left until permanently deleted", live-verified by
+      // Oliver manually trashing a photo then reloading its exact URL).
+      page._onTrashedPhotoPage = false;
       // ROUND 9 (2026-09-25, revisitUnreadable): a direct page.goto(url) to
       // one of THIS walk's own timeline photo URLs (exactly the shape
       // page.url() derives below: "https://photos.google.com/photo/
@@ -1050,7 +1056,14 @@ export function createFakePage(config = {}) {
       const m = /^https:\/\/photos\.google\.com\/photo\/(.+)$/.exec(url);
       if (m && page.config.timelineTiles != null) {
         const identity = decodeURIComponent(m[1]);
-        if (!page.trashedIdentities.has(identity)) {
+        if (page.trashedIdentities.has(identity)) {
+          // ROUND 10: this exact photo IS trashed -- a real Google Photos
+          // reload of its URL shows the trash-state banner (verifyTrashByUrl
+          // looks for "until permanently deleted"), never the live photo
+          // viewer. openTileInFake is deliberately NOT called here -- the
+          // tile is genuinely gone from the grid.
+          page._onTrashedPhotoPage = true;
+        } else {
           const tile = page.config.timelineTiles.find((t) => identityOf(t) === identity);
           if (tile) {
             page._timelinePanelReopenFailuresRemaining = 0;
@@ -1228,6 +1241,14 @@ export function createFakePage(config = {}) {
      * after walking a date the photo view covers the search box until Escape.
      */
     visibleFor(selector) {
+      if (/until permanently deleted/i.test(selector)) {
+        // ROUND 10 (2026-09-25, verifyTrashByUrl): the trash-state banner --
+        // see page._onTrashedPhotoPage's own header (goto()) for when this
+        // is set. Not one-shot like the toast below: a real reload of an
+        // already-trashed photo's URL keeps showing this banner on every
+        // subsequent read, not just the first.
+        return Boolean(page._onTrashedPhotoPage);
+      }
       if (/moved to/i.test(selector)) {
         // One-shot: the real toast fades after a moment, and worker.mjs's
         // settled() only needs to catch it once. Clearing here (rather than

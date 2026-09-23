@@ -99,6 +99,7 @@ import {
   tileIdentity,
   planAriaMatches,
   parseTileAriaLabel,
+  filenamesAgree,
 } from './lib/matcher.mjs';
 
 const QUEUE_PATH = process.env.PICNIC_QUEUE_PATH || join(homedir(), '.local/share/picnic/queue.jsonl');
@@ -924,14 +925,49 @@ export function isTrashConfirmed({ dialogConfirmed, toastShown, panelChanged }) 
 /**
  * Move the currently-open photo to trash via the UI. NEVER permanent-delete.
  *
- * Returns true only if the deletion was CONFIRMED -- see isTrashConfirmed's
- * header for the 2026-09-22 fix and the false "trashed" it corrects. "Open
- * info" and "View next photo" both turned out to have hidden duplicates that
- * make a .first() click silently time out, so a click that merely resolves
- * is not evidence the photo was trashed — and a job wrongly marked "trashed"
- * is one we would never revisit.
+ * Returns `{ confirmed, guardFailed, verifiedByUrl }` -- SAFETY REWRITE
+ * 2026-09-25 (round 10), replacing the old bare-boolean return. Live
+ * finding: a read-only audit of the whole library against every job
+ * recorded 'trashed' found 37 photos STILL PRESENT -- some trashed 2-3
+ * times by different runs (job IMG_2007.HEIC, one of them). One example
+ * URL, opened directly, showed the photo still live; manually trashing that
+ * SAME url worked first try (dialog appeared, toast shown, AUTO-ADVANCED to
+ * a DIFFERENT photo) and reloading it afterward correctly showed "30 days
+ * left until permanently deleted". Strong hypothesis: the worker sometimes
+ * pressed '#' while the viewer had already silently moved to a DIFFERENT
+ * photo than the one whose (stale) panel read produced the match -- it
+ * trashed the WRONG photo while recording the ORIGINAL match as done. The
+ * old toast/panel-change heuristic (isTrashConfirmed) can't tell those
+ * apart: SOME dialog got shown and clicked, SOME toast appeared -- it just
+ * doesn't know WHICH photo.
+ *
+ * Two independent defenses, both new:
+ *   1. GUARD (`matchedUrl`/`expectedFilename`, when the caller binds them):
+ *      re-checked immediately before pressing '#' AND again before the
+ *      toolbar-click fallback (the viewer can move in the gap between the
+ *      two attempts too) -- page.url() must still equal matchedUrl, and the
+ *      panel must still read the exact expectedFilename. Either mismatch
+ *      refuses to trash at all (`guardFailed: true`), logged loudly, no
+ *      queue write at all -- the caller re-reads whatever is CURRENTLY
+ *      showing and reprocesses it fresh, never guessing which photo it
+ *      actually just looked at.
+ *   2. VERIFICATION (`verifyByUrl: true`, opt-in per caller -- see
+ *      verifyTrashByUrl's own header for why this is NOT applied
+ *      unconditionally to every walk): once the old toast/panel heuristic
+ *      says a dialog was shown and clicked, a FRESH navigation to
+ *      matchedUrl checks for the actual trash-state banner Google shows on
+ *      an already-trashed photo -- the one signal that ties directly to
+ *      THIS SPECIFIC photo's own fate, not just "a dialog closed somewhere".
+ *      `confirmed` now means "verified by URL", not merely "a dialog was
+ *      clicked" -- replacing the old heuristic as the RECORDED status's
+ *      source of truth wherever verifyByUrl is used.
+ *
+ * "Open info" and "View next photo" both turned out to have hidden
+ * duplicates that make a .first() click silently time out, so a click that
+ * merely resolves is not evidence the photo was trashed either — one more
+ * reason a job wrongly marked "trashed" is one we would never revisit.
  */
-export async function moveToTrash(page, panelTextBefore) {
+export async function moveToTrash(page, panelTextBefore, { matchedUrl, expectedFilename, verifyByUrl = false } = {}) {
   // Ordering matters, and this got it wrong twice:
   //  - '#' is Google Photos' own move-to-trash shortcut and is the ONLY path
   //    ever observed to actually delete (the verified IMG_1418.HEIC deletion
@@ -1040,6 +1076,35 @@ export async function moveToTrash(page, panelTextBefore) {
     return false;
   };
 
+  // SAFETY GUARD (2026-09-25, round 10) -- see this function's own header
+  // for the live evidence (37 "trashed" jobs still live in the library).
+  // Re-verify we are STILL looking at the EXACT photo that matched,
+  // immediately before any action that could trash something. A no-op
+  // (always true) when the caller doesn't bind matchedUrl -- opt-in, not a
+  // behavior change for a caller that hasn't been updated.
+  const stillOnMatchedPhoto = async () => {
+    if (matchedUrl == null) return true;
+    const currentUrl = page.url();
+    if (currentUrl !== matchedUrl) {
+      loud(
+        `[trash] SAFETY: viewer moved before trashing -- matched at ${matchedUrl}, now at ${currentUrl} -- refusing to trash, re-reading current photo instead`
+      );
+      return false;
+    }
+    if (expectedFilename != null) {
+      const currentFilename = parsePanelText(await readPanelText(page)).filename;
+      if (currentFilename !== expectedFilename) {
+        loud(
+          `[trash] SAFETY: panel filename changed before trashing -- matched "${expectedFilename}", now reads "${currentFilename ?? '(none)'}" -- refusing to trash, re-reading current photo instead`
+        );
+        return false;
+      }
+    }
+    return true;
+  };
+
+  if (!(await stillOnMatchedPhoto())) return { confirmed: false, guardFailed: true, verifiedByUrl: false };
+
   await stealthDelay(500, 2000); // pure mimicry, off unless --slow
   // Live finding 2026-09-23: a run's '#' presses sometimes never showed the
   // confirm dialog at all ("confirmation dialog: not shown"), immediately
@@ -1059,12 +1124,20 @@ export async function moveToTrash(page, panelTextBefore) {
   if (VERBOSE) console.log(`    trash: confirmation dialog ${dialogConfirmed ? 'accepted' : 'not shown'}`);
   if (dialogConfirmed) {
     const outcome = await settled();
-    if (isTrashConfirmed({ dialogConfirmed, ...outcome })) return true;
+    if (isTrashConfirmed({ dialogConfirmed, ...outcome })) {
+      return verifyByUrl ? await verifyTrashByUrl(page, matchedUrl) : { confirmed: true, guardFailed: false, verifiedByUrl: false };
+    }
   }
 
   // Fallback: only now, with no dialog scrim in the way, try the control.
   // Same rule applies here -- clicking the control is not itself a trash,
   // only its own confirm dialog appearing and being clicked counts.
+  //
+  // SAFETY GUARD, again (round 10): the viewer can ALSO move in the gap
+  // between the '#' attempt above and this fallback -- same re-check, same
+  // refusal, before ever touching the toolbar control.
+  if (!(await stillOnMatchedPhoto())) return { confirmed: false, guardFailed: true, verifiedByUrl: false };
+
   const candidates = await page.locator(TRASH_SELECTOR).all();
   for (const candidate of candidates) {
     if (await candidate.isVisible().catch(() => false)) {
@@ -1077,9 +1150,60 @@ export async function moveToTrash(page, panelTextBefore) {
   // No confirm dialog on EITHER path -- refuse regardless of any panel/toast
   // signal. This is exactly the B4D8DDA7... false positive: a panel text
   // change with no dialog ever shown must never read as confirmed.
-  if (!dialogConfirmed) return false;
+  if (!dialogConfirmed) return { confirmed: false, guardFailed: false, verifiedByUrl: false };
   const outcome = await settled();
-  return isTrashConfirmed({ dialogConfirmed, ...outcome });
+  if (!isTrashConfirmed({ dialogConfirmed, ...outcome })) return { confirmed: false, guardFailed: false, verifiedByUrl: false };
+  return verifyByUrl ? await verifyTrashByUrl(page, matchedUrl) : { confirmed: true, guardFailed: false, verifiedByUrl: false };
+}
+
+/**
+ * FINAL, authoritative confirmation that a trash actually took (round 10,
+ * 2026-09-25) -- see moveToTrash's own header for the live evidence this
+ * replaces the toast/panel-change heuristic for. Navigates (a fresh load)
+ * to the exact `matchedUrl` and checks for the trash-state banner Google
+ * shows on an already-trashed photo ("30 days left until permanently
+ * deleted", live-verified 2026-09-25 by manually trashing and reloading the
+ * exact URL), or that the URL redirects under `/trash/`.
+ *
+ * Deliberately NOT applied unconditionally to every walk (moveToTrash's
+ * `verifyByUrl` is opt-in, not the default) -- this navigation abandons
+ * whatever browsing context the caller was in (a date's search results, for
+ * walkPhotoView/walkGrid) with no reliable way back into it, which would
+ * break the REST of that date's walk. The timeline walk and the revisit
+ * pass don't have that problem: both already navigate freely by URL
+ * (resumeTimelineAtTime, page.goto() per revisit URL), so this fits their
+ * existing model instead of fighting it.
+ *
+ * A goto() failure here (timeout, etc.) is treated as NOT verified rather
+ * than thrown -- see this round's own `revisitUnreadable` precedent
+ * (a goto failure must never crash the caller) -- except a genuine
+ * isPageClosedError, which still propagates.
+ */
+async function verifyTrashByUrl(page, matchedUrl) {
+  if (matchedUrl == null) {
+    // No URL to verify against -- caller opted into verifyByUrl without
+    // binding matchedUrl, which is a caller bug, not a "trust it" case; but
+    // refusing outright here would be a silent behavior trap for a caller
+    // that's ALSO not passing the guard fields, so this falls back to the
+    // pre-round-10 toast/panel-heuristic trust instead of ever reaching
+    // here in practice (every verifyByUrl:true call site in this file binds
+    // matchedUrl -- see confirmAndTrash's own callers).
+    return { confirmed: true, guardFailed: false, verifiedByUrl: false };
+  }
+  try {
+    await page.goto(matchedUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  } catch (err) {
+    if (isPageClosedError(page, err)) throw err;
+    loud(`[trash] SAFETY: could not reload ${matchedUrl} to verify the trash -- ${err.message || err} -- treating as NOT verified`);
+    return { confirmed: false, guardFailed: false, verifiedByUrl: false };
+  }
+  const bannerVisible = await page.locator('text=/until permanently deleted/i').first().isVisible().catch(() => false);
+  const redirectedToTrash = /\/trash\//i.test(page.url());
+  const verifiedByUrl = bannerVisible || redirectedToTrash;
+  if (!verifiedByUrl) {
+    loud(`[trash] SAFETY: reloaded ${matchedUrl} and found NO trash-state banner -- the photo may still be live in the library. Not recording as trashed.`);
+  }
+  return { confirmed: verifiedByUrl, guardFailed: false, verifiedByUrl };
 }
 
 
@@ -1122,12 +1246,41 @@ export async function moveToTrash(page, panelTextBefore) {
  * the same panel text). A text diff genuinely cannot tell that apart from
  * "never moved"; the confirmation itself is the only reliable signal.
  */
-async function confirmAndTrash(page, job, parsed, text, query, queue, dryRun, isDuplicateCopy = false) {
+/**
+ * `matchOptions` (round 10, 2026-09-25): `{ matchedUrl, verifyByUrl }` --
+ * see moveToTrash's own header for the full live evidence and the two
+ * independent defenses these enable. `matchedUrl` should be page.url()
+ * captured at the EXACT moment the panel read that produced `job`'s match
+ * happened (by every caller in this file, that's simply "right now", since
+ * the match decision and this call happen synchronously back to back with
+ * no intervening await) -- moveToTrash re-checks it immediately before ANY
+ * trash action, refusing rather than guessing if the viewer has moved on.
+ *
+ * Returns `{ confirmed, guardFailed }` -- BREAKING CHANGE from the old bare
+ * boolean (round 10): `guardFailed: true` means moveToTrash refused to even
+ * ATTEMPT a trash (the safety guard tripped) -- the queue is NOT touched at
+ * all in that case (job stays 'queued' for a later pass with a fresh read,
+ * never silently marked needs_review over what might just be stale timing,
+ * not a real problem with the job). Every caller in this file was updated
+ * to destructure this shape; a caller reading `confirmAndTrash(...)` as a
+ * plain boolean now gets an always-truthy object instead of a real signal
+ * -- caught by running the full suite after the rewrite, not by inspection.
+ */
+async function confirmAndTrash(page, job, parsed, text, query, queue, dryRun, isDuplicateCopy = false, matchOptions = {}) {
+  const { matchedUrl = null, verifyByUrl = false } = matchOptions;
   if (dryRun) {
     console.log(`[dry-run WOULD TRASH${isDuplicateCopy ? ' duplicate copy of' : ''}] ${job.filename} (search ${query})`);
-    return false;
+    return { confirmed: false, guardFailed: false };
   }
-  const confirmed = await moveToTrash(page, text);
+  const { confirmed, guardFailed } = await moveToTrash(page, text, { matchedUrl, expectedFilename: parsed.filename, verifyByUrl });
+  if (guardFailed) {
+    // The safety guard refused to even attempt this -- see moveToTrash's
+    // own loud log for why. Nothing was learned about `job` one way or the
+    // other, so nothing is written to the queue at all; the caller re-reads
+    // whatever is CURRENTLY showing and reprocesses it fresh.
+    return { confirmed: false, guardFailed: true };
+  }
+  const urlSuffix = matchedUrl ? ` url=${matchedUrl}` : ''; // round 10: log on every [trashed] line so an audit can cross-check
   if (isDuplicateCopy) {
     if (confirmed) {
       // Read the job's CURRENT persisted state (not the possibly-stale `job`
@@ -1137,7 +1290,7 @@ async function confirmAndTrash(page, job, parsed, text, query, queue, dryRun, is
       const current = queue.getById(job.id);
       const copiesTrashed = (current.copiesTrashed ?? 1) + 1;
       queue.update(job.id, { copiesTrashed });
-      console.log(`[trashed] ${job.filename}: duplicate copy #${copiesTrashed} (search ${query})`);
+      console.log(`[trashed] ${job.filename}: duplicate copy #${copiesTrashed} (search ${query})${urlSuffix}`);
     } else {
       // Do NOT downgrade status: the job is genuinely 'trashed' already from
       // its first copy. Surface the unconfirmed duplicate via `error` alone
@@ -1146,25 +1299,26 @@ async function confirmAndTrash(page, job, parsed, text, query, queue, dryRun, is
       queue.update(job.id, { error: `a duplicate copy matched but its trash action was not confirmed (search ${query})` });
       console.log(`[needs_review] ${job.filename}: duplicate matched but trash not confirmed (search ${query})`);
     }
-    return confirmed;
+    return { confirmed, guardFailed: false };
   }
   const comparison = { searchDate: query, matchedFilename: parsed.filename, pixelWidth: parsed.pixelWidth, pixelHeight: parsed.pixelHeight };
   if (confirmed) {
     queue.update(job.id, { status: 'trashed', comparison, copiesTrashed: 1, attempts: job.attempts + 1 });
-    console.log(`[trashed] ${job.filename} (search ${query})`);
+    console.log(`[trashed] ${job.filename} (search ${query})${urlSuffix}`);
   } else {
-    // Matched the right photo but could not prove the trash took. Leave it
-    // for a human rather than recording a deletion that may not have
-    // happened.
+    // Matched the right photo but could not prove the trash took (round 10:
+    // now includes "the dialog was clicked but the URL-reload afterward
+    // showed no trash-state banner" -- see verifyTrashByUrl). Leave it for
+    // a human rather than recording a deletion that may not have happened.
     queue.update(job.id, {
       status: 'needs_review',
       comparison,
-      error: 'matched but trash action not confirmed',
+      error: verifyByUrl ? 'trash not verified by URL' : 'matched but trash action not confirmed',
       attempts: job.attempts + 1,
     });
-    console.log(`[needs_review] ${job.filename}: matched but trash not confirmed (search ${query})`);
+    console.log(`[needs_review] ${job.filename}: ${verifyByUrl ? 'trash not verified by URL' : 'matched but trash not confirmed'} (search ${query})`);
   }
-  return confirmed;
+  return { confirmed, guardFailed: false };
 }
 
 /**
@@ -1386,7 +1540,15 @@ async function walkPhotoView(page, dateFirstTile, unmatchedJobs, query, queue, d
 
     if (job) {
       const isDuplicateCopy = matchedJobs.has(job);
-      const confirmed = await confirmAndTrash(page, job, parsed, text, query, queue, dryRun, isDuplicateCopy);
+      const matchedUrl = page.url(); // round 10 SAFETY: bound to the EXACT photo this match read, re-checked by moveToTrash right before any trash action
+      const { confirmed, guardFailed } = await confirmAndTrash(page, job, parsed, text, query, queue, dryRun, isDuplicateCopy, { matchedUrl });
+      if (guardFailed) {
+        // Viewer/panel moved before we could trash -- job untouched, re-read
+        // whatever is CURRENTLY showing and reprocess it fresh next
+        // iteration (see moveToTrash's own loud log for the mismatch).
+        text = await readPanelText(page);
+        continue;
+      }
       if (!isDuplicateCopy) {
         remaining = remaining.filter((j) => j !== job);
         matchedJobs.add(job);
@@ -1626,7 +1788,8 @@ async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun, 
     const job = findMatchingJob(candidateJobs, parsed);
     if (job) {
       const isDuplicateCopy = matchedJobs.has(job);
-      await confirmAndTrash(page, job, parsed, text, query, queue, dryRun, isDuplicateCopy);
+      const matchedUrl = page.url(); // round 10 SAFETY: see walkPhotoView's identical comment
+      await confirmAndTrash(page, job, parsed, text, query, queue, dryRun, isDuplicateCopy, { matchedUrl });
       if (!isDuplicateCopy) {
         remaining = remaining.filter((j) => j !== job);
         matchedJobs.add(job);
@@ -1779,7 +1942,14 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
       // under us), leave the job in `remaining` for the exhaustive walk
       // rather than giving up on it.
       if (findMatchingJob(remaining, parsed) === job) {
-        await confirmAndTrash(page, job, parsed, text, query, queue, dryRun);
+        const matchedUrl = page.url(); // round 10 SAFETY: see walkPhotoView's identical comment
+        const { guardFailed } = await confirmAndTrash(page, job, parsed, text, query, queue, dryRun, false, { matchedUrl });
+        if (guardFailed) {
+          // Viewer/panel moved before we could trash -- job untouched
+          // (still in `remaining`), left for the exhaustive walk below to
+          // find properly rather than guessing anything happened here.
+          continue;
+        }
         remaining = remaining.filter((j) => j !== job);
         // Remembered so that if the exhaustive walk below still has to run
         // (because some OTHER job on this date is unmatched), it keeps
@@ -2637,73 +2807,91 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
     if (job) {
       matchedCount += 1;
       const isDuplicateCopy = matchedJobs.has(job);
-      const beforeTrashUrl = page.url(); // captured BEFORE confirmAndTrash -- see the advanced-read comment below
-      const confirmed = await confirmAndTrash(page, job, parsed, text, 'timeline', queue, dryRun, isDuplicateCopy);
-      if (!isDuplicateCopy) {
-        remaining = remaining.filter((j) => j !== job);
-        matchedJobs.add(job);
-      }
-      if (!dryRun) {
-        // Same reasoning as walkPhotoView's identical branch: a CONFIRMED
-        // trash always removes the current photo from the results -- the
-        // view HAS moved on, settled fact once confirmAndTrash reports it,
-        // not something to re-derive from a text diff (which fails exactly
-        // for a duplicate copy with byte-identical panel text). BUT a
-        // trash-driven auto-advance is still an ADVANCE, subject to the
-        // exact same panel-lag risk ArrowRight/click advances are (see
-        // waitForTimelineAdvanceConfirmed's header) -- so this goes through
-        // the SAME URL-plus-staleness-confirmed read, using the URL from
-        // BEFORE the trash (not the current one, which may already reflect
-        // wherever the auto-advance already landed) as the baseline for
-        // detecting the move.
-        const advanced = await waitForTimelineAdvanceConfirmed(page, beforeTrashUrl, text);
-        // A trash-driven "unreadable" needs one more check that the
-        // ArrowRight branch below doesn't: trashing the library's LAST photo
-        // makes performTrash's own auto-advance land on NO photo at all (the
-        // view closes, URL reverts to the bare library root), and that reads
-        // as "URL changed, no filename ever appeared" -- identical to a
-        // genuinely-there-but-unreadable photo from waitForTimelineAdvance-
-        // Confirmed's perspective, since it has no way to tell "closed" from
-        // "open but broken". TRASH_SELECTOR visibility is the disambiguator:
-        // it's only present while an actual photo viewer is open, so its
-        // absence here means we've simply reached the end of the library via
-        // this trash's own auto-advance, not a real unreadable photo to
-        // retry later. Caught by a test with a 3rd, trailing readable tile
-        // being wrongly counted as unreadable after the LAST job's trash.
-        const viewerStillOpen = advanced && advanced.unreadable
-          ? await page.locator(TRASH_SELECTOR).first().isVisible().catch(() => false)
-          : false;
-        if (advanced && advanced.unreadable && viewerStillOpen) {
-          // See the ArrowRight-advance branch's identical handling below
-          // for the full "must not end the walk" rationale -- same rule
-          // applies to a trash-driven auto-advance landing on an
-          // unreadable photo.
-          unreadableCount += 1;
-          unreadableUrls.add(advanced.url);
-          loud(`[timeline] UNREADABLE photo ${steps + 1} (url ${advanced.url}) — skipped, a later pass will retry`);
-          text = '';
-          advancedByDelete = true;
-        } else if (confirmed) {
-          // A confirmed trash ALWAYS counts as having advanced, whether or
-          // not waitForTimelineAdvanceConfirmed managed to confirm a full
-          // (URL + fresh text) transition -- e.g. trashing the library's
-          // LAST photo closes the view entirely rather than landing on
-          // another one, which reads as "no confirmed advance" from that
-          // helper's perspective even though it's a perfectly normal
-          // outcome. The critical bit is `text` must NEVER be left
-          // pointing at the just-trashed photo's stale content in that
-          // case (an infinite re-trash loop caught by running the
-          // "duplicate copies" test, not by inspection: `advanced` came
-          // back null, `text` was left unchanged, and the SAME already-
-          // trashed photo matched and re-trashed itself forever) -- fall
-          // back to a raw read, which correctly comes back empty once the
-          // view has genuinely closed, so the next loop iteration finds no
-          // filename and moves on to actually advancing instead.
-          text = advanced ? advanced.text : await readPanelText(page);
-          advancedByDelete = true;
-        } else if (advanced) {
-          text = advanced.text;
-          advancedByDelete = true;
+      // ROUND 10 (2026-09-25 SAFETY finding): a read-only audit found 37
+      // "trashed" jobs still live in the library, some trashed 2-3 times by
+      // different runs -- strong hypothesis: the viewer had silently moved
+      // to a DIFFERENT photo by the time '#' got pressed, trashing the
+      // WRONG photo while recording THIS match as done. matchedUrl binds
+      // the trash to the EXACT photo this read came from; moveToTrash
+      // re-checks it immediately before any trash action and refuses
+      // rather than guessing if it no longer matches (see its own header).
+      const matchedUrl = page.url();
+      const { confirmed, guardFailed } = await confirmAndTrash(page, job, parsed, text, 'timeline', queue, dryRun, isDuplicateCopy, {
+        matchedUrl,
+        verifyByUrl: true, // round 10: the timeline walk already navigates freely by URL (resumeTimelineAtTime), so a post-trash verification goto fits its model -- see verifyTrashByUrl's own header for why this is opt-in, not universal
+      });
+      if (guardFailed) {
+        // Viewer/panel moved before we could trash -- job untouched (still
+        // queued), nothing was deleted. Re-read whatever is CURRENTLY
+        // showing and reprocess it fresh next iteration.
+        text = await readPanelText(page);
+        advancedByDelete = true;
+      } else {
+        if (!isDuplicateCopy) {
+          remaining = remaining.filter((j) => j !== job);
+          matchedJobs.add(job);
+        }
+        if (!dryRun) {
+          // ROUND 10: confirmAndTrash's own URL verification (moveToTrash,
+          // verifyByUrl:true) already navigated the viewer to matchedUrl to
+          // check for the trash-state banner -- the OLD "wait for Google's
+          // own auto-advance" dance (waitForTimelineAdvanceConfirmed against
+          // beforeTrashUrl) no longer applies, since we moved the viewer
+          // OURSELVES for verification rather than trusting wherever
+          // auto-advance would have gone. Either way (verified or not),
+          // matchedUrl's own tile may now be gone from the grid (if it
+          // really was trashed) -- resume-by-time is the only reliable way
+          // back into the walk from here, exactly like round 6's "the
+          // last-known tile is gone" case (shares its MAX_TIMELINE_RESUMES
+          // budget and its own openInfoPanelOnce-can-throw risk, guarded
+          // the same way recoverOrStop's own catch already is).
+          resumeCount += 1;
+          if (resumeCount > MAX_TIMELINE_RESUMES) {
+            loud(
+              `[timeline] BLOCKER: hit MAX_TIMELINE_RESUMES (${MAX_TIMELINE_RESUMES}) -- stopping rather than resuming again after a trash, ${remaining.length} job(s) still unmatched`
+            );
+            break;
+          }
+          try {
+            const resumed = await resumeTimelineAtTime(page, lastKnownCaptureMs, visitedIds);
+            if (!resumed) break; // resume-by-time found nothing older -- genuinely the end (requirement 3's own contract, round 6)
+            text = await readPanelText(page);
+            // STALENESS GUARD: resumeTimelineAtTime's own openInfoPanelOnce
+            // accepts ANY filename it finds, including a STALE one still
+            // showing the JUST-TRASHED photo's own content for the first
+            // few reads after arriving at a new identity -- the exact live
+            // lag waitForTimelineAdvanceConfirmed's Phase A already handles
+            // for the ArrowRight-advance path (see its own header); this is
+            // the SAME lag, reached via resume instead. Poll here the same
+            // way, comparing against the just-trashed job's OWN filename,
+            // so a stale read is never mistaken for the resumed photo's
+            // real content -- caught by running the pre-existing "3
+            // consecutive stale-filename reads" test after this round's
+            // rewrite, not by inspection.
+            const staleDeadline = Date.now() + (FAST_DELAYS ? 30 : 8000);
+            while (filenamesAgree(parsePanelText(text).filename, job.filename) && Date.now() < staleDeadline) {
+              await pollDelay();
+              text = await readPanelText(page);
+            }
+            advancedByDelete = true;
+          } catch (resumeErr) {
+            if (isPageClosedError(page, resumeErr)) throw resumeErr;
+            // resumeTimelineAtTime's own openInfoPanelOnce throws when it
+            // FOUND a real, older tile but couldn't read it -- NOT the end
+            // of the library, just another unreadable photo (round 4/8's
+            // "must not end the walk" rule applies here too). page.url()
+            // is still valid at this point: openFirstTile already
+            // succeeded, opening the tile, before openInfoPanelOnce's own
+            // poll gave up and threw.
+            unreadableCount += 1;
+            const unreadableUrl = page.url();
+            unreadableUrls.add(unreadableUrl);
+            loud(
+              `[timeline] UNREADABLE photo ${steps + 1} (url ${unreadableUrl}) — skipped, a later pass will retry`
+            );
+            text = '';
+            advancedByDelete = true;
+          }
         }
       }
     }
@@ -2935,7 +3123,14 @@ export async function revisitUnreadable(page, urls, pendingJobs, queue, { dryRun
 
     matchedCount += 1;
     const isDuplicateCopy = matchedJobs.has(job);
-    await confirmAndTrash(page, job, parsed, text, 'revisit', queue, dryRun, isDuplicateCopy);
+    // round 10 SAFETY: `url` IS the matchedUrl here (we just goto()'d
+    // straight to it and read this exact filename) -- verifyByUrl fits
+    // revisit's own model naturally, it already navigates freely by URL.
+    const { guardFailed } = await confirmAndTrash(page, job, parsed, text, 'revisit', queue, dryRun, isDuplicateCopy, {
+      matchedUrl: url,
+      verifyByUrl: true,
+    });
+    if (guardFailed) continue; // job untouched -- next URL in the list, unaffected
     if (!isDuplicateCopy) {
       remaining = remaining.filter((j) => j !== job);
       matchedJobs.add(job);
