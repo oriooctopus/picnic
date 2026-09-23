@@ -88,9 +88,9 @@ function identityOf(tile) {
  * addressable (Oliver's real duplicate library items -- see
  * dedupeTilesByIdentity's header in matcher.mjs).
  */
-function findTile(page, { ariaLabel, href }) {
+function findTile(page, { ariaLabel, href }, pool = windowedTiles(page)) {
   return (
-    windowedTiles(page).find((t) => {
+    pool.find((t) => {
       const tAriaLabel = typeof t === 'string' ? t : t.ariaLabel;
       if (tAriaLabel !== ariaLabel) return false;
       if (href == null) return true;
@@ -107,9 +107,22 @@ function findTile(page, { ariaLabel, href }) {
  * against. Both contain the `./search/` substring, so this also requires an
  * aria-label to be present, to avoid misrouting the plain selector's
  * count/visible checks into the tile-lookup path.
+ *
+ * 2026-09-22: also recognizes `./photo/` -- the timeline walk's own
+ * tileLocatorFor call (worker.mjs's openTile, passed TIMELINE_TILE_SELECTOR)
+ * builds an identically-shaped selector against that prefix instead.
  */
 function isTileIdentitySelector(selector) {
-  return typeof selector === 'string' && selector.includes('./search/') && ariaLabelFromSelector(selector) != null;
+  return (
+    typeof selector === 'string' &&
+    (selector.includes('./search/') || selector.includes('./photo/')) &&
+    ariaLabelFromSelector(selector) != null
+  );
+}
+
+/** True when `selector` addresses the TIMELINE view (worker.mjs's TIMELINE_TILE_SELECTOR), never a date-search result. */
+function isTimelineSelector(selector) {
+  return typeof selector === 'string' && selector.includes('./photo/');
 }
 
 /**
@@ -165,6 +178,33 @@ function windowedTiles(page) {
   // tilesInGrid) even though windowStart was set against a longer list.
   const maxStart = Math.max(0, all.length - windowSize);
   const start = Math.min(page.windowStart, maxStart);
+  return all.slice(start, start + windowSize);
+}
+
+/**
+ * TIMELINE equivalent of tilesInGrid (2026-09-22, worker.mjs's walkTimeline)
+ * -- the main library scroll has no "active query" to key off (it is never
+ * reached via a search), so this is a SEPARATE, un-queried list:
+ * `config.timelineTiles` (the tiles visible before any scroll) plus whatever
+ * `config.timelineReveals` batches scrolling has unlocked so far
+ * (`page.timelineRevealedCount`), minus anything already trashed. A fixture
+ * opts into timeline mode simply by setting `config.timelineTiles` -- see
+ * `mouse.wheel`'s branch below for the corresponding scroll behaviour.
+ */
+function tilesInTimeline(page) {
+  const base = page.config.timelineTiles ?? [];
+  const reveals = page.config.timelineReveals ?? [];
+  const revealedBatches = reveals.slice(0, page.timelineRevealedCount).flat();
+  return [...base, ...revealedBatches].filter((tile) => !page.trashedIdentities.has(identityOf(tile)));
+}
+
+/** TIMELINE equivalent of windowedTiles -- see that function's header; same virtualization model, keyed off `config.timelineWindowSize`/`page.timelineWindowStart` instead of the grid's `windowSize`/`windowStart`. */
+function windowedTimelineTiles(page) {
+  const windowSize = page.config.timelineWindowSize;
+  const all = tilesInTimeline(page);
+  if (!windowSize) return all;
+  const maxStart = Math.max(0, all.length - windowSize);
+  const start = Math.min(page.timelineWindowStart, maxStart);
   return all.slice(start, start + windowSize);
 }
 
@@ -251,7 +291,16 @@ class FakeLocator {
     if (isTileIdentitySelector(this.selector)) {
       const label = ariaLabelFromSelector(this.selector);
       const href = hrefFromSelector(this.selector);
-      const tile = findTile(this.page, { ariaLabel: label, href });
+      // 2026-09-22: route to the TIMELINE pool for a TIMELINE_TILE_SELECTOR --
+      // same fix as countFor/visibleFor above. Missing this here (while
+      // fixing only countFor/visibleFor) is exactly the kind of half-fix that
+      // makes openTile() THINK a tile is there (count()===1, isVisible()===
+      // true, both correctly pool-routed) and then silently click nothing --
+      // openedAriaLabel never gets set, so the info panel poll times out no
+      // matter what the panel-text fixture says. Caught by running the new
+      // timeline tests, not by inspection.
+      const pool = isTimelineSelector(this.selector) ? windowedTimelineTiles(this.page) : windowedTiles(this.page);
+      const tile = findTile(this.page, { ariaLabel: label, href }, pool);
       if (!isUnopenable(this.page, label) && tile) {
         openTileInFake(this.page, label, typeof tile === 'string' ? undefined : tile.href);
         return;
@@ -449,6 +498,11 @@ function advanceToNextTile(page) {
  *   windowSize?: number,             // only N tiles are "mounted" at once -- models a VIRTUALIZED grid where scrolling swaps the visible window rather than only ever growing it. A positive-dy mouse.wheel (scrollResults) follows the tail forward and loads more; a negative-dy wheel (scrollResultsUp) moves the window back over already-loaded content without loading anything new (see windowedTiles())
  *   unopenableLabels?: string[]|Set<string>, // labels that collectResultTiles() can see (on-screen, real) but the identity-scoped selector openTile() clicks can NEVER resolve -- models a tile the grid refuses to mount, for the "unreachable tile, retried then recorded" behaviour
  *   swallowInfoPressesCount?: number, // first N "i" keypresses across the whole run are silently lost (models the keystroke landing mid-transition, before the photo view existed)
+ *   timelineTiles?: Array<{ariaLabel: string, href?: string}|string>, // 2026-09-22: presence alone switches the fake into TIMELINE mode (worker.mjs's walkTimeline) -- a wholly separate, un-queried tile pool from the grid's; the tiles visible before any scroll
+ *   timelineReveals?: Array<Array<{ariaLabel: string, href?: string}|string>>, // batches revealed by successive downward scrolls in timeline mode (mirrors scrollReveals for the grid)
+ *   timelineWindowSize?: number, // virtualization window for timeline mode (mirrors windowSize for the grid)
+ *   timelinePanelTextByLabel?: Record<string, string>, // ariaLabel -> info-panel text, FLAT (no query nesting -- the timeline has no active query) -- timeline equivalent of panelTextByLabel
+ *   resetScrollOnEscape?: boolean, // timeline mode only: closing a photo (Escape) snaps the mounted window back to the top -- models walkTimeline's own stated "unverified live" risk that Escape from a timeline-opened photo might not reliably return to the same scroll position
  * }}
  */
 export function createFakePage(config = {}) {
@@ -471,6 +525,8 @@ export function createFakePage(config = {}) {
     trashedIdentities: new Set(), // keyed by identity (href, falling back to aria-label), not aria-label alone -- see tilesInGrid()'s header
     revealedCount: 0,
     windowStart: 0, // index into tilesInGrid(page) where the mounted window (windowedTiles) currently begins -- see mouse.wheel below
+    timelineRevealedCount: 0, // TIMELINE equivalent of revealedCount -- see tilesInTimeline's header
+    timelineWindowStart: 0, // TIMELINE equivalent of windowStart -- see windowedTimelineTiles' header
     recollectCount: {},
     escapePresses: 0,
     infoPressesSwallowed: 0, // count of "i" presses dropped so far, capped by config.swallowInfoPressesCount
@@ -491,6 +547,14 @@ export function createFakePage(config = {}) {
         page.log.push(`key:${key}`);
         if (key === 'Escape') {
           page.escapePresses += 1;
+          // `resetScrollOnEscape` (2026-09-22, timeline mode only): models
+          // walkTimeline's own UNVERIFIED-LIVE worry -- that closing a
+          // photo opened from the timeline might not reliably return to
+          // the same scroll position. Only fires while a photo is actually
+          // open (an Escape with nothing open is a no-op live too).
+          if (page.openedAriaLabel != null && page.config.timelineTiles != null && page.config.resetScrollOnEscape) {
+            page.timelineWindowStart = 0;
+          }
           page.openedAriaLabel = null;
           page.openedIdentity = null;
         }
@@ -548,6 +612,24 @@ export function createFakePage(config = {}) {
         // down-scroll.
         page.log.push('wheel');
         page.log.push(scrollingUp ? 'wheel:up' : 'wheel:down');
+        // TIMELINE MODE (2026-09-22, worker.mjs's walkTimeline): a completely
+        // separate reveal/window model from the grid's -- see
+        // tilesInTimeline's header for why a fixture opts in just by setting
+        // `config.timelineTiles`.
+        if (page.config.timelineTiles != null) {
+          if (scrollingUp) {
+            if (page.config.timelineWindowSize) {
+              page.timelineWindowStart = Math.max(0, page.timelineWindowStart - page.config.timelineWindowSize);
+            }
+            return;
+          }
+          const reveals = page.config.timelineReveals ?? [];
+          if (page.timelineRevealedCount < reveals.length) page.timelineRevealedCount += 1;
+          if (page.config.timelineWindowSize) {
+            page.timelineWindowStart = Math.max(0, tilesInTimeline(page).length - page.config.timelineWindowSize);
+          }
+          return;
+        }
         if (scrollingUp) {
           // Move the mounted window back toward the top of whatever has
           // already loaded. Deliberately does NOT touch revealedCount --
@@ -589,6 +671,12 @@ export function createFakePage(config = {}) {
       // but only once the (sticky) info panel is actually open.
       page.log.push('evaluate:panelText');
       if (!page.infoPanelOpen || page.openedAriaLabel == null) return '';
+      // 2026-09-22: the timeline has no `activeQuery` to key panel text off
+      // (it's never reached via search) -- `timelinePanelTextByLabel` is a
+      // flat ariaLabel->text map instead of the grid's query-nested shape.
+      if (page.config.timelineTiles != null) {
+        return page.config.timelinePanelTextByLabel?.[page.openedAriaLabel] ?? '';
+      }
       const byLabel = page.config.panelTextByLabel[page.activeQuery] ?? {};
       return byLabel[page.openedAriaLabel] ?? '';
     },
@@ -616,7 +704,11 @@ export function createFakePage(config = {}) {
         // never resolve -- see the "unreachable tile" test.
         const label = ariaLabelFromSelector(selector);
         if (isUnopenable(page, label)) return 0;
-        return findTile(page, { ariaLabel: label, href: hrefFromSelector(selector) }) ? 1 : 0;
+        // 2026-09-22: route to the TIMELINE pool for a TIMELINE_TILE_SELECTOR
+        // -- the grid and timeline are two independent tile pools now (see
+        // tilesInTimeline's header), never conflated.
+        const pool = isTimelineSelector(selector) ? windowedTimelineTiles(page) : windowedTiles(page);
+        return findTile(page, { ariaLabel: label, href: hrefFromSelector(selector) }, pool) ? 1 : 0;
       }
       if (/aria-label="Open info"/i.test(selector)) {
         return page.config.infoButtonFound ? 1 : 0;
@@ -636,6 +728,15 @@ export function createFakePage(config = {}) {
       return 0;
     },
     allFor(selector) {
+      // 2026-09-22: the TIMELINE pool is entirely separate from the grid's
+      // (no `activeQuery`, no reorderOnRecollect/recollectCount modelling --
+      // no fixture needs those for the timeline yet, and adding them unused
+      // would just be speculative surface).
+      if (isTimelineSelector(selector)) {
+        return windowedTimelineTiles(page).map(
+          (tile, i) => new FakeTileLink(page, typeof tile === 'string' ? tile : tile.ariaLabel, i, typeof tile === 'string' ? undefined : tile.href)
+        );
+      }
       if (!selector.includes('./search/')) return [];
       const query = page.activeQuery;
       page.recollectCount[query] = (page.recollectCount[query] ?? 0) + 1;
@@ -684,7 +785,8 @@ export function createFakePage(config = {}) {
         if (photoOpen(page)) return false;
         const label = ariaLabelFromSelector(selector);
         if (isUnopenable(page, label)) return false;
-        const hit = findTile(page, { ariaLabel: label, href: hrefFromSelector(selector) });
+        const pool = isTimelineSelector(selector) ? windowedTimelineTiles(page) : windowedTiles(page);
+        const hit = findTile(page, { ariaLabel: label, href: hrefFromSelector(selector) }, pool);
         return hit ? (typeof hit === 'string' ? true : hit.hidden !== true) : false;
       }
       if (/aria-label\*?="Search|placeholder\*?="Search/i.test(selector)) {

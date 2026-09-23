@@ -97,6 +97,9 @@ import {
   dedupeTilesByIdentity,
   tileIdentity,
   planAriaMatches,
+  parseTileAriaLabel,
+  calibrateOffsetSeconds,
+  jobMediaTypeMatchesTile,
 } from './lib/matcher.mjs';
 
 const QUEUE_PATH = process.env.PICNIC_QUEUE_PATH || join(homedir(), '.local/share/picnic/queue.jsonl');
@@ -105,6 +108,15 @@ const SEARCH_BOX_SELECTOR = 'input[aria-label*="Search" i], input[placeholder*="
 // Search-result tiles share this href prefix with non-photo chips (e.g.
 // "Favorites") — filtered down to real tiles via isRealPhotoTile().
 const RESULT_LINK_SELECTOR = 'a[href^="./search/"]';
+// UNVERIFIED LIVE (2026-09-22): the main timeline's own tiles were only ever
+// probed for their aria-labels and scroll behaviour, never for their actual
+// href shape -- Google Photos' per-item permalink is widely documented as
+// "./photo/<id>" (distinct from a search result's "./search/..."), and this
+// is the best guess absent a live check. If a real timeline run finds zero
+// tiles despite the page clearly showing photos, THIS is the first thing to
+// re-probe (aria-label filtering via isRealPhotoTile() is reused unchanged
+// and is known-good from the search-results path).
+const TIMELINE_TILE_SELECTOR = 'a[href^="./photo/"]';
 // Exact aria-label, not a substring match: `[aria-label*="Info"]` also
 // hits "Close info" and others (4 elements observed live) and .first()
 // on that times out. "Open info" is exact.
@@ -153,6 +165,52 @@ export const MAX_SCROLL_ATTEMPTS_PER_DATE = 6;
 // walked than loop forever on a broken reference.
 export const MAX_TILE_OPEN_RETRIES = 3;
 
+// --- --walk=timeline constants (2026-09-22) --------------------------------
+//
+// Date search was measured live (2026-09-22) to be badly incomplete: "March
+// 19, 2026" returned 1 tile when the timeline has several that day; "March
+// 17, 2026" returned NO results for a day that demonstrably has photos. The
+// main timeline (no search) DOES show them -- walkTimeline() below scrolls it
+// directly instead of trusting search at all. See walkTimeline's own header
+// for the full design.
+//
+// How far the timeline scroll can run before giving up regardless of the
+// "1 day past the oldest job" stop condition -- a safety valve only, not
+// expected to bind in normal use. Measured live: a raw 2500px wheel step
+// reached March 2026 from the top in ~100 steps; walkTimeline deliberately
+// uses SMALLER steps (scrollResults' existing 600-1000px, reused unchanged --
+// see walkTimeline's header for why) so it needs proportionally more steps to
+// cover the same distance. 4000 gives headroom for several months of history
+// at that finer granularity without risking an unbounded scroll against a
+// library with no matching photos left at all.
+export const MAX_TIMELINE_SCROLL_STEPS = 4000;
+// Consecutive scroll steps that reveal NO tile this walk hasn't already seen
+// before giving up -- mirrors MAX_SCROLL_ATTEMPTS_PER_DATE's role for a
+// single date's grid, sized a little larger because the timeline can
+// legitimately have long stretches of scrolling required to load the next
+// batch (verified live: batches load in bursts as content scrolls into view,
+// not one wheel step at a time).
+export const MAX_TIMELINE_FRUITLESS_SCROLLS = 10;
+// A candidate tile's predicted local capture instant (job's UTC creationDate
+// + the calibrated offset -- see matcher.mjs's calibrateOffsetSeconds) only
+// needs to land within this many seconds of the tile's own aria-label
+// reading to be worth OPENING. Wider than the exact-second match the
+// date-search aria fast path (planAriaMatches) uses, for two reasons that
+// don't apply there: (1) a real measured discrepancy between a tile's
+// aria-label wall-clock reading and the job's own creationDate -- live probe
+// 2026-09-22, one desk photo: label read "12:59:19 AM" local while the job's
+// creationDate (after applying the calibrated offset) predicted 12:59:13 AM,
+// a 6-second gap with no obvious cause (sub-second EXIF rounding? a save
+// re-encoding the timestamp?) that the exact-second date-search path never
+// has to tolerate because it only ever compares within ONE already-matched
+// date; (2) the timeline walk scans potentially thousands of tiles across
+// many days in one continuous pass, so accepting a few minutes of slop costs
+// a handful of extra opens, never a wrong trash -- findMatchingJob's filename
+// check is what actually authorises a match, this constant only decides what
+// is worth spending an open on.
+export const TIMELINE_TIME_TOLERANCE_SECONDS = 180;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
 // CHANGE 2 (2026-09-01): Oliver has decided this worker does not need
 // bot-detection avoidance (he already bulk-deletes via a scripted browser
 // extension elsewhere), so human-mimicry pacing is OFF by default now.
@@ -183,19 +241,21 @@ export function parseArgs(argv) {
     if (argv[i] === '--slow') args.slow = true;
     if (argv[i].startsWith('--walk=')) {
       const value = argv[i].slice('--walk='.length);
-      if (value !== 'photo' && value !== 'grid') {
-        throw new Error(`--walk must be "photo" or "grid", got "${value}"`);
+      if (value !== 'photo' && value !== 'grid' && value !== 'timeline') {
+        throw new Error(`--walk must be "photo", "grid", or "timeline", got "${value}"`);
       }
       args.walk = value;
     }
     if (argv[i] === '--help' || argv[i] === '-h') {
       console.log(
-        'Usage: node worker.mjs [--dry-run] [--cap N] [--slow] [--walk=photo|grid]\n' +
+        'Usage: node worker.mjs [--dry-run] [--cap N] [--slow] [--walk=photo|grid|timeline]\n' +
           '  --dry-run    Search + read candidate info + decide, but never trash. Safe default for a first run.\n' +
           '  --cap N      Max queued jobs to process this run (default 50).\n' +
           '  --slow       Restore human-scale pacing (inter-click jitter, dwell, per-character typing). Off by default.\n' +
-          '  --walk=MODE  Exhaustive-fallback traversal strategy: "photo" (default, steps through the photo\n' +
-          '               view with ArrowRight) or "grid" (opens each tile from the results grid directly).'
+          '  --walk=MODE  "photo" (default, date-search + ArrowRight through the photo view), "grid" (date-search,\n' +
+          '               opens each tile from the results grid directly), or "timeline" (2026-09-22: no search at\n' +
+          '               all -- date search was measured badly incomplete live -- scrolls the main library timeline\n' +
+          '               instead and matches candidates by calibrated capture time + filename; see walkTimeline).'
       );
       process.exit(0);
     }
@@ -411,22 +471,45 @@ async function searchByDate(page, dateStr) {
  * href) from "two distinct items that happen to collide on aria-label text"
  * (different hrefs) -- see dedupeTilesByIdentity's header for the full case.
  */
-async function collectResultTiles(page) {
-  const links = await page.locator(RESULT_LINK_SELECTOR).all();
+/**
+ * Shared by collectResultTiles (date-search results) and collectTimelineTiles
+ * (the main library timeline, 2026-09-22) -- the only difference between the
+ * two views is which selector addresses a "tile" at all; filtering (real
+ * photo/video tiles only, visible only) and dedup are identical.
+ */
+async function collectTilesBySelector(page, selector) {
+  const links = await page.locator(selector).all();
   const withLabels = [];
   for (const link of links) {
     const ariaLabel = await link.getAttribute('aria-label').catch(() => null);
     if (!isRealPhotoTile(ariaLabel)) continue;
-    // VERIFIED LIVE 2026-09-01: a previous search's result grid stays in the
-    // DOM after the next search, collapsed to a 0x0 box. Its tiles still match
-    // the selector and still carry aria-labels, so without a visibility filter
-    // the walk picks a stale hidden tile and openTile() dies in
-    // scrollIntoViewIfNeeded with "element is not visible".
+    // VERIFIED LIVE 2026-09-01 (date search): a previous search's result grid
+    // stays in the DOM after the next search, collapsed to a 0x0 box. Its
+    // tiles still match the selector and still carry aria-labels, so without
+    // a visibility filter the walk picks a stale hidden tile and openTile()
+    // dies in scrollIntoViewIfNeeded with "element is not visible". Kept for
+    // the timeline too even though it's unverified there -- a virtualized
+    // list unmounting old tiles rather than hiding them would make this a
+    // no-op, never a correctness problem.
     if (!(await link.isVisible().catch(() => false))) continue;
     const href = await link.getAttribute('href').catch(() => null);
     withLabels.push({ locator: link, ariaLabel, href });
   }
   return dedupeTilesByIdentity(withLabels);
+}
+
+async function collectResultTiles(page) {
+  return collectTilesBySelector(page, RESULT_LINK_SELECTOR);
+}
+
+/**
+ * Collect the main timeline's currently-mounted tiles (2026-09-22, the
+ * `--walk=timeline` strategy -- see walkTimeline's header for why this view
+ * exists at all: date search was measured live to be badly incomplete,
+ * while the timeline shows everything).
+ */
+async function collectTimelineTiles(page) {
+  return collectTilesBySelector(page, TIMELINE_TILE_SELECTOR);
 }
 
 /** Thrown when a held tile locator no longer points at the tile we collected. */
@@ -435,13 +518,18 @@ export class StaleTileError extends Error {}
 /**
  * Open a tile. Requires bringToFront() first — see module header note.
  *
+ * `resultSelector` defaults to RESULT_LINK_SELECTOR (date-search results);
+ * the timeline walk (2026-09-22) passes TIMELINE_TILE_SELECTOR instead --
+ * everything else about opening a tile (identity-scoped addressing,
+ * scroll-then-visibility, StaleTileError) is identical between the two views.
+ *
  * Locators from .all() resolve positionally (nth(i)), so any scroll or
  * re-render shifts what they point at. A held locator was observed resolving
  * to an "unlabeled person" chip at nth(52) and hanging the run for 30s.
  * Re-check identity immediately before clicking and bail out to a re-collect
  * instead of clicking whatever now occupies that index.
  */
-async function openTile(page, tile) {
+async function openTile(page, tile, resultSelector = RESULT_LINK_SELECTOR) {
   await page.bringToFront();
   // Address the tile by its aria-label, NOT by grid position. Playwright
   // re-resolves a locator on EVERY call, so a positional locator from .all()
@@ -456,7 +544,7 @@ async function openTile(page, tile) {
   // much we scroll, so dates reported "EXHAUSTED" after a handful of tiles and
   // silently left photos undeleted. :visible excludes a 0x0 element while
   // still matching a real tile that is merely below the fold.
-  const locator = tileLocatorFor(page, tile);
+  const locator = tileLocatorFor(page, tile, resultSelector);
   if ((await locator.count()) === 0) {
     throw new StaleTileError(`tile gone from the grid: "${tileIdentity(tile)}"`);
   }
@@ -490,13 +578,13 @@ async function openTile(page, tile) {
  * alone when href is unavailable (older callers/fixtures), matching the
  * pre-2026-09-12 behaviour exactly.
  */
-function tileLocatorFor(page, tile) {
+function tileLocatorFor(page, tile, resultSelector = RESULT_LINK_SELECTOR) {
   const escapedLabel = tile.ariaLabel.replace(/["\\]/g, '\\$&');
   if (tile.href) {
     const escapedHref = tile.href.replace(/["\\]/g, '\\$&');
-    return page.locator(`${RESULT_LINK_SELECTOR}[href="${escapedHref}"][aria-label="${escapedLabel}"]:visible`);
+    return page.locator(`${resultSelector}[href="${escapedHref}"][aria-label="${escapedLabel}"]:visible`);
   }
-  return page.locator(`${RESULT_LINK_SELECTOR}[aria-label="${escapedLabel}"]:visible`);
+  return page.locator(`${resultSelector}[aria-label="${escapedLabel}"]:visible`);
 }
 
 
@@ -1334,6 +1422,272 @@ async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun, 
   return { stillUnmatched: remaining };
 }
 
+/**
+ * Pure: does ANY job in `jobs` have a predicted local capture instant (its
+ * UTC creationDate + `offsetSeconds`) within TIMELINE_TIME_TOLERANCE_SECONDS
+ * of this parsed timeline tile's own aria-label reading? Exported for tests.
+ *
+ * This only decides whether a tile is worth OPENING -- exactly like
+ * planAriaMatches' role in the date-search fast path, it never authorises a
+ * match by itself. Unlike planAriaMatches (which requires EXACTLY ONE
+ * candidate or defers, because date search's per-date candidate pool is
+ * small enough that ambiguity is a real signal worth respecting), this
+ * returns true on ANY job within tolerance: the timeline pool is far larger
+ * and openTimelineTile's own confirmation step (findMatchingJob against
+ * filename) is what actually decides identity, so refusing an ambiguous
+ * candidate here would just mean walking straight past a real match.
+ */
+export function timelineTileWorthOpening(jobs, parsedTile, offsetSeconds) {
+  if (offsetSeconds == null) return false;
+  for (const job of jobs) {
+    if (!jobMediaTypeMatchesTile(job, parsedTile.mediaType)) continue;
+    const jobMs = new Date(job.creationDate).getTime();
+    const predictedMs = jobMs + offsetSeconds * 1000;
+    if (Math.abs(parsedTile.wallClockAsUtcMs - predictedMs) <= TIMELINE_TIME_TOLERANCE_SECONDS * 1000) return true;
+  }
+  return false;
+}
+
+/**
+ * Walk the main Google Photos LIBRARY TIMELINE (no search at all) looking
+ * for `pendingJobs`, opening only tiles whose calibrated capture time lands
+ * near a still-unmatched job -- the `--walk=timeline` strategy, added
+ * 2026-09-22.
+ *
+ * WHY THIS EXISTS: date search (processDateGroup/runDateGroups) was measured
+ * live to be badly incomplete, not just occasionally wrong -- "March 19,
+ * 2026" returned 1 tile from a day the timeline shows several for, "March
+ * 17, 2026" returned ZERO results (after the existing EMPTY_SEARCH_RETRIES
+ * re-issue) for a day that demonstrably has photos. Deploying the
+ * filename-only matching fix (2026-09-22, this same file) against a real
+ * 126-job backlog still only trashed ~30; the other ~103 landed needs_review
+ * with "no filename match" or the grid walk's "ABANDONED" -- not because the
+ * matcher failed, but because search never showed the worker those photos in
+ * the first place. The main timeline (https://photos.google.com/, no search
+ * box query typed) DOES show them, live-verified by scrolling from the top
+ * and finding real aria-labelled tiles for dates search had reported empty.
+ *
+ * STRATEGY:
+ *   1. Start at the timeline (openPhotosHome already lands there -- no
+ *      search is ever performed by this walk).
+ *   2. Scroll in the SAME modest steps date search's own scrollResults()
+ *      already uses (600-1000px, reused unchanged rather than inventing a
+ *      new step size) -- a big single step was live-measured to reach March
+ *      2026 in ~100 steps from today, but a virtualized list can SKIP tiles
+ *      that never get a chance to mount between two far-apart scroll
+ *      positions, so smaller/more steps trade wall-clock time for coverage.
+ *   3. Every tile seen (deduped by identity, exactly like the date-search
+ *      aria fast path's `seen` map) gets its aria-label parsed
+ *      (parseTileAriaLabel, unchanged) and the (job, tile) UTC offset
+ *      self-calibrated from the accumulated set so far (calibrateOffsetSeconds,
+ *      unchanged -- reused rather than writing new timezone logic, per the
+ *      brief). Before the offset calibrates (fewer than
+ *      matcher.mjs's MIN_AGREEING_PAIRS independent pairs seen so far),
+ *      nothing is opened yet -- the walk just keeps scrolling to gather more
+ *      calibration data.
+ *   4. Once calibrated, any tile within TIMELINE_TIME_TOLERANCE_SECONDS of a
+ *      still-relevant job's predicted capture instant
+ *      (timelineTileWorthOpening) gets opened, its info panel read
+ *      (openInfoPanelOnce/readPanelText/parsePanelText, unchanged), and
+ *      findMatchingJob decides -- the ONLY thing that ever authorises a
+ *      trash, exactly as in the date-search paths. A match runs through
+ *      confirmAndTrash (which, as of the previous commit, requires the real
+ *      "Move to trash" confirm dialog). A non-match closes the photo and
+ *      moves on WITHOUT giving up on the job -- its tile might just not have
+ *      loaded yet, or the candidate was a coincidental time-neighbour.
+ *   5. Duplicate copies of an already-matched job (see confirmAndTrash's own
+ *      `isDuplicateCopy` doc) are handled exactly like the date-search walks:
+ *      `matchedJobs` keeps a job in the candidate pool even after its first
+ *      trash, so a second copy elsewhere in the timeline still gets found.
+ *   6. Stops when EITHER every job has matched, OR the oldest tile in the
+ *      most recent scroll batch is more than one calendar day older than the
+ *      oldest still-pending job's own creationDate (comparison uses the
+ *      offset-corrected estimate once calibrated; before that, the raw
+ *      wall-clock-as-UTC reading is used as an approximation -- see the
+ *      inline comment at the check for the accepted error bound).
+ *   7. RETURNING TO THE TIMELINE after a tile: UNVERIFIED LIVE -- reuses
+ *      closeAnyOpenPhoto() (a single Escape, confirmed by the search box
+ *      becoming reachable again and the trash control disappearing) on the
+ *      assumption that a photo opened from the timeline behaves the same
+ *      way as one opened from search results. If that assumption is wrong
+ *      live (e.g. Escape from a timeline-opened photo lands somewhere
+ *      other than the timeline, or drops the scroll position), the recovery
+ *      below is the safety net: after closing, if the freshest tile now
+ *      visible reads a MORE RECENT capture time than the last tile this
+ *      walk actually processed (a strong signal the scroll position reset
+ *      toward the top, since the timeline is newest-first), the walk
+ *      re-scrolls forward (bounded by TIMELINE_SCROLL_RECOVERY_MAX_STEPS)
+ *      before resuming its normal step-by-step scan, rather than silently
+ *      re-processing photos it already handled or looping forever.
+ */
+const TIMELINE_SCROLL_RECOVERY_MAX_STEPS = 40; // generous enough to recover from a full reset-to-top given ~17 steps/month measured live, without risking an unbounded catch-up loop
+const TIMELINE_POSITION_RESET_THRESHOLD_MS = 6 * 60 * 60 * 1000; // 6h -- comfortably bigger than any real scroll jitter, small enough to catch a genuine reset promptly
+
+export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
+  let remaining = [...pendingJobs];
+  if (remaining.length === 0) return { stillUnmatched: remaining };
+
+  const oldestPendingMs = Math.min(...remaining.map((j) => new Date(j.creationDate).getTime()));
+
+  // identity -> {tile, parsed}, accumulated across the WHOLE walk (never
+  // reset) -- both the offset calibration and "already opened" tracking need
+  // the full history, exactly like processDateGroup's own `seen` map serves
+  // the aria fast path within a single date.
+  const seen = new Map();
+  const opened = new Set(); // tile identities already opened this walk -- never re-open one
+  // Jobs matched at least once this walk -- kept in the candidate pool
+  // alongside `remaining` so a further copy elsewhere in the timeline still
+  // gets found and trashed. Same convention as walkPhotoView/walkGrid's
+  // `matchedJobs` (see confirmAndTrash's header).
+  const matchedJobs = new Set();
+
+  let lastProcessedWallClockMs = null; // most recent tile this walk actually opened -- drives the reset-recovery check
+  let fruitlessScrolls = 0;
+  let step = 0;
+
+  while (remaining.length > 0 && step < MAX_TIMELINE_SCROLL_STEPS) {
+    step += 1;
+    const freshTiles = await collectTimelineTiles(page);
+    let sawNewTile = false;
+    for (const tile of freshTiles) {
+      const key = tileIdentity(tile);
+      if (seen.has(key)) continue;
+      const parsed = parseTileAriaLabel(tile.ariaLabel);
+      if (!parsed) continue; // decoy chip or an aria-label shape this parser doesn't recognise -- never guess, just skip
+      seen.set(key, { tile, parsed });
+      sawNewTile = true;
+    }
+
+    const offsetSeconds = calibrateOffsetSeconds([...remaining, ...matchedJobs], [...seen.values()]);
+
+    // Open every not-yet-opened tile worth opening, most-recently-seen-first
+    // isn't required -- iteration order of `seen` (insertion order) is fine
+    // since every candidate gets opened regardless of order, just not twice.
+    //
+    // Deliberately does NOT stop early once `remaining` empties (unlike an
+    // earlier version of this loop, which did -- caught by the "duplicate
+    // copies are both trashed" test failing when both copies sat in the SAME
+    // seen-tile batch as the job's own last remaining match): a duplicate
+    // copy of an already-matched job (findMatchingJob against
+    // matchedJobs, below) can be sitting in a tile later in THIS SAME batch,
+    // and skipping the rest of `seen` the moment `remaining` empties would
+    // silently leave it untrashed. Same "keep scanning after the first"
+    // rule as walkPhotoView/walkGrid's own matchedJobs handling.
+    for (const [key, { tile, parsed }] of seen) {
+      if (opened.has(key)) continue;
+      const candidateJobs = matchedJobs.size > 0 ? [...remaining, ...matchedJobs] : remaining;
+      if (!timelineTileWorthOpening(candidateJobs, parsed, offsetSeconds)) continue;
+
+      opened.add(key);
+      try {
+        await openTile(page, tile, TIMELINE_TILE_SELECTOR);
+      } catch (err) {
+        if (err instanceof StaleTileError) {
+          // Same "don't guess" rule as the date-search aria fast path: the
+          // tile moved or vanished under us (a virtualized list re-mounting
+          // as we scroll is expected here, more so than in a static search
+          // result), leave it -- if the same photo is still relevant, either
+          // it gets picked up again under a fresh identity next batch, or the
+          // job falls through to needs_review at the end.
+          if (VERBOSE) console.log(`  [timeline] ${err.message} — leaving for a later pass`);
+          continue;
+        }
+        throw err;
+      }
+
+      await openInfoPanelOnce(page);
+      const text = await readPanelText(page);
+      const parsedPanel = parsePanelText(text);
+      const job = findMatchingJob(candidateJobs, parsedPanel);
+      if (job) {
+        const isDuplicateCopy = matchedJobs.has(job);
+        await confirmAndTrash(page, job, parsedPanel, text, 'timeline', queue, dryRun, isDuplicateCopy);
+        if (!isDuplicateCopy) {
+          remaining = remaining.filter((j) => j !== job);
+          matchedJobs.add(job);
+        }
+      } else if (VERBOSE) {
+        console.log(
+          `  [timeline] candidate tile near a pending job's time did not confirm by filename ` +
+            `(got ${parsedPanel.filename ?? '(none)'}) — leaving, not a match`
+        );
+      }
+      lastProcessedWallClockMs = parsed.wallClockAsUtcMs;
+
+      // UNVERIFIED LIVE -- see this function's own header, point 7.
+      await closeAnyOpenPhoto(page);
+
+      // Reset-recovery: if we're suddenly seeing a MUCH more recent tile
+      // than the one we just processed, the scroll position likely snapped
+      // back toward the top (newest-first) instead of returning us to where
+      // we were -- catch back up with bounded extra forward scrolling before
+      // resuming the normal loop, rather than either looping forever or
+      // silently re-scanning photos already handled.
+      const recheck = await collectTimelineTiles(page);
+      const newestNow = recheck
+        .map((t) => parseTileAriaLabel(t.ariaLabel)?.wallClockAsUtcMs)
+        .filter((ms) => ms != null)
+        .reduce((max, ms) => (max == null || ms > max ? ms : max), null);
+      if (newestNow != null && lastProcessedWallClockMs != null && newestNow - lastProcessedWallClockMs > TIMELINE_POSITION_RESET_THRESHOLD_MS) {
+        if (VERBOSE) console.log('  [timeline] scroll position appears reset toward the top — catching up');
+        for (let recovery = 0; recovery < TIMELINE_SCROLL_RECOVERY_MAX_STEPS; recovery++) {
+          await scrollResults(page);
+          const caughtUp = await collectTimelineTiles(page);
+          const oldestOfBatch = caughtUp
+            .map((t) => parseTileAriaLabel(t.ariaLabel)?.wallClockAsUtcMs)
+            .filter((ms) => ms != null)
+            .reduce((min, ms) => (min == null || ms < min ? ms : min), null);
+          if (oldestOfBatch != null && oldestOfBatch <= lastProcessedWallClockMs) break; // caught back up
+        }
+      }
+    }
+
+    // Stop condition: the oldest tile CURRENTLY MOUNTED (`freshTiles`, this
+    // step's collectTimelineTiles() read -- everything revealed so far when
+    // no virtualization window is modelled, or just the live window when one
+    // is) is more than a day older than the oldest pending job. Offset-corrected once calibrated; before that, the raw
+    // wall-clock-as-UTC reading is used directly as an approximation -- this
+    // can be off by up to the true UTC offset (at most 14h, per
+    // matcher.mjs's VALID_OFFSET_SECONDS), which only risks stopping up to
+    // ~14h early or late against a 24h threshold, never a wrong TRASH (that
+    // is still filename-gated). Accepted rather than blocking the stop
+    // condition entirely on calibration succeeding, which risked never
+    // stopping at all for a run whose jobs never accumulate enough
+    // agreeing pairs.
+    const oldestOfBatch = freshTiles
+      .map((t) => parseTileAriaLabel(t.ariaLabel)?.wallClockAsUtcMs)
+      .filter((ms) => ms != null)
+      .reduce((min, ms) => (min == null || ms < min ? ms : min), null);
+    if (oldestOfBatch != null) {
+      const oldestOfBatchTrueMs = offsetSeconds != null ? oldestOfBatch - offsetSeconds * 1000 : oldestOfBatch;
+      if (oldestOfBatchTrueMs < oldestPendingMs - ONE_DAY_MS) {
+        if (VERBOSE) console.log('[timeline] reached more than 1 day past the oldest pending job — stopping');
+        break;
+      }
+    }
+
+    if (remaining.length === 0) break;
+
+    if (!sawNewTile) {
+      fruitlessScrolls += 1;
+      if (fruitlessScrolls >= MAX_TIMELINE_FRUITLESS_SCROLLS) {
+        if (VERBOSE) console.log(`[timeline] ${MAX_TIMELINE_FRUITLESS_SCROLLS} consecutive scroll(s) with no new tile — stopping`);
+        break;
+      }
+    } else {
+      fruitlessScrolls = 0;
+    }
+
+    await scrollResults(page);
+  }
+
+  if (remaining.length > 0) {
+    console.log(`[timeline] ${remaining.length} job(s) still unmatched after walking the timeline`);
+  }
+
+  return { stillUnmatched: remaining };
+}
+
 export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun, walk = 'photo' }) {
   let remaining = [...unmatchedJobs];
   if (remaining.length === 0) return { stillUnmatched: remaining };
@@ -1553,6 +1907,67 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = '
   }
 }
 
+/**
+ * Top-level driver for `--walk=timeline` (2026-09-22) -- runs walkTimeline
+ * ONCE across every pending job (no per-date grouping/looping needed: unlike
+ * date search's one-search-per-date design, a single continuous timeline
+ * scroll already covers every date in one pass), then marks anything still
+ * unmatched as needs_review with a reason distinct from date search's own
+ * ("no filename match for <date> (+/-1 day)") -- so a human triaging
+ * needs_review can tell "search never found this photo at all" (the old
+ * reason, still produced by --walk=photo/grid) apart from "the timeline
+ * walk passed this job's capture time and never confirmed a filename match"
+ * (this one), which point at different follow-ups (search's date math vs. a
+ * genuinely missing/miscategorized photo).
+ *
+ * Error handling mirrors runDateGroups' own two branches (isPageClosedError
+ * vs. any other throw) for the same reasons given there -- see its comments.
+ */
+export async function runTimelineWalk(page, jobs, queue, { dryRun }) {
+  let unmatched = [...jobs];
+  try {
+    const { stillUnmatched } = await walkTimeline(page, unmatched, queue, { dryRun });
+    unmatched = stillUnmatched;
+  } catch (err) {
+    if (isPageClosedError(page, err)) {
+      // Nothing was learned about any in-flight job -- everything not
+      // already resolved to trashed/needs_review by walkTimeline's own
+      // queue.update() calls simply stays 'queued' for the next run.
+      const processed = jobs.filter((j) => queue.getById(j.id)?.status !== 'queued').length;
+      console.log(
+        `[timeline] browser tab went away mid-run — ${processed} job(s) processed before that, ` +
+          `${jobs.length - processed} left queued for the next run.`
+      );
+      return;
+    }
+    if (!dryRun) {
+      // Same "only touch what's still genuinely queued" rule as
+      // runDateGroups -- walkTimeline updates the queue job-by-job as it
+      // goes, so `unmatched` can still list jobs already resolved to
+      // trashed/needs_review before the throw; blindly marking all of
+      // `unmatched` as 'error' would rewrite a real trash back to error.
+      for (const job of unmatched) {
+        if (queue.getById(job.id)?.status !== 'queued') continue;
+        queue.update(job.id, { status: 'error', error: String(err.message || err), attempts: job.attempts + 1 });
+      }
+    }
+    throw err; // stop the whole run, no silent retry loop
+  }
+
+  for (const job of unmatched) {
+    if (dryRun) {
+      console.log(`[dry-run needs_review] ${job.filename}: timeline walked past this job's capture time with no filename match`);
+    } else {
+      queue.update(job.id, {
+        status: 'needs_review',
+        comparison: { reason: "timeline walked past this job's capture time with no filename match" },
+        attempts: job.attempts + 1,
+      });
+      console.log(`[needs_review] ${job.filename}: timeline walked past this job's capture time with no filename match`);
+    }
+  }
+}
+
 export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'photo' } = {}) {
   const queue = new JobQueue(QUEUE_PATH);
   const jobs = queue.loadAll().filter((j) => j.status === 'queued').slice(0, cap);
@@ -1562,10 +1977,17 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'pho
     return;
   }
 
-  const groups = groupJobsByDate(jobs);
+  // Date grouping is only meaningful for the search-based walks -- the
+  // timeline walk takes the flat job list directly (see runTimelineWalk's
+  // header for why it needs no per-date loop).
+  const groups = walk === 'timeline' ? null : groupJobsByDate(jobs);
 
   if (dryRun) {
-    console.log(`--dry-run: will search + decide for ${jobs.length} job(s) across ${groups.size} date(s) but never trash or mutate the queue.`);
+    console.log(
+      walk === 'timeline'
+        ? `--dry-run: will scroll the timeline + decide for ${jobs.length} job(s) but never trash or mutate the queue.`
+        : `--dry-run: will search + decide for ${jobs.length} job(s) across ${groups.size} date(s) but never trash or mutate the queue.`
+    );
   }
 
   let gw;
@@ -1598,8 +2020,12 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'pho
   try {
     const context = browser.contexts()[0] ?? (await browser.newContext());
     page = await context.newPage();
-    await openPhotosHome(page);
-    await runDateGroups(page, groups, queue, { dryRun, walk });
+    await openPhotosHome(page); // lands on the main timeline either way -- no search is ever performed for --walk=timeline
+    if (walk === 'timeline') {
+      await runTimelineWalk(page, jobs, queue, { dryRun });
+    } else {
+      await runDateGroups(page, groups, queue, { dryRun, walk });
+    }
   } catch (err) {
     loud(`BLOCKER: worker error: ${err.stack || err}`);
     process.exitCode = 1;

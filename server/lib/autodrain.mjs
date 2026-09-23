@@ -49,11 +49,14 @@
  *      not, no spawn happens; a backoff timer re-attempts in `backoffMs`.
  *      Queued jobs are untouched — they get picked up whenever a run
  *      actually happens.
- *   5. Strategy retry: after the photo-walk run, any job that was `queued`
- *      at the run's start (and hasn't already used its retry — see [amend]
- *      5b) and is now `needs_review` gets re-queued and the worker runs
- *      exactly once more with `--walk=grid`, covering every such job in
- *      ONE follow-up spawn, not one per job. One retry only.
+ *   5. Strategy retry: after the PRIMARY run (2026-09-22: `--walk=timeline`
+ *      -- date search was measured live to be badly incomplete, see
+ *      worker.mjs's walkTimeline header; was `--walk=photo` before this),
+ *      any job that was `queued` at the run's start (and hasn't already used
+ *      its retry — see [amend] 5b) and is now `needs_review` gets re-queued
+ *      and the worker runs exactly once more with `--walk=grid`, covering
+ *      every such job in ONE follow-up spawn, not one per job. One retry
+ *      only.
  *   [amend] 5b. The retry marker (`autoDrainRetried: true`) is written onto
  *      the JOB RECORD itself via queue.update(), not held in memory, so it
  *      survives a crash/restart between the photo run and the grid retry —
@@ -283,7 +286,16 @@ export function createAutoDrain({
       const queuedAtStart = queue.loadAll().filter((j) => j.status === 'queued');
       const retryEligible = new Set(queuedAtStart.filter((j) => !j.autoDrainRetried).map((j) => j.id));
 
-      const photoResult = await runOnce('photo');
+      // 2026-09-22: TIMELINE is now the primary walk, not the photo
+      // (date-search) walk -- date search was measured live to be badly
+      // incomplete (a day with several real photos returning 1 tile, or
+      // 0), while the timeline scroll (worker.mjs's walkTimeline) actually
+      // shows everything. The grid retry below is UNCHANGED: it's a
+      // different traversal strategy over the SAME date-search results
+      // page, which is still a reasonable second attempt for whatever the
+      // timeline walk didn't confirm (e.g. a candidate tile it never
+      // opened because the calibrated offset hadn't converged yet).
+      const primaryResult = await runOnce('timeline');
       let gridResult = null;
       let retried = false;
 
@@ -319,7 +331,7 @@ export function createAutoDrain({
         startedAt,
         finishedAt: now(),
         outcome: 'completed',
-        photoExitCode: photoResult && photoResult.code,
+        photoExitCode: primaryResult && primaryResult.code, // field name kept for API stability -- now the PRIMARY (timeline) walk's exit code, not necessarily a photo-strategy run
         gridExitCode: gridResult && gridResult.code,
         retried,
       };
