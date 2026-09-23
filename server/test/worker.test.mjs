@@ -33,10 +33,8 @@ const {
   moveToTrash,
   walkTimeline,
   runTimelineWalk,
-  timelineTileWorthOpening,
-  TIMELINE_TIME_TOLERANCE_SECONDS,
-  MAX_TIMELINE_FRUITLESS_SCROLLS,
-  BROAD_CANDIDATE_OFFSETS_SECONDS,
+  MAX_TIMELINE_PHOTOS,
+  TIMELINE_STOP_BUFFER_DAYS,
 } = await import('../worker.mjs');
 
 async function withTempQueue(fn) {
@@ -1673,286 +1671,190 @@ test('regression: an open handle (standing in for the never-closed CDP socket) h
   }
 });
 
+
 // ============================================================================
-// --walk=timeline (2026-09-22): walkTimeline / runTimelineWalk / timelineTileWorthOpening
+// --walk=timeline (2026-09-22, PHOTO-VIEWER REDESIGN): walkTimeline / runTimelineWalk
 //
 // Date search (processDateGroup/runDateGroups above) was measured live to be
-// badly incomplete -- see worker.mjs's walkTimeline header for the concrete
-// numbers ("March 19, 2026" returning 1 tile vs. several real photos, "March
-// 17, 2026" returning zero). These tests exercise the replacement: scrolling
-// the main library timeline directly and matching candidates by a calibrated
-// UTC offset + filename, rather than trusting search.
+// badly incomplete -- see the module header in worker.mjs. The FIRST version
+// of this walk scrolled the main timeline's GRID and opened candidate tiles
+// by predicted capture time; a live dry-run against 106 pending jobs
+// disproved that design outright (opening a tile then returning to the grid
+// reset the scroll position to the top every time, 0 matches). This version
+// instead opens the timeline's newest tile once and walks the PHOTO VIEWER
+// with ArrowRight -- the exact same mechanism walkPhotoView already uses
+// after a date search, sharing its hard-won advance logic (advancePhotoView)
+// rather than reimplementing it.
 // ============================================================================
 
-/** A timeline tile's aria-label in the shape parseTileAriaLabel expects (matcher.mjs). */
-function timelineTileLabel(monthAbbrev, day, year, hour12, minute, second, ampm, kind = 'Photo') {
-  return `${kind} - Portrait - ${monthAbbrev} ${day}, ${year}, ${hour12}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')} ${ampm}`;
+/** A timeline tile identity for `config.timelineTiles` -- arbitrary but real-shaped (isRealPhotoTile requires "Photo -"/"Video -"). Distinct hrefs so duplicate-label fixtures stay independently addressable. */
+function timelineTile(label, href) {
+  return { ariaLabel: `Photo - Portrait - ${label}`, href: href ?? `./photo/${label}` };
 }
 
-test('timelineTileWorthOpening: pure boundary + gating behaviour (single-offset list)', () => {
-  const job = { filename: 'IMG_1.HEIC', creationDate: '2026-08-05T12:00:00.000Z', mediaType: null };
-  const offsetSeconds = -21600; // -6h
-  const predictedMs = new Date(job.creationDate).getTime() + offsetSeconds * 1000;
+/** Panel text with a real, GMT-suffixed capture date (matcher.mjs's captureDateMs) -- reuses panelBlock's dimensions block, only the date portion varies. */
+function timelinePanelText(filename, month, day, year = 2026, timeOfDay = '12:00 PMGMT-06:00') {
+  return panelBlock(filename, 100, 100, `${month} ${day}, ${year}Wed, ${timeOfDay}`);
+}
 
-  // No offsets at all -> never worth opening, regardless of how close a tile reads.
-  assert.equal(
-    timelineTileWorthOpening([job], { wallClockAsUtcMs: predictedMs, mediaType: 'photo' }, []),
-    false,
-    'an empty offsets list must never authorise opening a tile'
-  );
-  assert.equal(
-    timelineTileWorthOpening([job], { wallClockAsUtcMs: predictedMs, mediaType: 'photo' }, null),
-    false,
-    'a null offsets list must never authorise opening a tile'
-  );
-
-  // Exactly at TIMELINE_TIME_TOLERANCE_SECONDS -- inclusive boundary.
-  assert.equal(
-    timelineTileWorthOpening(
-      [job],
-      { wallClockAsUtcMs: predictedMs + TIMELINE_TIME_TOLERANCE_SECONDS * 1000, mediaType: 'photo' },
-      [offsetSeconds]
-    ),
-    true,
-    'exactly at the tolerance boundary must still be worth opening'
-  );
-
-  // One second past the boundary -- not worth opening.
-  assert.equal(
-    timelineTileWorthOpening(
-      [job],
-      { wallClockAsUtcMs: predictedMs + (TIMELINE_TIME_TOLERANCE_SECONDS + 1) * 1000, mediaType: 'photo' },
-      [offsetSeconds]
-    ),
-    false,
-    'one second past the tolerance boundary must not be worth opening'
-  );
-
-  // Media-type gating: a video job's predicted time must not flag a photo tile.
-  const videoJob = { ...job, mediaType: 'video' };
-  assert.equal(
-    timelineTileWorthOpening([videoJob], { wallClockAsUtcMs: predictedMs, mediaType: 'photo' }, [offsetSeconds]),
-    false,
-    'a video job must not be worth opening for a Photo tile at the same predicted time'
-  );
-});
-
-test('timelineTileWorthOpening: matches on ANY offset in a multi-offset list, not just the first', () => {
-  const job = { filename: 'IMG_1.HEIC', creationDate: '2026-08-05T12:00:00.000Z', mediaType: null };
-  const jobMs = new Date(job.creationDate).getTime();
-  const trueOffsetSeconds = -14400; // -4h -- NOT the first entry in the list below
-  const predictedMs = jobMs + trueOffsetSeconds * 1000;
-
-  assert.equal(
-    timelineTileWorthOpening(
-      [job],
-      { wallClockAsUtcMs: predictedMs, mediaType: 'photo' },
-      [3600, -21600, trueOffsetSeconds, 7200] // -4h buried in the middle of an otherwise-wrong list
-    ),
-    true,
-    'must find a match anywhere in the offsets list, not only offsets[0]'
-  );
-
-  assert.equal(
-    timelineTileWorthOpening([job], { wallClockAsUtcMs: predictedMs, mediaType: 'photo' }, [3600, -21600, 7200]),
-    false,
-    'must NOT match when none of the offsets tried land the job within tolerance'
-  );
-});
-
-test('timelineTileWorthOpening: BROAD_CANDIDATE_OFFSETS_SECONDS alone (no calibration at all) finds a job at -4h and a job at -6h', () => {
-  const jobNY = { filename: 'IMG_NY.HEIC', creationDate: '2026-03-15T16:00:00.000Z', mediaType: null }; // -4h -> 12:00 local
-  const jobCO = { filename: 'IMG_CO.HEIC', creationDate: '2026-03-15T18:00:00.000Z', mediaType: null }; // -6h -> 12:00 local
-  const nyPredictedMs = new Date(jobNY.creationDate).getTime() - 4 * 3600 * 1000;
-  const coPredictedMs = new Date(jobCO.creationDate).getTime() - 6 * 3600 * 1000;
-
-  assert.equal(
-    timelineTileWorthOpening([jobNY], { wallClockAsUtcMs: nyPredictedMs, mediaType: 'photo' }, BROAD_CANDIDATE_OFFSETS_SECONDS),
-    true,
-    'the -4h (New York) job must be worth opening from the broad sweep alone'
-  );
-  assert.equal(
-    timelineTileWorthOpening([jobCO], { wallClockAsUtcMs: coPredictedMs, mediaType: 'photo' }, BROAD_CANDIDATE_OFFSETS_SECONDS),
-    true,
-    'the -6h (Colorado) job must ALSO be worth opening from the same broad sweep, in the same run'
-  );
-});
-
-test('walkTimeline: finds a photo, calibrates a -6h offset from 2 clean pairs, and tolerates a 6-second-off reading (the exact live-measured discrepancy)', async () => {
+test('walkTimeline: finds a match deep in the sequence (past several non-matching photos) that date search would miss entirely', async () => {
   await withTempQueue(async (queue) => {
-    const OFFSET_H = -6;
-    const cal1 = queue.enqueue({ filename: 'IMG_9001.HEIC', creationDate: '2026-08-05T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
-    const cal2 = queue.enqueue({ filename: 'IMG_9002.HEIC', creationDate: '2026-08-05T15:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
-    const target = queue.enqueue({ filename: 'IMG_9003.HEIC', creationDate: '2026-08-05T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
-    // Predicted local time is 1:59:54 PM (14:00:00 - 6s) -- the same 6-second
-    // discrepancy the brief measured live (aria-label reading vs. creationDate
-    // after applying the calibrated offset), well inside TIMELINE_TIME_TOLERANCE_SECONDS.
-    const tolerant = queue.enqueue({ filename: 'IMG_9004.HEIC', creationDate: '2026-08-05T20:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
+    const { job } = queue.enqueue({ filename: 'IMG_5050.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
 
-    const cal1Label = timelineTileLabel('Aug', 5, 2026, 6, 0, 0, 'AM'); // 12:00 UTC -6h = 06:00 local, exact
-    const cal2Label = timelineTileLabel('Aug', 5, 2026, 9, 0, 0, 'AM'); // 15:00 UTC -6h = 09:00 local, exact
-    const targetLabel = timelineTileLabel('Aug', 5, 2026, 12, 0, 0, 'PM'); // 18:00 UTC -6h = 12:00 local, exact
-    const tolerantLabel = timelineTileLabel('Aug', 5, 2026, 1, 59, 54, 'PM'); // 20:00 UTC -6h = 14:00:00 local, tile reads 6s early
-
-    const page = createFakePage({
-      timelineTiles: [
-        { ariaLabel: cal1Label },
-        { ariaLabel: cal2Label },
-        { ariaLabel: targetLabel },
-        { ariaLabel: tolerantLabel },
-      ],
-      timelinePanelTextByLabel: {
-        [cal1Label]: panelBlock('IMG_9001.HEIC', 100, 100),
-        [cal2Label]: panelBlock('IMG_9002.HEIC', 100, 100),
-        [targetLabel]: panelBlock('IMG_9003.HEIC', 100, 100),
-        [tolerantLabel]: panelBlock('IMG_9004.HEIC', 100, 100),
-      },
-    });
-
-    const { stillUnmatched } = await walkTimeline(page, [cal1, cal2, target, tolerant], queue, { dryRun: false });
-
-    assert.equal(stillUnmatched.length, 0, `all 4 jobs should have matched, offset=${OFFSET_H}h`);
-    for (const job of [cal1, cal2, target, tolerant]) {
-      assert.equal(queue.getById(job.id).status, 'trashed', `${job.filename} should be trashed`);
+    // 5 decoys (newest-first, descending dates) THEN the real match, THEN
+    // one more decoy after it -- proves the walk steps past non-matches via
+    // ArrowRight rather than stopping at the first thing it sees.
+    const tiles = [];
+    const panelText = {};
+    for (let i = 0; i < 5; i++) {
+      const t = timelineTile(`decoy-before-${i}`);
+      tiles.push(t);
+      panelText[t.ariaLabel] = timelinePanelText(`IMG_90${10 + i}.HEIC`, 'Aug', 25 - i);
     }
+    const matchTile = timelineTile('the-real-one');
+    tiles.push(matchTile);
+    panelText[matchTile.ariaLabel] = timelinePanelText('IMG_5050.HEIC', 'Aug', 20);
+    const trailingDecoy = timelineTile('decoy-after');
+    tiles.push(trailingDecoy);
+    panelText[trailingDecoy.ariaLabel] = timelinePanelText('IMG_9099.HEIC', 'Aug', 19);
+
+    const page = createFakePage({ timelineTiles: tiles, timelinePanelTextByLabel: panelText });
+
+    const { stillUnmatched } = await walkTimeline(page, [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0);
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    // The trailing decoy must never have been trashed.
+    assert.ok(!page.trashedIdentities.has(trailingDecoy.href));
   });
 });
 
-test('walkTimeline: a candidate tile within the time tolerance but with a DIFFERENT filename is opened but never trashed', async () => {
+test('walkTimeline: non-matching photos are stepped past via ArrowRight and are never trashed', async () => {
   await withTempQueue(async (queue) => {
-    // Two clean calibration pairs (required for the offset to calibrate at all).
-    const cal1 = queue.enqueue({ filename: 'IMG_9001.HEIC', creationDate: '2026-08-05T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
-    const cal2 = queue.enqueue({ filename: 'IMG_9002.HEIC', creationDate: '2026-08-05T15:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
-    // decoyTarget's own real photo is nowhere in this fixture -- only a
-    // DIFFERENT photo (decoyTile) happens to sit at its predicted time.
-    const decoyTarget = queue.enqueue({ filename: 'IMG_9006.HEIC', creationDate: '2026-08-06T00:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
+    const { job } = queue.enqueue({ filename: 'IMG_LOST.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
 
-    const cal1Label = timelineTileLabel('Aug', 5, 2026, 6, 0, 0, 'AM');
-    const cal2Label = timelineTileLabel('Aug', 5, 2026, 9, 0, 0, 'AM');
-    // 2026-08-06T00:00:00Z - 6h = Aug 5, 6:00 PM local -- decoyTarget's predicted slot.
-    const decoyLabel = timelineTileLabel('Aug', 5, 2026, 6, 0, 0, 'PM');
+    const tiles = [];
+    const panelText = {};
+    for (let i = 0; i < 8; i++) {
+      const t = timelineTile(`decoy-${i}`);
+      tiles.push(t);
+      panelText[t.ariaLabel] = timelinePanelText(`IMG_70${10 + i}.HEIC`, 'Aug', 24 - i);
+    }
+    const page = createFakePage({ timelineTiles: tiles, timelinePanelTextByLabel: panelText });
 
-    const page = createFakePage({
-      timelineTiles: [{ ariaLabel: cal1Label }, { ariaLabel: cal2Label }, { ariaLabel: decoyLabel }],
-      timelinePanelTextByLabel: {
-        [cal1Label]: panelBlock('IMG_9001.HEIC', 100, 100),
-        [cal2Label]: panelBlock('IMG_9002.HEIC', 100, 100),
-        // Different filename entirely -- a real distinct photo that merely
-        // happens to have been taken near decoyTarget's predicted time.
-        [decoyLabel]: panelBlock('IMG_0000.HEIC', 100, 100),
-      },
-    });
+    const logs = await captureLogs(() => walkTimeline(page, [job], queue, { dryRun: false }));
 
-    let stillUnmatched;
-    const logs = await captureLogs(async () => {
-      ({ stillUnmatched } = await walkTimeline(page, [cal1, cal2, decoyTarget], queue, { dryRun: false }));
-    });
-
-    assert.equal(stillUnmatched.length, 1, 'decoyTarget must remain unmatched');
-    assert.equal(stillUnmatched[0].id, decoyTarget.id);
-    assert.equal(queue.getById(decoyTarget.id).status, 'queued', 'never trashed, never rewritten by a coincidental time-neighbour');
-    assert.ok(
-      page.log.includes(`tile-click:${decoyLabel}`),
-      'the decoy tile IS opened (it was worth a look, time-wise) -- proves this is a real non-match, not a candidate that was never tried'
-    );
-    // cal1/cal2 DO have real matches in this fixture (needed so the offset
-    // can calibrate at all) and legitimately reach the trash keystroke --
-    // the assertion that matters is that neither the decoy's real filename
-    // nor decoyTarget's own (never-found) filename was ever reported trashed.
-    assert.ok(!logs.some((l) => l.includes('[trashed] IMG_0000.HEIC')));
-    assert.ok(!logs.some((l) => l.includes('[trashed] IMG_9006.HEIC')));
+    assert.ok(!page.log.some((l) => l === 'key:#'), 'no candidate ever matched -- the trash keystroke must never fire');
+    assert.ok(!logs.some((l) => l.startsWith('[trashed]')));
+    for (const t of tiles) assert.ok(!page.trashedIdentities.has(t.href));
   });
 });
 
 test('walkTimeline: duplicate copies of the same job are both trashed', async () => {
   await withTempQueue(async (queue) => {
-    const cal1 = queue.enqueue({ filename: 'IMG_9001.HEIC', creationDate: '2026-08-05T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
-    const cal2 = queue.enqueue({ filename: 'IMG_9002.HEIC', creationDate: '2026-08-05T15:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
-    const dup = queue.enqueue({ filename: 'IMG_9005.HEIC', creationDate: '2026-08-05T22:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
+    const { job } = queue.enqueue({ filename: 'IMG_6060.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
 
-    const cal1Label = timelineTileLabel('Aug', 5, 2026, 6, 0, 0, 'AM');
-    const cal2Label = timelineTileLabel('Aug', 5, 2026, 9, 0, 0, 'AM');
-    const dupLabelA = timelineTileLabel('Aug', 5, 2026, 4, 0, 0, 'PM'); // 22:00 UTC -6h = 16:00 local, exact
-    const dupLabelB = dupLabelA; // same wall-clock reading -- a real re-upload duplicate; distinguished by href only
+    const copyA = timelineTile('copyA');
+    const copyB = timelineTile('copyB');
+    const filler = timelineTile('filler');
+    const tiles = [copyA, filler, copyB]; // a non-matching photo sits BETWEEN the two copies
+    const panelText = {
+      [copyA.ariaLabel]: timelinePanelText('IMG_6060.HEIC', 'Aug', 20),
+      [filler.ariaLabel]: timelinePanelText('IMG_9999.HEIC', 'Aug', 19),
+      [copyB.ariaLabel]: timelinePanelText('IMG_6060.HEIC', 'Aug', 18),
+    };
 
-    const page = createFakePage({
-      timelineTiles: [
-        { ariaLabel: cal1Label },
-        { ariaLabel: cal2Label },
-        { ariaLabel: dupLabelA, href: './photo/copyA' },
-        { ariaLabel: dupLabelB, href: './photo/copyB' },
-      ],
-      timelinePanelTextByLabel: {
-        [cal1Label]: panelBlock('IMG_9001.HEIC', 100, 100),
-        [cal2Label]: panelBlock('IMG_9002.HEIC', 100, 100),
-        [dupLabelA]: panelBlock('IMG_9005.HEIC', 100, 100),
-      },
-    });
-
-    const { stillUnmatched } = await walkTimeline(page, [cal1, cal2, dup], queue, { dryRun: false });
-
-    assert.equal(stillUnmatched.length, 0);
-    const record = queue.getById(dup.id);
-    assert.equal(record.status, 'trashed');
-    assert.equal(record.copiesTrashed, 2, 'both copies of the duplicate must be trashed');
-  });
-});
-
-test('walkTimeline: stops scrolling once the visible timeline is more than 1 day older than the oldest pending job', async () => {
-  await withTempQueue(async (queue) => {
-    const job = queue.enqueue({ filename: 'IMG_NEVER_FOUND.HEIC', creationDate: '2026-08-05T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
-
-    // 40 batches, one NEW tile each, dated one calendar day further back per
-    // batch (Aug 5, Aug 4, Aug 3, ... back to ~June 27), all at the SAME
-    // 12:00 PM wall-clock reading as `job`'s own UTC creationDate. Only the
-    // VERY FIRST batch (Aug 5, same calendar day+time as `job`) is ever
-    // flagged worth-opening -- it lands within tolerance under the broad
-    // sweep's offset=0 entry (a trivial "no shift needed" match against
-    // job's own literal UTC instant). Every other batch is exactly 24h (or
-    // a multiple of it) away from that instant, which is bigger than the
-    // broad sweep's +/-12h..+14h span by construction, so none of them are
-    // ever worth opening under ANY offset in the list -- this isolates the
-    // STOP condition from the multi-offset candidate search: after the one
-    // spurious-but-harmless open on batch 0 (confirmed non-match, since its
-    // panel text below carries a different filename), the only way the walk
-    // can end is either exhausting MAX_TIMELINE_FRUITLESS_SCROLLS (40
-    // distinct batches means it never goes fruitless) or the 1-day stop
-    // check.
-    const day0Label = timelineTileLabel('Aug', 5, 2026, 12, 0, 0, 'PM');
-    const reveals = Array.from({ length: 40 }, (_, i) => {
-      const day = 5 - i; // day 0 or negative is fine -- Date.UTC normalises month/day rollover
-      const label = timelineTileLabel('Aug', day, 2026, 12, 0, 0, 'PM');
-      return [{ ariaLabel: label, href: `./photo/day${i}` }];
-    });
-
-    const page = createFakePage({
-      timelineTiles: [],
-      timelineReveals: reveals,
-      timelinePanelTextByLabel: { [day0Label]: panelBlock('IMG_9999.HEIC', 100, 100) }, // IMG_#### -- must match matcher.mjs's FILENAME_PATTERNS, "IMG_DECOY..." would not parse as a filename at all
-    });
+    const page = createFakePage({ timelineTiles: tiles, timelinePanelTextByLabel: panelText });
 
     const { stillUnmatched } = await walkTimeline(page, [job], queue, { dryRun: false });
 
-    assert.equal(stillUnmatched.length, 1, 'job never matches anything in this fixture');
-    assert.ok(
-      page.timelineRevealedCount < reveals.length,
-      `expected the walk to stop before revealing all ${reveals.length} batches, revealed ${page.timelineRevealedCount}`
-    );
-    // Precise: the stop condition fires once the oldest MOUNTED tile is
-    // strictly older than (oldestPendingMs - 1 day) = Aug 4, 2026 12:00 UTC.
-    // Batch 2 (Aug 3) is the first to cross that, so exactly 3 batches
-    // (Aug 5, Aug 4, Aug 3) should have been revealed -- see this test's
-    // sibling assertion below for the exact-count mutation-proof version.
-    assert.equal(page.timelineRevealedCount, 3, 'exactly 3 batches (through the first one that crosses the 1-day cutoff) should be revealed');
+    assert.equal(stillUnmatched.length, 0);
+    const record = queue.getById(job.id);
+    assert.equal(record.status, 'trashed');
+    assert.equal(record.copiesTrashed, 2, 'both copies must be trashed even with a non-matching photo between them');
   });
 });
 
-test('runTimelineWalk: a job never matched by the timeline walk becomes needs_review with the TIMELINE-specific reason', async () => {
+test('walkTimeline: trashing a photo does not skip the one right after it (no-skip-after-trash)', async () => {
   await withTempQueue(async (queue) => {
-    const { job } = queue.enqueue({ filename: 'IMG_LOST.HEIC', creationDate: '2026-08-05T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
-    // No tiles anywhere -- MAX_TIMELINE_FRUITLESS_SCROLLS consecutive
-    // no-new-tile scrolls end the walk quickly.
-    const page = createFakePage({ timelineTiles: [] });
+    // jobA's tile comes first; jobB's tile comes IMMEDIATELY after it in the
+    // underlying order. A trash advances the view by itself (see
+    // confirmAndTrash/performTrash) -- this proves the walk picks up
+    // jobB's tile as the very next one checked, rather than skipping it
+    // (e.g. by also pressing ArrowRight after an auto-advancing trash).
+    const { job: jobA } = queue.enqueue({ filename: 'IMG_7001.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const { job: jobB } = queue.enqueue({ filename: 'IMG_7002.HEIC', creationDate: '2026-08-19T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+
+    const tileA = timelineTile('tileA');
+    const tileB = timelineTile('tileB');
+    const tiles = [tileA, tileB];
+    const panelText = {
+      [tileA.ariaLabel]: timelinePanelText('IMG_7001.HEIC', 'Aug', 20),
+      [tileB.ariaLabel]: timelinePanelText('IMG_7002.HEIC', 'Aug', 19),
+    };
+
+    const page = createFakePage({ timelineTiles: tiles, timelinePanelTextByLabel: panelText });
+
+    const { stillUnmatched } = await walkTimeline(page, [jobA, jobB], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'both jobs must be found -- jobB must not be skipped after jobA auto-advances the view');
+    assert.equal(queue.getById(jobA.id).status, 'trashed');
+    assert.equal(queue.getById(jobB.id).status, 'trashed');
+  });
+});
+
+test('walkTimeline: stops once the panel date reads more than 2 days past the oldest pending job (does NOT walk to the end)', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue({ filename: 'IMG_NEVER.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+
+    // 10 tiles, one per day, Aug 20 down to Aug 11 -- Aug 17 (3 days before
+    // the job's own Aug 20) is the first to cross the 2-day buffer
+    // (stopBeforeMs = Aug 18 12:00 UTC), so the walk must stop there and
+    // NEVER reach the marker tile at the very end of the array.
+    const tiles = [];
+    const panelText = {};
+    for (let i = 0; i < 10; i++) {
+      const day = 20 - i;
+      const t = timelineTile(`day${day}`);
+      tiles.push(t);
+      panelText[t.ariaLabel] = timelinePanelText(`IMG_80${10 + i}.HEIC`, 'Aug', day);
+    }
+    const marker = timelineTile('unreachable-marker');
+    tiles.push(marker);
+    panelText[marker.ariaLabel] = timelinePanelText('IMG_MARKER.HEIC', 'Jul', 1);
+
+    const page = createFakePage({ timelineTiles: tiles, timelinePanelTextByLabel: panelText });
+
+    const logs = await captureLogs(() => walkTimeline(page, [job], queue, { dryRun: false }));
+
+    assert.ok(!page.log.some((l) => l.includes('unreachable-marker')), 'must never reach the marker tile past the stop boundary');
+    assert.ok(logs.some((l) => l.includes('reached more than') && l.includes('day(s) past the oldest pending job')));
+    assert.equal(queue.getById(job.id).status, 'queued', 'processDateGroup-equivalent: walkTimeline itself never writes needs_review');
+  });
+});
+
+test('walkTimeline: end-of-library stop (advancing genuinely fails) leaves the job unmatched', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue({ filename: 'IMG_NOWHERE.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+
+    const tiles = [timelineTile('only-one')];
+    const panelText = { [tiles[0].ariaLabel]: timelinePanelText('IMG_9500.HEIC', 'Aug', 20) };
+
+    const page = createFakePage({ timelineTiles: tiles, timelinePanelTextByLabel: panelText });
+
+    const { stillUnmatched } = await walkTimeline(page, [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 1);
+    assert.equal(stillUnmatched[0].id, job.id);
+  });
+});
+
+test('runTimelineWalk: a job never matched by the timeline walk becomes needs_review with the new photo-viewer reason', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue({ filename: 'IMG_LOST2.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tiles = [timelineTile('only-one')];
+    const panelText = { [tiles[0].ariaLabel]: timelinePanelText('IMG_9501.HEIC', 'Aug', 20) };
+    const page = createFakePage({ timelineTiles: tiles, timelinePanelTextByLabel: panelText });
 
     await runTimelineWalk(page, [queue.getById(job.id)], queue, { dryRun: false });
 
@@ -1960,122 +1862,8 @@ test('runTimelineWalk: a job never matched by the timeline walk becomes needs_re
     assert.equal(after.status, 'needs_review');
     assert.equal(
       after.comparison?.reason,
-      "timeline walked past this job's capture time with no filename match",
-      'the reason must be distinct from date search\'s own "no filename match for <date> (+/-1 day)"'
-    );
-    const wheelCount = page.log.filter((l) => l === 'wheel:down').length;
-    assert.ok(wheelCount <= MAX_TIMELINE_FRUITLESS_SCROLLS + 1, `must not scroll forever against an empty timeline, got ${wheelCount} scrolls`);
-  });
-});
-
-test('walkTimeline: calibrates a DIFFERENT offset (-4h) correctly -- not hardcoded to -6h', async () => {
-  await withTempQueue(async (queue) => {
-    const cal1 = queue.enqueue({ filename: 'IMG_8001.HEIC', creationDate: '2026-03-18T04:59:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
-    const cal2 = queue.enqueue({ filename: 'IMG_8002.HEIC', creationDate: '2026-03-18T08:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
-    const target = queue.enqueue({ filename: 'IMG_8003.HEIC', creationDate: '2026-03-18T10:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
-
-    // -4h: 04:59 UTC -> 12:59 AM local; 08:00 UTC -> 4:00 AM local; 10:00 UTC -> 6:00 AM local.
-    const cal1Label = timelineTileLabel('Mar', 18, 2026, 12, 59, 0, 'AM');
-    const cal2Label = timelineTileLabel('Mar', 18, 2026, 4, 0, 0, 'AM');
-    const targetLabel = timelineTileLabel('Mar', 18, 2026, 6, 0, 0, 'AM');
-
-    const page = createFakePage({
-      timelineTiles: [{ ariaLabel: cal1Label }, { ariaLabel: cal2Label }, { ariaLabel: targetLabel }],
-      timelinePanelTextByLabel: {
-        [cal1Label]: panelBlock('IMG_8001.HEIC', 100, 100),
-        [cal2Label]: panelBlock('IMG_8002.HEIC', 100, 100),
-        [targetLabel]: panelBlock('IMG_8003.HEIC', 100, 100),
-      },
-    });
-
-    const { stillUnmatched } = await walkTimeline(page, [cal1, cal2, target], queue, { dryRun: false });
-
-    assert.equal(stillUnmatched.length, 0);
-    assert.equal(queue.getById(target.id).status, 'trashed');
-  });
-});
-
-
-test('walkTimeline: a -4h (New York) job and a -6h (Colorado) job in the SAME run are both matched and trashed -- the multi-offset fix', async () => {
-  await withTempQueue(async (queue) => {
-    // No calibration pairs at all -- deliberately proves the BROAD sweep
-    // alone (not calibrateOffsetSeconds) is what makes this work, since a
-    // single calibrated offset could only ever have picked ONE of these two
-    // trips' true offsets, never both in the same run (see
-    // BROAD_CANDIDATE_OFFSETS_SECONDS' header -- this is the exact live
-    // scenario it was added for: Oliver's March backlog mixing NY -4/-5h
-    // and Colorado -6/-7h photos).
-    const jobNY = queue.enqueue({ filename: 'IMG_9101.HEIC', creationDate: '2026-03-10T16:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job; // -4h -> Mar 10, 12:00 PM local
-    const jobCO = queue.enqueue({ filename: 'IMG_9201.HEIC', creationDate: '2026-03-15T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job; // -6h -> Mar 15, 12:00 PM local
-
-    const nyLabel = timelineTileLabel('Mar', 10, 2026, 12, 0, 0, 'PM');
-    const coLabel = timelineTileLabel('Mar', 15, 2026, 12, 0, 0, 'PM');
-
-    const page = createFakePage({
-      timelineTiles: [
-        { ariaLabel: nyLabel, href: './photo/ny' },
-        { ariaLabel: coLabel, href: './photo/co' },
-      ],
-      timelinePanelTextByLabel: {
-        [nyLabel]: panelBlock('IMG_9101.HEIC', 100, 100),
-        [coLabel]: panelBlock('IMG_9201.HEIC', 100, 100),
-      },
-    });
-
-    const { stillUnmatched } = await walkTimeline(page, [jobNY, jobCO], queue, { dryRun: false });
-
-    assert.equal(stillUnmatched.length, 0, 'both the -4h and -6h jobs must be found in the SAME run, with no calibration pair for either');
-    assert.equal(queue.getById(jobNY.id).status, 'trashed', 'the -4h (New York) job must be found and trashed');
-    assert.equal(queue.getById(jobCO.id).status, 'trashed', 'the -6h (Colorado) job must ALSO be found and trashed, in the same run');
-  });
-});
-
-test('walkTimeline: the multi-offset sweep stays bounded -- a day full of unrelated tiles does not blow up the open count', async () => {
-  await withTempQueue(async (queue) => {
-    const job = queue.enqueue({ filename: 'IMG_9301.HEIC', creationDate: '2026-05-01T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job; // -6h -> May 1, 12:00 PM local
-
-    const realLabel = timelineTileLabel('May', 1, 2026, 12, 0, 0, 'PM'); // job's real tile
-    // 15 "background" tiles on the SAME calendar day, each 17 minutes past a
-    // distinct hour mark from the job's own predicted local time -- e.g. job
-    // predicts 12:00:00 PM; background tiles sit at 1:17:00 PM, 2:17:00 PM,
-    // etc. NOT 30 minutes past the hour: BROAD_CANDIDATE_OFFSETS_SECONDS
-    // includes three genuine half-hour zones (+5:30, +9:30, -3:30), and an
-    // earlier version of this fixture used a 30-minute offset that
-    // accidentally COLLIDED with exactly those three entries at h=2, 11, 15
-    // (caught by running this test, not by inspection -- see git history).
-    // 17 minutes clears every whole-hour AND half-hour boundary in the list
-    // by at least 13 minutes (780s), comfortably outside the +/-180s
-    // tolerance window around any of them, so NONE of these should ever be
-    // flagged worth opening.
-    const jobLocalMs = new Date(job.creationDate).getTime() - 6 * 3600 * 1000; // the job's own predicted local instant (as wall-clock-as-UTC)
-    const backgroundTiles = [];
-    const backgroundPanelText = {};
-    for (let h = 1; h <= 15; h++) {
-      const ms = jobLocalMs + h * 3600 * 1000 + 17 * 60 * 1000; // h hours + 17 minutes past the job's own instant
-      const d = new Date(ms);
-      const hour24 = d.getUTCHours();
-      const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
-      const ampm = hour24 < 12 ? 'AM' : 'PM';
-      const label = timelineTileLabel('May', d.getUTCDate(), 2026, hour12, d.getUTCMinutes(), d.getUTCSeconds(), ampm);
-      const filename = `IMG_9${String(400 + h).padStart(3, '0')}.HEIC`; // IMG_9401..IMG_9415 -- valid IMG_\d+ shape
-      backgroundTiles.push({ ariaLabel: label, href: `./photo/bg${h}` });
-      backgroundPanelText[label] = panelBlock(filename, 100, 100);
-    }
-
-    const page = createFakePage({
-      timelineTiles: [{ ariaLabel: realLabel, href: './photo/real' }, ...backgroundTiles],
-      timelinePanelTextByLabel: { [realLabel]: panelBlock('IMG_9301.HEIC', 100, 100), ...backgroundPanelText },
-    });
-
-    const { stillUnmatched } = await walkTimeline(page, [job], queue, { dryRun: false });
-
-    assert.equal(stillUnmatched.length, 0, 'the real job must still be found');
-    assert.equal(queue.getById(job.id).status, 'trashed');
-    const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
-    assert.equal(
-      tileClicks.length,
-      1,
-      `expected exactly 1 tile opened (the real match) out of ${backgroundTiles.length + 1} tiles on this day, got ${tileClicks.length}: ${JSON.stringify(tileClicks)}`
+      "walked the photo viewer past this job's date with no filename match",
+      'must be distinct from date search\'s own "no filename match for <date> (+/-1 day)" reason'
     );
   });
 });

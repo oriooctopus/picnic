@@ -73,8 +73,49 @@ test('parsePanelText: no filename in the text -> null fields, not a throw', () =
 });
 
 test('parsePanelText: empty/undefined text -> null fields', () => {
-  assert.deepEqual(parsePanelText(''), { filename: null, pixelWidth: null, pixelHeight: null });
-  assert.deepEqual(parsePanelText(undefined), { filename: null, pixelWidth: null, pixelHeight: null });
+  assert.deepEqual(parsePanelText(''), { filename: null, pixelWidth: null, pixelHeight: null, captureDateMs: null });
+  assert.deepEqual(parsePanelText(undefined), { filename: null, pixelWidth: null, pixelHeight: null, captureDateMs: null });
+});
+
+// --- captureDateMs (2026-09-22, added for walkTimeline's stop condition) ---
+
+test('parsePanelText: captureDateMs parses the run-together date/weekday/time/GMT block, year OMITTED -> falls back to referenceYear', () => {
+  const parsed = parsePanelText(IMG_1433_BLOCK, 2026);
+  // IMG_1433_BLOCK's timeLabel defaults to 'Aug 5Wed, 6:54 PMGMT-06:00' (see
+  // this file's own helper below) -- no year in the text at all.
+  assert.equal(parsed.captureDateMs, Date.UTC(2026, 7, 5, 18, 54));
+});
+
+test('parsePanelText: captureDateMs uses the YEAR embedded in the text when present, ignoring referenceYear', () => {
+  const block =
+    "InfoAdd a descriptionPeopleDetailsAug 5, 2024Wed, 6:54 PMGMT-06:00Apple iPhone 13 Pro" +
+    "ƒ/2.21/632.71mmISO40IMG_1433.HEIC7.2MP2316 × 3088Uploaded from iOS deviceBacked up (6 MB)Original quality. Learn moreWestminster, CO";
+  const parsed = parsePanelText(block, 2026);
+  assert.equal(parsed.captureDateMs, Date.UTC(2024, 7, 5, 18, 54));
+});
+
+test('parsePanelText: captureDateMs is null when the text has no GMT-suffixed time at all (never guesses)', () => {
+  const parsed = parsePanelText('Info Add a description People Details Aug 5, 2026 no time here', 2026);
+  assert.equal(parsed.captureDateMs, null);
+});
+
+test('parsePanelText: captureDateMs does not false-match a run-together non-month word as a month (the "PeopleDetailsAug" trap)', () => {
+  // Regression case: an earlier version used a generic [A-Za-z]{3,9} class
+  // for the month name, which greedily matched "etailsAug" (the tail of
+  // "...PeopleDetailsAug 5Wed...", no space before the real month) and then
+  // correctly refused it as not-a-real-month -- but WITHOUT ever retrying
+  // to find the genuine "Aug" match right after, so captureDateMs came back
+  // null even though a perfectly good date WAS present in the text. Proven
+  // by mutation below (see the mutation-proof section of worker.test.mjs).
+  const parsed = parsePanelText(IMG_1433_BLOCK, 2026);
+  assert.notEqual(parsed.captureDateMs, null, 'a real date/time IS present in the text and must be found');
+});
+
+test('parsePanelText: captureDateMs handles noon/midnight (12 AM/PM) correctly', () => {
+  const noon = "InfoAdd a descriptionPeopleDetailsAug 5Wed, 12:00 PMGMT-06:00IMG_1433.HEIC100 × 100";
+  const midnight = "InfoAdd a descriptionPeopleDetailsAug 5Wed, 12:00 AMGMT-06:00IMG_1433.HEIC100 × 100";
+  assert.equal(parsePanelText(noon, 2026).captureDateMs, Date.UTC(2026, 7, 5, 12, 0));
+  assert.equal(parsePanelText(midnight, 2026).captureDateMs, Date.UTC(2026, 7, 5, 0, 0));
 });
 
 test('filenamesAgree: case-insensitive', () => {

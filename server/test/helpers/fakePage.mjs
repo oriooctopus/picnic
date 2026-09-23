@@ -182,30 +182,24 @@ function windowedTiles(page) {
 }
 
 /**
- * TIMELINE equivalent of tilesInGrid (2026-09-22, worker.mjs's walkTimeline)
- * -- the main library scroll has no "active query" to key off (it is never
- * reached via a search), so this is a SEPARATE, un-queried list:
- * `config.timelineTiles` (the tiles visible before any scroll) plus whatever
- * `config.timelineReveals` batches scrolling has unlocked so far
- * (`page.timelineRevealedCount`), minus anything already trashed. A fixture
- * opts into timeline mode simply by setting `config.timelineTiles` -- see
- * `mouse.wheel`'s branch below for the corresponding scroll behaviour.
+ * TIMELINE equivalent of tilesInGrid, REWRITTEN 2026-09-22 for the
+ * photo-viewer redesign of `--walk=timeline` (worker.mjs's walkTimeline).
+ *
+ * No scrolling/reveals/virtualization modelling here any more -- the old
+ * grid-scrolling design (and this fake's matching reveal/window machinery)
+ * was disproven by a live dry-run: opening a tile and returning to the grid
+ * reset the timeline's scroll position to the top every time. The rewrite
+ * opens ONE tile (the newest) and then walks entirely INSIDE the photo
+ * viewer via ArrowRight (advancePhotoView, shared with walkPhotoView), never
+ * touching the grid again -- so a fixture's `config.timelineTiles` is simply
+ * the FULL flat underlying order (newest first), exactly like
+ * `fullOrderedTiles`'s role for the grid's ArrowRight traversal. There is no
+ * separate "mounted window" to model because nothing ever scrolls the grid
+ * to reveal more of it.
  */
 function tilesInTimeline(page) {
   const base = page.config.timelineTiles ?? [];
-  const reveals = page.config.timelineReveals ?? [];
-  const revealedBatches = reveals.slice(0, page.timelineRevealedCount).flat();
-  return [...base, ...revealedBatches].filter((tile) => !page.trashedIdentities.has(identityOf(tile)));
-}
-
-/** TIMELINE equivalent of windowedTiles -- see that function's header; same virtualization model, keyed off `config.timelineWindowSize`/`page.timelineWindowStart` instead of the grid's `windowSize`/`windowStart`. */
-function windowedTimelineTiles(page) {
-  const windowSize = page.config.timelineWindowSize;
-  const all = tilesInTimeline(page);
-  if (!windowSize) return all;
-  const maxStart = Math.max(0, all.length - windowSize);
-  const start = Math.min(page.timelineWindowStart, maxStart);
-  return all.slice(start, start + windowSize);
+  return base.filter((tile) => !page.trashedIdentities.has(identityOf(tile)));
 }
 
 /**
@@ -299,7 +293,7 @@ class FakeLocator {
       // openedAriaLabel never gets set, so the info panel poll times out no
       // matter what the panel-text fixture says. Caught by running the new
       // timeline tests, not by inspection.
-      const pool = isTimelineSelector(this.selector) ? windowedTimelineTiles(this.page) : windowedTiles(this.page);
+      const pool = isTimelineSelector(this.selector) ? tilesInTimeline(this.page) : windowedTiles(this.page);
       const tile = findTile(this.page, { ariaLabel: label, href }, pool);
       if (!isUnopenable(this.page, label) && tile) {
         openTileInFake(this.page, label, typeof tile === 'string' ? undefined : tile.href);
@@ -377,7 +371,7 @@ class FakeTileLink {
 }
 
 /**
- * The FULL underlying order of a date's tiles for the active query -- base
+ * The FULL underlying order of the currently open sequence -- base
  * searchResults followed by every scrollReveals batch, regardless of
  * revealedCount/windowStart (unlike tilesInGrid/windowedTiles above, which
  * only see what's currently "mounted"). Models the live fact worker.mjs's
@@ -387,6 +381,13 @@ class FakeTileLink {
  * this worker walked 27 photos on one date via ArrowRight alone, with no
  * scrolling at all. Trashed labels are excluded (a deleted photo is gone
  * from the results, never revisited).
+ *
+ * TIMELINE MODE (2026-09-22, photo-viewer redesign): when
+ * `config.timelineTiles` is set, THAT flat array is the full order instead
+ * -- walkTimeline opens the newest tile once and then walks this exact same
+ * ArrowRight machinery (performTrash/hasNextPhoto/advanceToNextTile all
+ * call this function), so the timeline needs no separate "full order"
+ * concept of its own.
  */
 // Returns the raw tile objects (not flattened to aria-label strings) -- see
 // performTrash's header for why: two tiles can share an aria-label (Oliver's
@@ -394,10 +395,11 @@ class FakeTileLink {
 // IDENTITY (href, falling back to aria-label) so trashing one doesn't also
 // remove the other from this order.
 function fullOrderedTiles(page) {
-  const query = page.activeQuery;
-  const base = page.config.searchResults[query] ?? [];
-  const reveals = (page.config.scrollReveals[query] ?? []).flat();
-  return [...base, ...reveals]
+  const raw =
+    page.config.timelineTiles != null
+      ? page.config.timelineTiles
+      : [...(page.config.searchResults[page.activeQuery] ?? []), ...(page.config.scrollReveals[page.activeQuery] ?? []).flat()];
+  return raw
     .map((t) => (typeof t === 'string' ? { ariaLabel: t, href: undefined } : t))
     .filter((t) => !page.trashedIdentities.has(identityOf(t)));
 }
@@ -498,11 +500,8 @@ function advanceToNextTile(page) {
  *   windowSize?: number,             // only N tiles are "mounted" at once -- models a VIRTUALIZED grid where scrolling swaps the visible window rather than only ever growing it. A positive-dy mouse.wheel (scrollResults) follows the tail forward and loads more; a negative-dy wheel (scrollResultsUp) moves the window back over already-loaded content without loading anything new (see windowedTiles())
  *   unopenableLabels?: string[]|Set<string>, // labels that collectResultTiles() can see (on-screen, real) but the identity-scoped selector openTile() clicks can NEVER resolve -- models a tile the grid refuses to mount, for the "unreachable tile, retried then recorded" behaviour
  *   swallowInfoPressesCount?: number, // first N "i" keypresses across the whole run are silently lost (models the keystroke landing mid-transition, before the photo view existed)
- *   timelineTiles?: Array<{ariaLabel: string, href?: string}|string>, // 2026-09-22: presence alone switches the fake into TIMELINE mode (worker.mjs's walkTimeline) -- a wholly separate, un-queried tile pool from the grid's; the tiles visible before any scroll
- *   timelineReveals?: Array<Array<{ariaLabel: string, href?: string}|string>>, // batches revealed by successive downward scrolls in timeline mode (mirrors scrollReveals for the grid)
- *   timelineWindowSize?: number, // virtualization window for timeline mode (mirrors windowSize for the grid)
+ *   timelineTiles?: Array<{ariaLabel: string, href?: string}|string>, // 2026-09-22 (photo-viewer redesign): presence alone switches the fake into TIMELINE mode (worker.mjs's walkTimeline) -- the FULL flat underlying order (newest first), exactly like fullOrderedTiles' role for the grid's own ArrowRight traversal. No scroll/reveal/window modelling -- the redesigned walk opens only the first (newest) tile and never touches the grid again.
  *   timelinePanelTextByLabel?: Record<string, string>, // ariaLabel -> info-panel text, FLAT (no query nesting -- the timeline has no active query) -- timeline equivalent of panelTextByLabel
- *   resetScrollOnEscape?: boolean, // timeline mode only: closing a photo (Escape) snaps the mounted window back to the top -- models walkTimeline's own stated "unverified live" risk that Escape from a timeline-opened photo might not reliably return to the same scroll position
  * }}
  */
 export function createFakePage(config = {}) {
@@ -525,8 +524,6 @@ export function createFakePage(config = {}) {
     trashedIdentities: new Set(), // keyed by identity (href, falling back to aria-label), not aria-label alone -- see tilesInGrid()'s header
     revealedCount: 0,
     windowStart: 0, // index into tilesInGrid(page) where the mounted window (windowedTiles) currently begins -- see mouse.wheel below
-    timelineRevealedCount: 0, // TIMELINE equivalent of revealedCount -- see tilesInTimeline's header
-    timelineWindowStart: 0, // TIMELINE equivalent of windowStart -- see windowedTimelineTiles' header
     recollectCount: {},
     escapePresses: 0,
     infoPressesSwallowed: 0, // count of "i" presses dropped so far, capped by config.swallowInfoPressesCount
@@ -547,14 +544,6 @@ export function createFakePage(config = {}) {
         page.log.push(`key:${key}`);
         if (key === 'Escape') {
           page.escapePresses += 1;
-          // `resetScrollOnEscape` (2026-09-22, timeline mode only): models
-          // walkTimeline's own UNVERIFIED-LIVE worry -- that closing a
-          // photo opened from the timeline might not reliably return to
-          // the same scroll position. Only fires while a photo is actually
-          // open (an Escape with nothing open is a no-op live too).
-          if (page.openedAriaLabel != null && page.config.timelineTiles != null && page.config.resetScrollOnEscape) {
-            page.timelineWindowStart = 0;
-          }
           page.openedAriaLabel = null;
           page.openedIdentity = null;
         }
@@ -598,13 +587,28 @@ export function createFakePage(config = {}) {
         page.pendingTypedText = text;
       },
     },
+    viewportSize() {
+      return { width: 1280, height: 800 };
+    },
     mouse: {
+      async move(x, y) {
+        page.log.push(`mouse-move ${x},${y}`);
+        page.pointer = { x, y };
+      },
       // worker.mjs's scrollResultsUp() passes a NEGATIVE dy (Google Photos'
       // own "scroll up" gesture) -- everything else in the worker still
       // calls scrollResults() with a positive dy, so a missing/positive dy
       // means "down", matching every pre-existing call site and fixture.
       async wheel(dx, dy) {
         page.guard();
+        // Real Chrome scrolls whatever is under the pointer, and Playwright's
+        // pointer starts at (0,0) over Google Photos' header, where a wheel
+        // does nothing -- the 2026-09-22 live failure where the timeline walk
+        // never moved. Model that: no scroll until the pointer is over the grid.
+        if (!page.pointer || page.pointer.y < 100) {
+          page.log.push('wheel-ignored');
+          return;
+        }
         const scrollingUp = typeof dy === 'number' && dy < 0;
         // Keep the plain 'wheel' entry every pre-existing test asserts on
         // (via page.log.includes('wheel')) AND add a directional one so a
@@ -612,24 +616,13 @@ export function createFakePage(config = {}) {
         // down-scroll.
         page.log.push('wheel');
         page.log.push(scrollingUp ? 'wheel:up' : 'wheel:down');
-        // TIMELINE MODE (2026-09-22, worker.mjs's walkTimeline): a completely
-        // separate reveal/window model from the grid's -- see
-        // tilesInTimeline's header for why a fixture opts in just by setting
-        // `config.timelineTiles`.
-        if (page.config.timelineTiles != null) {
-          if (scrollingUp) {
-            if (page.config.timelineWindowSize) {
-              page.timelineWindowStart = Math.max(0, page.timelineWindowStart - page.config.timelineWindowSize);
-            }
-            return;
-          }
-          const reveals = page.config.timelineReveals ?? [];
-          if (page.timelineRevealedCount < reveals.length) page.timelineRevealedCount += 1;
-          if (page.config.timelineWindowSize) {
-            page.timelineWindowStart = Math.max(0, tilesInTimeline(page).length - page.config.timelineWindowSize);
-          }
-          return;
-        }
+        // NOTE: timeline mode (config.timelineTiles) no longer scrolls the
+        // grid at all (2026-09-22 photo-viewer redesign -- see
+        // tilesInTimeline's header) -- there is deliberately no timeline
+        // branch here any more. A test that calls page.mouse.wheel() while
+        // in timeline mode falls through to the grid logic below, which is
+        // harmless (there's no active query, so it's a no-op against empty
+        // grid state) but almost certainly not what the test intended.
         if (scrollingUp) {
           // Move the mounted window back toward the top of whatever has
           // already loaded. Deliberately does NOT touch revealedCount --
@@ -707,7 +700,7 @@ export function createFakePage(config = {}) {
         // 2026-09-22: route to the TIMELINE pool for a TIMELINE_TILE_SELECTOR
         // -- the grid and timeline are two independent tile pools now (see
         // tilesInTimeline's header), never conflated.
-        const pool = isTimelineSelector(selector) ? windowedTimelineTiles(page) : windowedTiles(page);
+        const pool = isTimelineSelector(selector) ? tilesInTimeline(page) : windowedTiles(page);
         return findTile(page, { ariaLabel: label, href: hrefFromSelector(selector) }, pool) ? 1 : 0;
       }
       if (/aria-label="Open info"/i.test(selector)) {
@@ -733,7 +726,7 @@ export function createFakePage(config = {}) {
       // no fixture needs those for the timeline yet, and adding them unused
       // would just be speculative surface).
       if (isTimelineSelector(selector)) {
-        return windowedTimelineTiles(page).map(
+        return tilesInTimeline(page).map(
           (tile, i) => new FakeTileLink(page, typeof tile === 'string' ? tile : tile.ariaLabel, i, typeof tile === 'string' ? undefined : tile.href)
         );
       }
@@ -785,7 +778,7 @@ export function createFakePage(config = {}) {
         if (photoOpen(page)) return false;
         const label = ariaLabelFromSelector(selector);
         if (isUnopenable(page, label)) return false;
-        const pool = isTimelineSelector(selector) ? windowedTimelineTiles(page) : windowedTiles(page);
+        const pool = isTimelineSelector(selector) ? tilesInTimeline(page) : windowedTiles(page);
         const hit = findTile(page, { ariaLabel: label, href: hrefFromSelector(selector) }, pool);
         return hit ? (typeof hit === 'string' ? true : hit.hidden !== true) : false;
       }
