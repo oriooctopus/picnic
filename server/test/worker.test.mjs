@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { JobQueue } from '../lib/queue.mjs';
-import { groupJobsByDate } from '../lib/matcher.mjs';
+import { groupJobsByDate, parsePanelText } from '../lib/matcher.mjs';
 import { createFakePage } from './helpers/fakePage.mjs';
 
 const WORKER_MJS_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'worker.mjs');
@@ -36,6 +36,8 @@ const {
   MAX_TIMELINE_PHOTOS,
   TIMELINE_STOP_BUFFER_DAYS,
   waitForTimelineAdvanceConfirmed,
+  selectPanelText,
+  focusViewerCenter,
 } = await import('../worker.mjs');
 
 async function withTempQueue(fn) {
@@ -640,9 +642,15 @@ test('moveToTrash: confirm dialog NEVER becomes visible (neither the \'#\' short
       first: () => ({ isVisible: async () => false, click: async () => {} }),
       all: async () => [], // no visible toolbar trash control either
     }),
+    viewportSize: () => ({ width: 1280, height: 800 }), // focusViewerCenter (2026-09-23)
+    mouse: { click: async () => {} },
     evaluate: async () => {
       evaluateCalls += 1;
-      return `panel text that changes every read #${evaluateCalls}`;
+      // readPanelText (2026-09-23) now expects { detailsAndFile, dimsAndFile,
+      // fileOnly } from evaluate() -- wrap the changing text so
+      // selectPanelText still resolves it, matching this test's own intent
+      // (the panel text changes every read, regardless of tier).
+      return { detailsAndFile: [`panel text that changes every read #${evaluateCalls}`], dimsAndFile: [], fileOnly: [] };
     },
   };
 
@@ -679,7 +687,9 @@ test('moveToTrash: confirm dialog shown and clicked, followed by the "moved to t
       }),
       all: async () => [],
     }),
-    evaluate: async () => '', // panel text never changes -- the toast alone must be sufficient
+    viewportSize: () => ({ width: 1280, height: 800 }), // focusViewerCenter (2026-09-23)
+    mouse: { click: async () => {} },
+    evaluate: async () => ({ detailsAndFile: [], dimsAndFile: [], fileOnly: [] }), // panel text never changes -- the toast alone must be sufficient
   };
 
   const confirmed = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
@@ -2017,7 +2027,13 @@ test('waitForTimelineAdvanceConfirmed: page.url() never changing means NOT confi
 test('waitForTimelineAdvanceConfirmed: URL change + a settled, genuinely different filename -> confirmed', async () => {
   const page = {
     url: () => 'https://photos.google.com/photo/NEXT',
-    evaluate: async () => 'Details\nSep 22\nMon, 1:00 PM\nGMT-04:00\nIMG_9700.HEIC\n100 × 100',
+    // readPanelText (2026-09-23) expects { detailsAndFile, dimsAndFile,
+    // fileOnly } from evaluate() now -- see selectPanelText's header.
+    evaluate: async () => ({
+      detailsAndFile: ['Details\nSep 22\nMon, 1:00 PM\nGMT-04:00\nIMG_9700.HEIC\n100 × 100'],
+      dimsAndFile: [],
+      fileOnly: [],
+    }),
   };
   const previousText = 'Details\nSep 21\nMon, 1:00 PM\nGMT-04:00\nIMG_9701.HEIC\n100 × 100';
 
@@ -2026,4 +2042,168 @@ test('waitForTimelineAdvanceConfirmed: URL change + a settled, genuinely differe
   assert.ok(result, 'a real URL change with fresh, differing content must confirm');
   assert.equal(result.url, 'https://photos.google.com/photo/NEXT');
   assert.match(result.text, /IMG_9700\.HEIC/);
+});
+
+// ============================================================================
+// 2026-09-23 live fixes, round 2: a real 449-photo timeline run surfaced
+// three further bugs past the first URL/filename rewrite --
+//   A. captureDateMs was STILL "(unparsed)" on every single photo: the
+//      smallest DIMS+FILE element excludes the date lines, which sit in a
+//      LARGER "Details" container -- selectPanelText's new tiering fix.
+//   B. photo 3 read back photo 2's stale filename even though the URL had
+//      already changed AND the raw panel text had already changed too (some
+//      other field re-rendered first) -- waitForTimelineAdvanceConfirmed
+//      now polls on the PARSED FILENAME specifically, for up to ~8s.
+//   C. the walk wrongly declared "EXHAUSTED: end of library" with 103 jobs
+//      still pending (real photos going back to March) after a trash whose
+//      confirm dialog never showed left keyboard focus on BODY --
+//      focusViewerCenter + a recovery pass in advanceTimelinePhotoView.
+// ============================================================================
+
+test('selectPanelText: prefers the "Details"+filename tier (carries the capture-date lines) over a separate, smaller dims+filename-only element', () => {
+  // Models the EXACT live DOM shape (Oliver's own probe, 2026-09-23): TWO
+  // distinct elements exist for the same photo -- a small one with just
+  // dimensions+filename, and a LARGER, separate one that also contains the
+  // "Details" heading and the date/time/GMT lines. The old (pre-2026-09-23)
+  // selector always took the smallest DIMS+FILE match, which is the SMALL
+  // element here -- structurally incapable of ever containing a capture
+  // date, which is exactly why captureDateMs came back null on all 449
+  // photos of a real run.
+  const smallDimsAndFileElement = 'IMG_2931.HEIC\n12.2MP\n3024 × 4032';
+  const largerDetailsElement =
+    'Details\nSep 22\nYesterday, 6:25 PM\nGMT-04:00\nApple iPhone 13 Pro\nƒ/1.5\n1/60\n5.7mm\nISO125\n' +
+    'IMG_2931.HEIC\n12.2MP\n3024 × 4032\nUploaded from iOS device\nBacked up (6.6 MB)';
+
+  const chosen = selectPanelText({
+    detailsAndFile: [largerDetailsElement],
+    dimsAndFile: [smallDimsAndFileElement],
+    fileOnly: [],
+  });
+
+  assert.equal(chosen, largerDetailsElement, 'must choose the "Details" container, not the smaller dims-only element');
+  const parsed = parsePanelText(chosen, Date.UTC(2026, 8, 23));
+  assert.equal(parsed.filename, 'IMG_2931.HEIC', 'filename parsing must still work from the larger container');
+  assert.equal(parsed.captureDateMs, Date.UTC(2026, 8, 22, 18, 25), 'captureDateMs must now be parseable at all');
+});
+
+test('selectPanelText: falls back to dims+filename when no "Details"-carrying element exists', () => {
+  const only = 'IMG_9800.HEIC\n100 × 100';
+  assert.equal(selectPanelText({ detailsAndFile: [], dimsAndFile: [only], fileOnly: [] }), only);
+});
+
+test('selectPanelText: falls back to filename-only when neither "Details" nor dimensions are present', () => {
+  const only = 'IMG_9801.HEIC';
+  assert.equal(selectPanelText({ detailsAndFile: [], dimsAndFile: [], fileOnly: [only] }), only);
+});
+
+test('selectPanelText: within a tier, picks the SMALLEST matching candidate', () => {
+  const small = 'Details\nIMG_9802.HEIC';
+  const large = 'Details\nIMG_9802.HEICExtra padding text that makes this candidate longer';
+  assert.equal(selectPanelText({ detailsAndFile: [large, small], dimsAndFile: [], fileOnly: [] }), small);
+});
+
+test('selectPanelText: no candidates at all -> empty string, never guesses', () => {
+  assert.equal(selectPanelText({ detailsAndFile: [], dimsAndFile: [], fileOnly: [] }), '');
+  assert.equal(selectPanelText(), '');
+});
+
+test('walkTimeline: DOM shape where the date lines are OUTSIDE the smallest filename element -- captureDateMs still parses via the "Details" tier, and the photo still matches by filename', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue({ filename: 'IMG_9803.HEIC', creationDate: '2026-09-22T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile = timelineTile('detailsshape');
+    // Explicit candidate-set object (see fakePage.mjs's panelTextCandidateSets)
+    // -- models the live DOM having TWO separate elements for this one photo.
+    const page = createFakePage({
+      timelineTiles: [tile],
+      timelinePanelTextByLabel: {
+        [tile.ariaLabel]: {
+          detailsAndFile: ['Details\nSep 22\nMon, 6:00 PM\nGMT-04:00\nIMG_9803.HEIC\n100 × 100'],
+          dimsAndFile: ['IMG_9803.HEIC\n100 × 100'], // smaller, no date lines -- must NOT be chosen
+        },
+      },
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0);
+    assert.equal(queue.getById(job.id).status, 'trashed');
+  });
+});
+
+test('waitForTimelineAdvanceConfirmed: filename stays stale for SEVERAL reads (raw text differs each time) -- still resolves correctly within the extended (~8s live) window', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_2932.JPG', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const { job: job2 } = queue.enqueue({ filename: 'IMG_2931.HEIC', creationDate: '2026-08-19T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = timelineTile('long1');
+    const tile2 = timelineTile('long2');
+    const panelText = {
+      [tile1.ariaLabel]: timelinePanelText('IMG_2932.JPG', 'Aug', 20),
+      [tile2.ariaLabel]: timelinePanelText('IMG_2931.HEIC', 'Aug', 19),
+    };
+    // 3 stale reads (each with DIFFERENT raw text via the trailing-space
+    // marker, but the SAME stale filename) before the real IMG_2931.HEIC
+    // content takes over -- exactly the live shape (photo 3 of a real run
+    // read photo 2's filename on already-changed raw text), but longer than
+    // the single extra read an earlier version of this function tolerated.
+    const page = createFakePage({
+      timelineTiles: [tile1, tile2],
+      timelinePanelTextByLabel: panelText,
+      timelineStaleReadsAfterAdvance: 3,
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, [job1, job2], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'both jobs must be found despite 3 consecutive stale-filename reads');
+    assert.equal(queue.getById(job1.id).copiesTrashed, 1, 'job1 must never be double-counted off the stale reads');
+    assert.equal(queue.getById(job2.id).status, 'trashed');
+  });
+});
+
+test('focusViewerCenter: clicks the viewport centre', async () => {
+  const clicks = [];
+  const page = {
+    viewportSize: () => ({ width: 1000, height: 600 }),
+    mouse: { click: async (x, y) => clicks.push([x, y]) },
+  };
+  await focusViewerCenter(page);
+  assert.deepEqual(clicks, [[500, 300]]);
+});
+
+test('walkTimeline: recovers from lost keyboard focus after a failed trash-dialog fallback, rather than wrongly declaring end-of-library', async () => {
+  await withTempQueue(async (queue) => {
+    // job1's tile trashes via the toolbar fallback ('#' shows no dialog at
+    // all -- models "confirmation dialog: not shown"), which -- per the
+    // live bug -- leaves keyboard focus lost. The trash auto-advances to
+    // FILLER (a non-matching photo) by itself (unaffected by lost focus --
+    // that auto-advance updates state directly, not via a keypress), but
+    // reaching job2's tile AFTER filler requires a genuine ArrowRight
+    // advance -- which is exactly what lost focus breaks, and exactly what
+    // advanceTimelinePhotoView's recovery pass must fix.
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_9900.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const { job: job2 } = queue.enqueue({ filename: 'IMG_9901.HEIC', creationDate: '2026-08-18T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = timelineTile('focus1');
+    const filler = timelineTile('focusfiller');
+    const tile2 = timelineTile('focus2');
+    const panelText = {
+      [tile1.ariaLabel]: timelinePanelText('IMG_9900.HEIC', 'Aug', 20),
+      [filler.ariaLabel]: timelinePanelText('IMG_9950.HEIC', 'Aug', 19),
+      [tile2.ariaLabel]: timelinePanelText('IMG_9901.HEIC', 'Aug', 18),
+    };
+    const page = createFakePage({
+      timelineTiles: [tile1, filler, tile2],
+      timelinePanelTextByLabel: panelText,
+      // Models the live bug: '#' shows no dialog at all (so moveToTrash
+      // falls to the toolbar click fallback), and that fallback click (like
+      // the "View next photo" fallback click) leaves focus lost -- ArrowRight
+      // becomes a no-op until a real click (focusViewerCenter) restores it.
+      swallowTrashShortcut: true,
+      timelineFocusLostAfterFallbackClick: true,
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, [job1, job2], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'job2 must still be found after recovering from the lost-focus state');
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.equal(queue.getById(job2.id).status, 'trashed');
+  });
 });

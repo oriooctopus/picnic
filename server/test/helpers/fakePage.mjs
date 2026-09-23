@@ -203,6 +203,64 @@ function tilesInTimeline(page) {
 }
 
 /**
+ * worker.mjs's readPanelText() (2026-09-23 rewrite, see selectPanelText's
+ * own header in worker.mjs) now expects page.evaluate() to return
+ * `{ detailsAndFile, dimsAndFile, fileOnly }` -- three tiers of raw
+ * innerText strings -- rather than one already-chosen string. This fake
+ * still models everything as ONE opaque string per photo (there is no real
+ * DOM here to tier), so this classifies that single string into whichever
+ * ONE tier it would have landed in for a real page: containing "Details" +
+ * a filename (the tier that also carries the capture-date lines), just
+ * dimensions + filename, or filename alone.
+ *
+ * The FILE check here is DELIBERATELY LOOSER than worker.mjs's own
+ * `\b`-suffixed version: production's `\b` only matches on real live text
+ * because the info panel's innerText genuinely has a NEWLINE between the
+ * filename and whatever follows it (Oliver's live probe, 2026-09-23 --
+ * "IMG_2931.HEIC\n12.2MP\n..."), which is a word/non-word transition. This
+ * fake's long-established `panelBlock` fixtures predate that finding and
+ * are deliberately RUN TOGETHER with no separator at all
+ * ("IMG_1433.HEIC7.2MP...", a digit immediately after the extension) --
+ * `\b` never matches between two word characters, so production's exact
+ * regex would silently classify every one of those existing fixtures as
+ * "no filename here" and break ~40 pre-existing tests that have nothing to
+ * do with this change (caught by running the suite, not by inspection).
+ * Dropping the trailing `\b` keeps this fake's classification step
+ * tolerant of both text shapes without touching those fixtures.
+ */
+function classifyPanelText(text) {
+  if (!text) return { detailsAndFile: [], dimsAndFile: [], fileOnly: [] };
+  const DIMS = /\d{3,5}\s*[×x]\s*\d{3,5}/;
+  const FILE = /[A-Za-z0-9._-]+\.(HEIC|JPG|JPEG|PNG|MOV|MP4)/i; // no trailing \b -- see header above
+  const DETAILS = /Details/;
+  if (!FILE.test(text)) return { detailsAndFile: [], dimsAndFile: [], fileOnly: [] };
+  if (DETAILS.test(text)) return { detailsAndFile: [text], dimsAndFile: [], fileOnly: [] };
+  if (DIMS.test(text)) return { detailsAndFile: [], dimsAndFile: [text], fileOnly: [] };
+  return { detailsAndFile: [], dimsAndFile: [], fileOnly: [text] };
+}
+
+/**
+ * Accepts either a plain string (auto-classified via classifyPanelText, the
+ * common case -- every pre-existing fixture) OR an explicit candidate-set
+ * object (`{ detailsAndFile?, dimsAndFile?, fileOnly? }`, each an array of
+ * raw strings) for a fixture that needs to model MULTIPLE distinct DOM
+ * elements existing at once for the SAME photo -- e.g. a small
+ * filename-only element sitting alongside a separate, larger "Details"
+ * container that also carries the capture-date lines (the exact live shape
+ * selectPanelText's tiering exists to prefer correctly; see the
+ * "date lines outside the filename element" test in worker.test.mjs).
+ */
+function panelTextCandidateSets(value) {
+  if (value == null) return { detailsAndFile: [], dimsAndFile: [], fileOnly: [] };
+  if (typeof value === 'string') return classifyPanelText(value);
+  return {
+    detailsAndFile: value.detailsAndFile ?? [],
+    dimsAndFile: value.dimsAndFile ?? [],
+    fileOnly: value.fileOnly ?? [],
+  };
+}
+
+/**
  * Timeline panel text, with two LIVE-CONFIRMED lag effects modelled
  * (2026-09-23, from a real run of worker.mjs 7565a5d): opening/advancing to
  * a photo can read back EMPTY for the first few polls before the panel
@@ -230,6 +288,17 @@ function timelinePanelTextFor(page) {
     page._timelinePendingRenderDelay = page.config.timelinePanelRenderDelayReads ?? 0;
     page._timelinePendingStaleReads = page._timelinePanelPrevText ? page.config.timelineStaleReadsAfterAdvance ?? 0 : 0;
     page._timelinePanelRealText = page.config.timelinePanelTextByLabel?.[page.openedAriaLabel] ?? '';
+  }
+  // A fixture can configure an OBJECT (explicit candidate-set shape, see
+  // panelTextCandidateSets' header) instead of a plain string, to model
+  // MULTIPLE distinct DOM elements existing at once for this one photo
+  // (e.g. a small filename-only element plus a separate "Details"
+  // container). That's a fundamentally different kind of fixture than the
+  // render-delay/staleness simulation below, which only makes sense for a
+  // single opaque string -- bypass both entirely and hand it straight
+  // through.
+  if (page._timelinePanelRealText && typeof page._timelinePanelRealText === 'object') {
+    return page._timelinePanelRealText;
   }
   if (page._timelinePendingRenderDelay > 0) {
     page._timelinePendingRenderDelay -= 1;
@@ -582,6 +651,7 @@ export function createFakePage(config = {}) {
     infoPressesSwallowed: 0, // count of "i" presses dropped so far, capped by config.swallowInfoPressesCount
     justTrashedToastVisible: false, // see performTrash() -- flashes true for exactly one isVisible() read after a trash
     dialogOpen: false, // the "Move to trash"/"Delete"/"Move to bin" confirm dialog -- see the '#' key handler's 2026-09-22 header
+    focusLost: false, // 2026-09-23: keyboard focus off the viewer -- see config.timelineFocusLostAfterFallbackClick
     _closed: false,
     isClosed() {
       return page._closed === true;
@@ -623,8 +693,15 @@ export function createFakePage(config = {}) {
         // `swallowTrashShortcut` keeps its existing meaning (the shortcut
         // does nothing at all -- worker.mjs falls through to the toolbar
         // click fallback, whose own dialog is modelled separately below).
-        if (key === '#' && !page.config.swallowTrashShortcut) page.dialogOpen = true;
-        if (key === 'ArrowRight') advanceToNextTile(page);
+        // `page.focusLost` (2026-09-23, `config.timelineFocusLostAfterFallbackClick`)
+        // -- models the live bug where keyboard focus drifted off the
+        // viewer after a toolbar fallback click, so NEITHER of these
+        // shortcuts reached Google's own handler until a real click
+        // (focusViewerCenter -> mouse.click(), which clears this) restored
+        // it. See that config flag's own comment on the fallback-click
+        // handler below for where it gets set.
+        if (key === '#' && !page.config.swallowTrashShortcut && !page.focusLost) page.dialogOpen = true;
+        if (key === 'ArrowRight' && !page.focusLost) advanceToNextTile(page);
         if (key === 'Enter') {
           page.activeQuery = page.pendingTypedText ?? null;
           page.openedAriaLabel = null;
@@ -647,6 +724,17 @@ export function createFakePage(config = {}) {
       async move(x, y) {
         page.log.push(`mouse-move ${x},${y}`);
         page.pointer = { x, y };
+      },
+      // worker.mjs's focusViewerCenter() (2026-09-23) -- a real click, not
+      // just a pointer move, since its whole point is to re-establish
+      // KEYBOARD focus on the viewer after it's been lost (see that
+      // function's own header). `config.timelineFocusLostAfterFallbackClick`
+      // models the live bug it fixes: clears `page.focusLost` the same way
+      // a real click restoring focus would.
+      async click(x, y) {
+        page.log.push(`mouse-click ${x},${y}`);
+        page.pointer = { x, y };
+        page.focusLost = false;
       },
       // worker.mjs's scrollResultsUp() passes a NEGATIVE dy (Google Photos'
       // own "scroll up" gesture) -- everything else in the worker still
@@ -713,18 +801,27 @@ export function createFakePage(config = {}) {
       page.log.push('bringToFront');
     },
     async evaluate() {
-      // Mirrors readPanelText(): returns the current tile's info-panel text,
-      // but only once the (sticky) info panel is actually open.
+      // Mirrors readPanelText(): returns the current tile's info-panel
+      // CANDIDATE SETS (see panelTextCandidateSets' header), but only once
+      // the (sticky) info panel is actually open. NOTE: worker.mjs also
+      // calls page.evaluate() for a couple of purely diagnostic callbacks
+      // (releaseFocus's blur, advanceTimelinePhotoView's VERBOSE-only
+      // activeElement check) -- this fake can't tell those apart from the
+      // panel-text one (a real Playwright evaluate() serializes and runs
+      // whatever callback it's given; this fake ignores it and always
+      // answers as if it were the panel-text call), which is harmless
+      // since neither of those callers does anything with an unexpected
+      // shape beyond an occasional VERBOSE-only log line.
       page.log.push('evaluate:panelText');
-      if (!page.infoPanelOpen || page.openedAriaLabel == null) return '';
+      if (!page.infoPanelOpen || page.openedAriaLabel == null) return { detailsAndFile: [], dimsAndFile: [], fileOnly: [] };
       // 2026-09-22: the timeline has no `activeQuery` to key panel text off
       // (it's never reached via search) -- `timelinePanelTextByLabel` is a
       // flat ariaLabel->text map instead of the grid's query-nested shape.
       if (page.config.timelineTiles != null) {
-        return timelinePanelTextFor(page);
+        return panelTextCandidateSets(timelinePanelTextFor(page));
       }
       const byLabel = page.config.panelTextByLabel[page.activeQuery] ?? {};
-      return byLabel[page.openedAriaLabel] ?? '';
+      return panelTextCandidateSets(byLabel[page.openedAriaLabel] ?? '');
     },
     url() {
       // 2026-09-22: LIVE-VERIFIED (Oliver's own probe) -- the main timeline
@@ -794,6 +891,29 @@ export function createFakePage(config = {}) {
         return tilesInTimeline(page).map(
           (tile, i) => new FakeTileLink(page, typeof tile === 'string' ? tile : tile.ariaLabel, i, typeof tile === 'string' ? undefined : tile.href)
         );
+      }
+      // moveToTrash's fallback loop (`page.locator(TRASH_SELECTOR).all()`,
+      // clicking whichever candidate isVisible()) was previously unmodelled
+      // here -- every pre-existing full-harness test's '#' shortcut always
+      // succeeded, so the click fallback was only ever exercised via a
+      // hand-built page mock (moveToTrash's own direct seam tests), never
+      // through createFakePage. A single FakeLocator is enough: its
+      // isVisible()/click() already route through the SAME visibleFor/
+      // onClick handlers the rest of the trash flow uses.
+      if (/aria-label="Move to trash"/i.test(selector)) {
+        return photoOpen(page) && page.config.trashButtonVisible !== false ? [new FakeLocator(page, selector)] : [];
+      }
+      // advancePhotoView's/advanceTimelinePhotoView's own click fallback
+      // (and their "no control at all = authoritative end of sequence"
+      // check) needs the SAME treatment as TRASH_SELECTOR above -- an
+      // empty `.all()` here was previously indistinguishable from
+      // "genuinely no more photos", which silently defeated the
+      // 2026-09-23 focus-loss recovery pass (it never got a chance to run
+      // its own ArrowRight retry because the FIRST attempt's `candidates
+      // .length === 0` check fired first, on a day that still had more
+      // photos).
+      if (/aria-label="View next photo"/i.test(selector)) {
+        return hasNextPhoto(page) ? [new FakeLocator(page, selector)] : [];
       }
       if (!selector.includes('./search/')) return [];
       const query = page.activeQuery;
@@ -888,10 +1008,28 @@ export function createFakePage(config = {}) {
       // (so moveToTrash's fallback loop doesn't error) but Google genuinely
       // never renders a confirm dialog, so nothing should ever count as
       // trashed via this path either.
-      if (/aria-label="Move to trash"/i.test(selector) && !page.config.trashDialogNeverAppears) page.dialogOpen = true;
+      if (/aria-label="Move to trash"/i.test(selector) && !page.config.trashDialogNeverAppears) {
+        page.dialogOpen = true;
+        // `config.timelineFocusLostAfterFallbackClick` (2026-09-23) -- see
+        // the '#'/ArrowRight keyboard handler's comment for the live bug
+        // this models: a toolbar CLICK (as opposed to the '#' shortcut)
+        // leaves keyboard focus off the viewer, so subsequent shortcuts do
+        // nothing until a real click (focusViewerCenter) restores it.
+        if (page.config.timelineFocusLostAfterFallbackClick) page.focusLost = true;
+      }
       if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector) && page.dialogOpen) {
         page.dialogOpen = false;
         performTrash(page);
+      }
+      // "View next photo" toolbar click fallback (advanceTimelinePhotoView's
+      // /advancePhotoView's last resort) -- was previously unmodelled since
+      // every pre-existing test's ArrowRight always succeeded and the fake
+      // never needed this path exercised; the SAME focus-loss flag applies
+      // here as the trash control, since it is the identical kind of
+      // toolbar click live evidence showed loses focus.
+      if (/aria-label="View next photo"/i.test(selector)) {
+        advanceToNextTile(page);
+        if (page.config.timelineFocusLostAfterFallbackClick) page.focusLost = true;
       }
     },
   };

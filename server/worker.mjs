@@ -662,35 +662,90 @@ async function openInfoPanelOnce(page) {
   throw new Error('info panel never produced filename text after 15s — selector/UI drift, stopping rather than guessing');
 }
 
+/**
+ * Pure decision logic for readPanelText below, extracted so it is directly
+ * unit-testable: page.evaluate(callback) serializes `callback` and runs it
+ * inside an isolated BROWSER realm with no access to anything else in this
+ * file, so a selection algorithm that lived entirely inside that callback
+ * could never be exercised by a Node-side test -- only whatever canned
+ * string a test fixture stood in for its final output, never the tiering
+ * logic itself. This is why the 2026-09-23 DOM-shape bug (see below)
+ * shipped untested at the level that actually mattered.
+ *
+ * `candidateSets` is `{ detailsAndFile, dimsAndFile, fileOnly }`, each an
+ * array of raw innerText strings -- readPanelText's evaluate() callback does
+ * the (cheap, DOM-side) FILTERING into these three tiers, and this function
+ * does the (Node-side, testable) "which tier, and which smallest element
+ * within it" DECISION. Tier priority, smallest-first within each:
+ *
+ *   1. detailsAndFile -- an element containing BOTH the panel's own
+ *      "Details" heading AND the filename. VERIFIED LIVE 2026-09-23
+ *      (Oliver's own probe): the capture-date lines ("Sep 22" /
+ *      "Yesterday, 6:25 PM" / "GMT-04:00") sit ABOVE the filename in the
+ *      DOM, inside the SAME "Details" container but OUTSIDE the smaller
+ *      dimensions+filename element the old (DIMS+FILE-only) selector
+ *      picked -- which is why captureDateMs (matcher.mjs) came back null
+ *      on every single photo of a live 449-photo run: the text it was
+ *      ever given structurally could not contain the date lines.
+ *      Preferring this tier first fixes that without touching
+ *      filename/dimensions parsing at all (parsePanelText still finds
+ *      them fine in the larger text).
+ *   2. dimsAndFile -- the OLD (2026-09-01) selector's behaviour, kept as a
+ *      fallback for whatever DOM shape doesn't carry a "Details" heading
+ *      at all (still fine for filename+dims parsing, just never yields a
+ *      capture date).
+ *   3. fileOnly -- dimensions can legitimately never render (2026-09-22:
+ *      job IMG_6636 failed live with "info panel never produced dimensions
+ *      text after 15s" even though its filename was on screen the whole
+ *      time) -- matching is filename-only (matcher.mjs's findMatchingJob),
+ *      so this must never block a photo from being read at all.
+ */
+export function selectPanelText({ detailsAndFile = [], dimsAndFile = [], fileOnly = [] } = {}) {
+  const bySize = (a, b) => a.length - b.length;
+  if (detailsAndFile.length) return [...detailsAndFile].sort(bySize)[0];
+  if (dimsAndFile.length) return [...dimsAndFile].sort(bySize)[0];
+  if (fileOnly.length) return [...fileOnly].sort(bySize)[0];
+  return '';
+}
+
 async function readPanelText(page) {
-  // Verified live: the details block is an unlabelled div. Find it by content
-  // (it is the smallest element containing a "W x H" dimensions string) rather
-  // than by a selector, which Google does not give us a stable one for.
-  return await page.evaluate(() => {
-    const DIMS = /\d{3,5}\s*[\u00d7x]\s*\d{3,5}/;
-    const FILE = /[A-Za-z0-9._-]+\.(HEIC|JPG|JPEG|PNG|MOV|MP4)\b/i;
-    const bySize = (a, b) => (a.innerText || '').length - (b.innerText || '').length;
-    const all = Array.from(document.querySelectorAll('div,c-wiz,aside'));
-    // Prefer the smallest element containing BOTH dimensions AND a filename
-    // when one exists (dimensions still get parsed/recorded when present --
-    // see confirmAndTrash's `comparison` -- even though matching itself is
-    // filename-only now, see matcher.mjs's findMatchingJob). Taking the
-    // smallest element with dimensions alone (the earlier version) returned
-    // just "7.2MP2316 x 3088" — no filename — so every photo parsed as a
-    // non-match. Verified live 2026-09-01.
-    const both = all.filter((el) => {
-      const t = el.innerText || '';
-      return DIMS.test(t) && FILE.test(t);
-    });
-    if (both.length) return both.sort(bySize)[0].innerText;
-    // FALLBACK (2026-09-22): dimensions can legitimately never render at all
-    // -- job IMG_6636 failed live with "info panel never produced dimensions
-    // text after 15s" even though its filename was on screen the whole time.
-    // Matching no longer needs dimensions (matcher.mjs's findMatchingJob), so
-    // don't block a filename-only panel from ever being read.
-    const filenameOnly = all.filter((el) => FILE.test(el.innerText || ''));
-    return filenameOnly.length ? filenameOnly.sort(bySize)[0].innerText : '';
-  }).catch(() => '');
+  // Verified live: the details block is an unlabelled div, found by content
+  // rather than a selector, which Google does not give us a stable one for.
+  // The FILTERING happens here, DOM-side inside evaluate() (cheap: a real
+  // Google Photos page carries hundreds of div/c-wiz/aside elements, and
+  // only the handful that actually match ever cross back over the bridge)
+  // -- the actual TIERED DECISION is selectPanelText() above, kept OUTSIDE
+  // evaluate() specifically so it's unit-testable.
+  //
+  // VISIBLE-ONLY (2026-09-23 live finding): a 449-photo run showed the
+  // SAME stale filename ("IMG_2201.PNG") read back on ~10 different
+  // photos scattered across that run -- some element holding an EARLIER
+  // photo's text was still present in the DOM (a prior viewer instance,
+  // or a panel Google keeps around hidden) and occasionally won the
+  // smallest-element tiebreak over the CURRENT, genuinely visible panel.
+  // offsetWidth/offsetHeight > 0 excludes a hidden/collapsed element the
+  // same way jQuery's :visible does, without needing a stable selector for
+  // "the current viewer" that Google doesn't expose. This can't fully
+  // replace the filename-must-change poll (waitForTimelineAdvanceConfirmed)
+  // -- a stale-but-currently-visible element is still possible -- so both
+  // defenses stay in place together.
+  const candidateSets = await page
+    .evaluate(() => {
+      const DIMS = /\d{3,5}\s*[\u00d7x]\s*\d{3,5}/;
+      const FILE = /[A-Za-z0-9._-]+\.(HEIC|JPG|JPEG|PNG|MOV|MP4)\b/i;
+      const DETAILS = /Details/;
+      const isVisible = (el) => el.offsetWidth > 0 && el.offsetHeight > 0;
+      const all = Array.from(document.querySelectorAll('div,c-wiz,aside'))
+        .filter(isVisible)
+        .map((el) => el.innerText || '');
+      return {
+        detailsAndFile: all.filter((t) => DETAILS.test(t) && FILE.test(t)),
+        dimsAndFile: all.filter((t) => DIMS.test(t) && FILE.test(t)),
+        fileOnly: all.filter((t) => FILE.test(t)),
+      };
+    })
+    .catch(() => ({ detailsAndFile: [], dimsAndFile: [], fileOnly: [] }));
+  return selectPanelText(candidateSets);
 }
 
 /**
@@ -703,6 +758,28 @@ async function readPanelText(page) {
 export async function pointAtGrid(page) {
   const { width, height } = page.viewportSize() ?? { width: 1280, height: 800 };
   await page.mouse.move(width / 2, height / 2);
+}
+
+/**
+ * Click the centre of the photo viewer to re-establish KEYBOARD focus on
+ * it. Live finding 2026-09-23 (a 449-photo timeline run): after moveToTrash
+ * fell back to clicking the toolbar trash control (its '#' shortcut path
+ * having failed to even show the confirm dialog), keyboard focus ended up
+ * on BODY in a way that did NOT relay ArrowRight to Google's own handler --
+ * three straight ArrowRight attempts, then the "View next photo" click
+ * fallback, ALL failed to advance, and the walk wrongly concluded
+ * end-of-library with 103 jobs still pending (real photos going back to
+ * March). releaseFocus()'s plain blur-to-document is not the same as this:
+ * blurring only removes focus from whatever CONTROL last had it (a button),
+ * it does not re-establish focus ON THE VIEWER when the viewer itself has
+ * lost it entirely -- only a genuine click inside the viewer area does
+ * that. Used both before pressing '#' (moveToTrash -- the suspected cause
+ * of its own "confirmation dialog not shown" failures) and before/between
+ * ArrowRight retries in advanceTimelinePhotoView.
+ */
+export async function focusViewerCenter(page) {
+  const { width, height } = page.viewportSize() ?? { width: 1280, height: 800 };
+  await page.mouse.click(width / 2, height / 2).catch(() => {});
 }
 
 /**
@@ -836,6 +913,13 @@ export async function moveToTrash(page, panelTextBefore) {
   };
 
   await stealthDelay(500, 2000); // pure mimicry, off unless --slow
+  // Live finding 2026-09-23: a run's '#' presses sometimes never showed the
+  // confirm dialog at all ("confirmation dialog: not shown"), immediately
+  // preceding the SAME run's viewer losing keyboard focus entirely
+  // (ArrowRight producing no advance, activeElement=BODY) -- both point at
+  // the SAME root cause, focus having drifted off the viewer by the time
+  // this runs. See focusViewerCenter's own header for the full story.
+  await focusViewerCenter(page);
   if (VERBOSE) console.log("    trash: pressing '#'");
   await page.keyboard.press('#');
   // Sticky across both attempts below: once EITHER path (the '#' shortcut or
@@ -1693,28 +1777,30 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = '
  *   1. Poll page.url() until it differs from `beforeUrl` (real-correctness
  *      wait, bounded) -- no URL change at all means the advance genuinely
  *      did not register; nothing else here matters.
- *   2. Once the URL has moved, poll readPanelText() until it differs from
- *      `previousText` (the photo just left) or a bounded settle window
- *      elapses -- catching the exact live lag where the panel still shows
- *      the OLD photo's content for a poll or two after the URL already
- *      changed.
- *   3. Record the FILENAME (not the raw text) per photo. If, once step 2
- *      settles, the parsed filename equals the PREVIOUS photo's filename --
- *      even though the raw text and the URL have both already changed --
- *      that's ambiguous: a genuine same-filename duplicate sitting right
- *      next to its twin (Oliver's real re-uploaded copies), vs. a filename
- *      substring that's still stale even though something else on the
- *      panel (camera info, a transitional re-render) happened to differ
- *      first. Comparing FILENAMES rather than raw text catches this: the
- *      exact live bug (photo 1 and 2 of a real run both reading
- *      "IMG_2932.JPG") is exactly a same-filename case, and a raw-text
- *      diff alone cannot distinguish "genuinely the same photo's filename
- *      again" from "the surrounding text moved on but the filename field
- *      specifically didn't". Never guess: take ONE more read, and only
- *      accept it if its filename DISAGREES with the first (meaning the
- *      first was stale, and this later one is authoritative). Two reads
- *      agreeing on the filename is trusted as a genuine duplicate rather
- *      than polled indefinitely.
+ *   2. Once the URL has moved, poll readPanelText() until the PARSED
+ *      FILENAME (not the raw text) differs from the PREVIOUS photo's
+ *      filename, or a bounded (~8s) settle window elapses. LIVE FINDING
+ *      2026-09-23 (a 449-photo run): a bare raw-text diff is NOT enough --
+ *      photo 3 of that run read back photo 2's filename verbatim while the
+ *      URL had already changed, because SOME OTHER part of the panel (the
+ *      map/"Backed up" lines, which re-render on their own schedule) had
+ *      already changed even though the filename field specifically had
+ *      not caught up yet. An earlier version of this function polled on
+ *      raw-text-differs and only allowed ONE extra read to resolve a
+ *      same-filename result, which was not long enough -- the real lag
+ *      can span several polls, so this now polls on the FILENAME itself
+ *      for up to ~8s (longer than the 3s an earlier version used) before
+ *      ever accepting a same-filename read as final. A photo whose panel
+ *      never renders ANY filename within the window (`!text`/no filename
+ *      at all) returns null -- not yet confirmed, never guessed.
+ *   3. If the filename is STILL equal to the previous photo's after that
+ *      full window (not just one extra read), that's the genuinely
+ *      ambiguous case -- a real same-filename duplicate sitting right next
+ *      to its twin (Oliver's real re-uploaded copies) vs. a read that
+ *      simply never caught up in time. Accepted as a genuine duplicate
+ *      rather than polled forever; findMatchingJob's own "never guess"
+ *      rule is unaffected either way -- this only ever decides what text
+ *      to parse, never whether a job matches it.
  */
 export async function waitForTimelineAdvanceConfirmed(page, beforeUrl, previousText) {
   const urlDeadline = Date.now() + (FAST_DELAYS ? 20 : 5000);
@@ -1726,28 +1812,22 @@ export async function waitForTimelineAdvanceConfirmed(page, beforeUrl, previousT
   if (url === beforeUrl) return null; // advance never took at all
 
   const previousFilename = parsePanelText(previousText).filename;
-  const textDeadline = Date.now() + (FAST_DELAYS ? 20 : 3000);
+  // Longer than the URL wait above and the old (3s) raw-text version --
+  // see this function's header, point 2, for why the filename specifically
+  // can lag well behind both the URL and the rest of the panel's content.
+  const filenameDeadline = Date.now() + (FAST_DELAYS ? 30 : 8000);
   let text = await readPanelText(page);
-  while ((!text || text === previousText) && Date.now() < textDeadline) {
+  let filename = parsePanelText(text).filename;
+  while ((!filename || (previousFilename && filename === previousFilename)) && Date.now() < filenameDeadline) {
     await pollDelay();
     text = await readPanelText(page);
+    filename = parsePanelText(text).filename;
   }
   if (!text) return null; // URL moved but the panel never rendered anything at all -- not yet confirmed
-
-  const filename = parsePanelText(text).filename;
-  if (filename && previousFilename && filename === previousFilename) {
-    // Settle window elapsed with the SAME filename as before, on a
-    // DIFFERENT URL -- confirm with one more read rather than guessing
-    // either way (see this function's header, point 3).
-    await pollDelay();
-    const secondText = await readPanelText(page);
-    const secondFilename = parsePanelText(secondText).filename;
-    if (secondFilename && secondFilename !== filename) {
-      text = secondText; // disagreed -- the first read was stale, trust the later one
-    }
-    // else: both reads agree (or the second also came back empty) -- trust
-    // the original read as a genuine duplicate rather than looping forever.
-  }
+  // Falls through here either because `filename` genuinely differs now, or
+  // because the whole window elapsed with it still matching `previousFilename`
+  // -- see this function's header, point 3, for why the latter is accepted
+  // (a genuine duplicate) rather than treated as a failure to confirm.
 
   return { text, url };
 }
@@ -1771,15 +1851,34 @@ async function advanceTimelinePhotoView(page, currentText, logPrefix = '') {
     if (result) return result;
     // No next-photo control at all is the authoritative end-of-library
     // signal (same convention as advancePhotoView) -- no point burning the
-    // rest of the retries or falling through to the click fallback below.
+    // rest of the retries or falling through to the recovery pass below.
     const candidates = await page.locator(NEXT_PHOTO_SELECTOR).all();
     if (candidates.length === 0) return null;
     if (VERBOSE) {
       console.log(`  ${logPrefix} advance did not register via ArrowRight, retrying (${attempt + 1}/${ARROW_RETRIES})`);
     }
   }
+  // RECOVERY PASS (2026-09-23 live finding): every ArrowRight retry above
+  // can fail for a reason none of them can fix by themselves -- keyboard
+  // focus drifting off the viewer entirely (activeElement=BODY on a real
+  // run, immediately after moveToTrash's own fallback-click path). Before
+  // ever concluding "end of library", explicitly re-focus the viewer
+  // (focusViewerCenter) and give BOTH the key and the click control one
+  // more real try -- a live run wrongly declared EXHAUSTED after 449 of
+  // what should have been ~1500+ photos, with 103 jobs still pending
+  // (their real photos going back to March), precisely because this
+  // recovery did not exist yet.
+  await focusViewerCenter(page);
+  await releaseFocus(page);
+  await page.keyboard.press('ArrowRight');
+  const recovered = await waitForTimelineAdvanceConfirmed(page, beforeUrl, currentText);
+  if (recovered) return recovered;
+
   // Last-resort click fallback -- see this function's header for why it's
-  // no longer tried first.
+  // no longer tried first. Refocuses again immediately before clicking:
+  // the SAME lost-focus state that defeats ArrowRight can make a stale
+  // click land on nothing too.
+  await focusViewerCenter(page);
   const candidates = await page.locator(NEXT_PHOTO_SELECTOR).all();
   for (const candidate of candidates) {
     if (await candidate.isVisible().catch(() => false)) {
@@ -1789,6 +1888,9 @@ async function advanceTimelinePhotoView(page, currentText, logPrefix = '') {
       break;
     }
   }
+  // Only NOW -- URL still unchanged despite the recovery pass AND the click
+  // fallback -- is this treated as genuinely the end of the library (or an
+  // advance that was truly swallowed, indistinguishable from here).
   if (VERBOSE) {
     const focus = await page
       .evaluate(() => {
