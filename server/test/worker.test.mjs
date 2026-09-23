@@ -40,6 +40,7 @@ const {
   focusViewerCenter,
   advanceTimelinePhotoView,
   resumeTimelineAt,
+  resumeTimelineAtTime,
 } = await import('../worker.mjs');
 
 async function withTempQueue(fn) {
@@ -2683,5 +2684,63 @@ test('walkTimeline: an unexpected exception on ONE photo does not kill the whole
       logs.some((l) => l.includes('needs_review') && l.includes('IMG_9700')),
       `expected a needs_review log naming the failed job, got: ${JSON.stringify(logs)}`
     );
+  });
+});
+
+// ============================================================================
+// ROUND 6 (2026-09-25 live finding): 164 photos walked, 45 matched, then
+// trashing the last LOADED photo closed the viewer -- a SINGLE post-trash
+// "viewer looks closed" read (TRASH_SELECTOR-visibility) was wrongly trusted
+// as the true end, with 57 real jobs still pending back to 2026-03-11.
+// resumeTimelineAt can't help here (the trashed tile's own id is GONE) --
+// resumeTimelineAtTime falls back to resuming by CAPTURE TIME instead.
+// ============================================================================
+
+test('resumeTimelineAtTime: opens the first tile strictly older than the given time, skipping anything newer', async () => {
+  const tileNew = dateTimelineTile('rtt-new', 'Sep', 20);
+  const tileOlder = dateTimelineTile('rtt-older', 'Sep', 10);
+  const page = createFakePage({
+    timelineTiles: [tileNew, tileOlder],
+    timelinePanelTextByLabel: {
+      [tileNew.ariaLabel]: timelinePanelText('IMG_9901.HEIC', 'Sep', 20),
+      [tileOlder.ariaLabel]: timelinePanelText('IMG_9902.HEIC', 'Sep', 10),
+    },
+  });
+  const afterMs = Date.UTC(2026, 8, 15, 18, 0, 0); // Sep 15 18:00 UTC -- strictly between the two tiles' own (bogus wall-clock-as-UTC) times
+  const opened = await resumeTimelineAtTime(page, afterMs, new Set());
+  assert.ok(opened, 'expected a tile older than the given time to be found');
+  assert.equal(opened.ariaLabel, tileOlder.ariaLabel, 'must open the OLDER tile, never the newer one');
+});
+
+test('walkTimeline: trashing the last LOADED photo closes the viewer -- the walk resumes BY TIME (the trashed tile is gone) and reaches an older job', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_9800.HEIC', creationDate: '2026-09-12T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const { job: job2 } = queue.enqueue({ filename: 'IMG_9801.HEIC', creationDate: '2026-09-08T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = dateTimelineTile('closes1', 'Sep', 12);
+    const tile2 = dateTimelineTile('closes2', 'Sep', 8);
+    const panelText = {
+      [tile1.ariaLabel]: timelinePanelText('IMG_9800.HEIC', 'Sep', 12),
+      [tile2.ariaLabel]: timelinePanelText('IMG_9801.HEIC', 'Sep', 8),
+    };
+    const page = createFakePage({
+      timelineTiles: [tile1, tile2],
+      timelinePanelTextByLabel: panelText,
+      // Only tile1 is "loaded" at first -- trashing it (the LAST loaded
+      // tile) closes the viewer entirely (performTrash's own next-tile
+      // lookup finds nothing WITHIN the loaded window), exactly the live
+      // TRASH_SELECTOR-visibility misfire this round fixes. tile2 genuinely
+      // exists further down the underlying library, just not yet loaded --
+      // a grid-mode scroll (timelineLoadStep) is what resume-by-time uses
+      // to reach it, since resume-by-id can never find tile1 again (it's
+      // trashed, filtered out of the grid permanently).
+      timelineInitialLoadedCount: 1,
+      timelineLoadStep: 10,
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, [job1, job2], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'both jobs must be found -- resume-by-time must reach job2 after the viewer closed');
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.equal(queue.getById(job2.id).status, 'trashed');
   });
 });

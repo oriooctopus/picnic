@@ -2203,6 +2203,76 @@ async function findTimelineStartTile(page, newestPendingMs) {
 }
 
 /**
+ * Resume-BY-TIME (round 6, 2026-09-25 live finding). resumeTimelineAt
+ * (above) reopens a SPECIFIC still-existing tile by id -- but that doesn't
+ * work when the last successfully processed photo's own tile no longer
+ * EXISTS at all, which is exactly what happens the moment it gets trashed.
+ * A live run hit this precisely: it trashed the last-loaded photo, the
+ * viewer closed, and the walk declared EXHAUSTED with 57 real jobs still
+ * pending back to 2026-03-11 -- there was no tile left to resume-by-id AT,
+ * so the old logic gave up immediately instead of falling back to this.
+ *
+ * There is no id to resume at any more, but the walk still knows roughly
+ * WHEN the last photo was (`afterCaptureMs`, its own captureDateMs) and can
+ * keep going from there by TIME instead. goto()s the bare library root
+ * (same known-reset starting point resumeTimelineAt uses), scrolls down
+ * until a tile strictly OLDER than `afterCaptureMs` is visible (tile
+ * aria-label times -- the same coarse "local wall-clock as if it were UTC"
+ * ordering signal every other round-5/6 scroll helper in this file already
+ * uses, see resumeTimelineAt's own header for why exact precision isn't
+ * needed here), then opens the FIRST such tile.
+ *
+ * `visitedIds` (a Set the caller maintains across the WHOLE walk, of
+ * photoIdFromUrl-shaped ids) excludes anything already opened this walk --
+ * purely an infinite-loop guard, never a correctness requirement: a few
+ * minutes' slack in either direction is fine because filename matching
+ * (findMatchingJob) makes re-reading a photo the walk already saw harmless,
+ * it just costs one wasted step, not a wrong trash.
+ *
+ * Returns the reopened tile, or null if nothing strictly older than
+ * `afterCaptureMs` could be found within the step budget -- per the
+ * walkTimeline caller's own recoverOrStop, THIS is the one and only
+ * legitimate "genuinely reached the end of the library" signal now.
+ */
+export async function resumeTimelineAtTime(page, afterCaptureMs, visitedIds = new Set()) {
+  if (afterCaptureMs == null) return null;
+  await page.goto('https://photos.google.com/', { waitUntil: 'domcontentloaded' });
+  await pointAtGrid(page);
+
+  const olderThanAndUnvisited = (t) => {
+    if (typeof t.href === 'string' && [...visitedIds].some((id) => t.href.endsWith(id))) return false;
+    const parsed = parseTileAriaLabel(t.ariaLabel);
+    return parsed != null && parsed.wallClockAsUtcMs < afterCaptureMs;
+  };
+  let tiles = await collectTimelineTiles(page);
+  let steps = 0;
+  let stalledRounds = 0; // see resumeTimelineAt's identical guard for why this exists
+  while (!tiles.some(olderThanAndUnvisited) && steps < TIMELINE_RESUME_SCROLL_MAX_STEPS) {
+    const beforeCount = tiles.length;
+    await scrollResults(page);
+    tiles = await collectTimelineTiles(page);
+    steps += 1;
+    stalledRounds = tiles.length > beforeCount ? 0 : stalledRounds + 1;
+    if (stalledRounds >= 10) break;
+  }
+
+  const found = tiles.find(olderThanAndUnvisited);
+  if (!found) {
+    loud(
+      `[timeline] resumeTimelineAtTime: no tile older than ${new Date(afterCaptureMs).toISOString()} found after ${steps} scroll(s) -- treating as end of library`
+    );
+    return null;
+  }
+  for (let i = 0; i < TIMELINE_RESUME_SETTLE_SCROLLS; i++) {
+    await scrollResults(page);
+  }
+  const opened = await openFirstTile(page, found, { collectFn: collectTimelineTiles, resultSelector: TIMELINE_TILE_SELECTOR });
+  if (!opened) return null;
+  await openInfoPanelOnce(page);
+  return opened;
+}
+
+/**
  * Walk the main Google Photos LIBRARY TIMELINE (no search at all) by
  * stepping through its PHOTO VIEWER, exactly like walkPhotoView already
  * does for a date's search results -- the `--walk=timeline` strategy,
@@ -2291,7 +2361,20 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
   let stoppedPastOldest = false;
   let matchedCount = 0;
   let unreadableCount = 0;
-  let resumeCount = 0; // total resumeTimelineAt calls over the WHOLE walk, bounded by MAX_TIMELINE_RESUMES -- see that constant's header
+  let resumeCount = 0; // total resume calls (BOTH resumeTimelineAt and resumeTimelineAtTime) over the WHOLE walk, bounded by MAX_TIMELINE_RESUMES -- see that constant's header
+  // ROUND 6 (2026-09-25 live finding): the last REAL (non-null) parsed
+  // captureDateMs seen this walk -- tracked SEPARATELY from `parsed.
+  // captureDateMs` because that goes null the instant `text` is empty
+  // (post-trash/unreadable), and recoverOrStop below needs a real timestamp
+  // to resume FROM even when the CURRENT read has none at all. Also what
+  // the stop-condition check inside recoverOrStop uses, so a recovery
+  // attempted long after the last real read still stops at the right place.
+  let lastKnownCaptureMs = null;
+  // Photo ids (photoIdFromUrl-shaped) already opened this walk --
+  // resumeTimelineAtTime's own infinite-loop guard (its header explains
+  // why precise ordering doesn't matter here, only "don't land on the
+  // exact same tile forever").
+  const visitedIds = new Set();
   let text = await readPanelText(page);
   // Live finding, 2026-09-22: a panel read can land EMPTY or STALE
   // immediately after opening/advancing, before Google has actually
@@ -2304,6 +2387,72 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
   await pollDelay();
   const settledFirstRead = await readPanelText(page);
   if (settledFirstRead) text = settledFirstRead;
+
+  /**
+   * ROUND 6 (2026-09-25 live finding): shared recovery for "the walk cannot
+   * currently read/advance any further" -- a failed ArrowRight advance, or a
+   * per-photo exception (the trash-branch's own "viewer looks closed" case
+   * routes through the SAME ArrowRight-branch failure on its very next
+   * iteration once `text` goes empty, so it needs no separate call site).
+   * Live evidence: a run ended "EXHAUSTED, 164 photos, 57 jobs still
+   * pending back to March" the moment the LAST-loaded photo got trashed --
+   * a SINGLE post-trash "viewer looks closed" read was wrongly trusted as
+   * the true end, when TRASH_SELECTOR-visibility (round 4's own
+   * disambiguator) can ALSO read this way for a viewer that's merely
+   * between renders, not genuinely done.
+   *
+   * Order: check the stop condition FIRST using `lastKnownCaptureMs` (not
+   * necessarily the CURRENT, possibly-empty `parsed.captureDateMs`) -- if
+   * the last known-good photo's own time is already past the oldest
+   * pending job's boundary, resuming can only ever find MORE old photos,
+   * never fewer, so there is nothing to gain; let the walk's own normal
+   * per-iteration stop-check handle it on the next loop pass instead of
+   * needlessly consuming a resume from the shared budget. Otherwise try
+   * resume-by-ID (resumeTimelineAt -- reopens a SPECIFIC still-existing
+   * tile, the SAME last-known photo, so the caller must advance PAST it
+   * again); if that tile is GONE (e.g. it was the photo JUST TRASHED --
+   * exactly the live misfire above), fall back to resume-by-TIME
+   * (resumeTimelineAtTime -- opens a DIFFERENT, not-yet-processed OLDER
+   * tile directly, so the caller must NOT try to advance again first).
+   * Both draw from the SAME MAX_TIMELINE_RESUMES budget.
+   *
+   * Returns `'stop'` (stop condition already met -- caller sets
+   * stoppedPastOldest and breaks), `null` (nothing more can be found at
+   * all -- requirement 3's ONLY legitimate end-of-library signal now), or
+   * `{ text, alreadyAdvanced }` on a successful resume.
+   */
+  async function recoverOrStop(logLabel) {
+    if (lastKnownCaptureMs != null && lastKnownCaptureMs < stopBeforeMs) return 'stop';
+    if (resumeCount >= MAX_TIMELINE_RESUMES) {
+      loud(`[timeline] BLOCKER: hit MAX_TIMELINE_RESUMES (${MAX_TIMELINE_RESUMES}) -- stopping rather than resuming again, ${remaining.length} job(s) still unmatched`);
+      return null;
+    }
+    const photoId = photoIdFromUrl(page.url());
+    if (photoId != null) {
+      resumeCount += 1;
+      if (VERBOSE) console.log(`  ${logLabel} attempting resume-by-id ${resumeCount}/${MAX_TIMELINE_RESUMES} at photo ${photoId}`);
+      const resumed = await resumeTimelineAt(page, photoId, lastKnownCaptureMs);
+      if (resumed) {
+        const reread = await readPanelText(page);
+        return { text: reread || '', alreadyAdvanced: false };
+      }
+    }
+    if (lastKnownCaptureMs == null) return null; // no known time to resume FROM at all -- genuinely can't recover
+    if (resumeCount >= MAX_TIMELINE_RESUMES) {
+      loud(`[timeline] BLOCKER: hit MAX_TIMELINE_RESUMES (${MAX_TIMELINE_RESUMES}) -- stopping rather than resuming again, ${remaining.length} job(s) still unmatched`);
+      return null;
+    }
+    resumeCount += 1;
+    if (VERBOSE) {
+      console.log(
+        `  ${logLabel} attempting resume-by-TIME ${resumeCount}/${MAX_TIMELINE_RESUMES} (older than ${new Date(lastKnownCaptureMs).toISOString()})`
+      );
+    }
+    const resumed = await resumeTimelineAtTime(page, lastKnownCaptureMs, visitedIds);
+    if (!resumed) return null; // resume-by-time found nothing older -- see requirement 3
+    const reread = await readPanelText(page);
+    return { text: reread || '', alreadyAdvanced: true };
+  }
 
   // See matchedJobs' header (walkPhotoView) -- once anything has matched, a
   // duplicate copy could be anywhere else in the library, so the loop keeps
@@ -2321,6 +2470,12 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
     steps += 1;
 
     const parsed = parsePanelText(text);
+    if (parsed.captureDateMs != null) lastKnownCaptureMs = parsed.captureDateMs;
+    // Record the CURRENTLY open photo before doing anything to it -- see
+    // visitedIds' own declaration above for why (resumeTimelineAtTime's
+    // infinite-loop guard).
+    const currentPhotoId = photoIdFromUrl(page.url());
+    if (currentPhotoId != null) visitedIds.add(currentPhotoId);
     if (steps % 100 === 0 || VERBOSE) {
       const dateLabel = parsed.captureDateMs != null ? new Date(parsed.captureDateMs).toISOString() : '(unparsed)';
       console.log(`[timeline] photo ${steps}: filename=${parsed.filename ?? '(none)'} captureDate=${dateLabel}`);
@@ -2427,31 +2582,44 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
 
     if (!advancedByDelete) {
       let next = await advanceTimelinePhotoView(page, text, `[timeline photo ${steps}]`);
-      if (next == null) {
-        // ROUND 5 live finding (resumeTimelineAt's own header, above): a
-        // failed advance here is no longer trusted as "genuinely the end of
-        // the library" on its own -- it's also exactly what happens once the
-        // viewer's own loaded-content window runs out, ~450 photos into a
-        // library that goes back to March. `page.url()` is still the LAST
-        // successfully read photo's URL (advanceTimelinePhotoView guarantees
-        // this: it only returns null when the URL never left `beforeUrl`),
-        // so that photo's own id + captureDateMs (parsed for THIS iteration,
-        // above) is exactly what resumeTimelineAt needs to fall back to the
-        // grid and reopen the SAME photo with more of the library now loaded
-        // around it, ready for a second advance attempt from there.
-        if (resumeCount >= MAX_TIMELINE_RESUMES) {
-          loud(`[timeline] BLOCKER: hit MAX_TIMELINE_RESUMES (${MAX_TIMELINE_RESUMES}) -- stopping rather than resuming again, ${remaining.length} job(s) still unmatched`);
-          break;
+      // ROUND 6 (2026-09-25 live finding, recoverOrStop's own header above):
+      // a failed advance is no longer given up on after a single resume
+      // attempt -- id-based resume can itself fail (the last-known photo's
+      // tile is GONE, e.g. it was just trashed) and previously that meant
+      // "genuinely the end" even when 57 real jobs were still pending back
+      // to March. Loop through recovery attempts (bounded by recoverOrStop's
+      // own MAX_TIMELINE_RESUMES budget check, so this always terminates)
+      // until either a usable `next` is in hand or recoverOrStop itself says
+      // to stop.
+      let giveUp = false;
+      while (next == null && !giveUp) {
+        const recovery = await recoverOrStop(`[timeline photo ${steps}]`);
+        if (recovery === 'stop') {
+          stoppedPastOldest = true;
+          giveUp = true;
+        } else if (!recovery) {
+          giveUp = true; // requirement 3: resume-by-time found nothing older -- genuinely the end
+        } else {
+          text = recovery.text;
+          if (recovery.alreadyAdvanced) {
+            // resume-by-TIME already landed on a DIFFERENT, not-yet-processed
+            // older photo -- nothing to advance past, process it directly
+            // (same shape a normal successful advance returns, so the
+            // unreadable/else branch below handles it identically).
+            next = { text, unreadable: false };
+          } else {
+            // resume-by-ID reopened the SAME last-known photo -- still need
+            // to move PAST it. If this ALSO fails, the loop goes right back
+            // into recoverOrStop, which will fall through to resume-by-TIME
+            // this time (id-resume finding the exact same tile again is not
+            // expected to succeed twice in a row where it just failed to
+            // advance, but even if it does, this only costs one more bounded
+            // iteration before falling through).
+            next = await advanceTimelinePhotoView(page, text, `[timeline photo ${steps}]`);
+          }
         }
-        const photoId = photoIdFromUrl(page.url());
-        if (photoId == null) break; // no per-photo URL to resume AT (shouldn't happen once a photo has been read at all) -- can't guess, treat as the end
-        resumeCount += 1;
-        if (VERBOSE) console.log(`  [timeline photo ${steps}] advance failed, attempting resume ${resumeCount}/${MAX_TIMELINE_RESUMES} at photo ${photoId}`);
-        const resumed = await resumeTimelineAt(page, photoId, parsed.captureDateMs);
-        if (!resumed) break; // resume couldn't find the tile at all -- genuinely the end (or the photo itself is gone)
-        next = await advanceTimelinePhotoView(page, text, `[timeline photo ${steps}]`);
-        if (next == null) break; // advancing still failed right after a successful resume -- genuinely the end this time
       }
+      if (giveUp) break;
       if (next.unreadable) {
         // LIVE FINDING 2026-09-24 (round 4): a photo whose panel never
         // becomes readable, even after the full bounded recovery window
@@ -2504,17 +2672,25 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
       }
       // The viewer's state after an arbitrary mid-step exception is unknown
       // -- never assume `text`/the open photo are still trustworthy. Fall
-      // back to the SAME resumeTimelineAt the ArrowRight-advance branch
-      // already uses (shared bounded budget, MAX_TIMELINE_RESUMES) to
-      // re-find the last-known-good photo and re-read it fresh, rather than
-      // declaring the whole walk dead over one photo's failure.
-      const photoId = photoIdFromUrl(page.url());
-      if (photoId == null || resumeCount >= MAX_TIMELINE_RESUMES) break;
-      resumeCount += 1;
-      const resumed = await resumeTimelineAt(page, photoId, parsed.captureDateMs);
-      if (!resumed) break;
-      const reread = await readPanelText(page);
-      if (reread) text = reread;
+      // back to the SAME recoverOrStop the ArrowRight-advance branch uses
+      // (shared bounded budget, MAX_TIMELINE_RESUMES; round 6: also falls
+      // back to resume-by-TIME when the last-known tile is gone) to re-find
+      // a usable photo and keep walking, rather than declaring the whole
+      // walk dead over one photo's failure.
+      const recovery = await recoverOrStop(`[timeline photo ${steps}]`);
+      if (recovery === 'stop') {
+        stoppedPastOldest = true;
+        break;
+      }
+      if (!recovery) break;
+      text = recovery.text;
+      // Unlike the ArrowRight-branch, this catch doesn't need to distinguish
+      // `alreadyAdvanced` -- either way the walk simply re-enters the loop
+      // from the top and reprocesses whatever recoverOrStop landed on, which
+      // is correct for BOTH cases here (an id-resume's SAME last-known photo
+      // was never actually matched/trashed before the exception -- see the
+      // needs_review handling above -- so reprocessing it is exactly right,
+      // not redundant the way it would be after a normal successful advance).
     }
   }
 
