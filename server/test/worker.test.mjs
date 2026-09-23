@@ -38,6 +38,7 @@ const {
   waitForTimelineAdvanceConfirmed,
   selectPanelText,
   focusViewerCenter,
+  advanceTimelinePhotoView,
 } = await import('../worker.mjs');
 
 async function withTempQueue(fn) {
@@ -2083,7 +2084,7 @@ test('selectPanelText: prefers the "Details"+filename tier (carries the capture-
   assert.equal(chosen, largerDetailsElement, 'must choose the "Details" container, not the smaller dims-only element');
   const parsed = parsePanelText(chosen, Date.UTC(2026, 8, 23));
   assert.equal(parsed.filename, 'IMG_2931.HEIC', 'filename parsing must still work from the larger container');
-  assert.equal(parsed.captureDateMs, Date.UTC(2026, 8, 22, 18, 25), 'captureDateMs must now be parseable at all');
+  assert.equal(parsed.captureDateMs, Date.UTC(2026, 8, 22, 22, 25), 'captureDateMs must now be parseable at all (and offset-corrected: 6:25 PM GMT-04:00 -> 22:25 UTC)');
 });
 
 test('selectPanelText: falls back to dims+filename when no "Details"-carrying element exists', () => {
@@ -2206,4 +2207,156 @@ test('walkTimeline: recovers from lost keyboard focus after a failed trash-dialo
     assert.equal(queue.getById(job1.id).status, 'trashed');
     assert.equal(queue.getById(job2.id).status, 'trashed');
   });
+});
+
+// ============================================================================
+// 2026-09-24 live finding, round 3: instrumented live, the URL changed on
+// EVERY ArrowRight (confirmed 6/6 direct probe, and via URL logging in a
+// real dry-run) -- the actual root cause of "advance did not register" was
+// readPanelText() coming back genuinely EMPTY on roughly HALF of all
+// advances: the info panel was CLOSED on the new photo, not merely slow.
+// The old retry loop read that as "the press didn't register" and pressed
+// ArrowRight AGAIN, silently skipping whatever photo the panel had failed
+// to reopen for. Fixed two ways: (a) waitForTimelineAdvanceConfirmed now
+// reopens the panel (openInfoPanelOnce) the moment it notices an empty read
+// after a confirmed URL change; (b) advanceTimelinePhotoView never presses
+// ArrowRight again once page.url() has already moved past `beforeUrl`.
+// ============================================================================
+
+test('walkTimeline: the info panel closes on roughly half of all advances (empty until reopened) -- every photo is still read, none silently skipped', async () => {
+  await withTempQueue(async (queue) => {
+    // 6 tiles, alternating "panel closes on arrival" -- odd-indexed ones
+    // (1, 3, 5) model the live "roughly half" ratio without relying on
+    // randomness. A distinct job per tile proves NONE were skipped: a
+    // skip (the exact live bug) would leave that specific job unmatched
+    // while its neighbours still resolve, rather than a wholesale failure.
+    const tiles = [];
+    const panelText = {};
+    const jobs = [];
+    const closesOnLabels = [];
+    for (let i = 0; i < 6; i++) {
+      const t = timelineTile(`round3-${i}`);
+      const filename = `IMG_94${String(10 + i).padStart(2, '0')}.HEIC`;
+      tiles.push(t);
+      panelText[t.ariaLabel] = timelinePanelText(filename, 'Aug', 20 - i);
+      const { job } = queue.enqueue({ filename, creationDate: `2026-08-${20 - i}T12:00:00.000Z`, pixelWidth: 100, pixelHeight: 100 });
+      jobs.push(job);
+      if (i % 2 === 1) closesOnLabels.push(t.ariaLabel);
+    }
+
+    const page = createFakePage({
+      timelineTiles: tiles,
+      timelinePanelTextByLabel: panelText,
+      timelinePanelClosesOnLabels: closesOnLabels,
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, jobs, queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, `every job must be found -- unmatched: ${stillUnmatched.map((j) => j.filename).join(', ')}`);
+    for (const job of jobs) {
+      assert.equal(queue.getById(job.id).status, 'trashed', `${job.filename} must have been read and matched, not silently skipped`);
+    }
+  });
+});
+
+test('walkTimeline: a closed panel after a TRASH-driven auto-advance is also reopened (not just after ArrowRight)', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_9420.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const { job: job2 } = queue.enqueue({ filename: 'IMG_9421.HEIC', creationDate: '2026-08-19T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = timelineTile('trashclose1');
+    const tile2 = timelineTile('trashclose2'); // the panel closes arriving HERE, via job1's trash auto-advance
+    const panelText = {
+      [tile1.ariaLabel]: timelinePanelText('IMG_9420.HEIC', 'Aug', 20),
+      [tile2.ariaLabel]: timelinePanelText('IMG_9421.HEIC', 'Aug', 19),
+    };
+    const page = createFakePage({
+      timelineTiles: [tile1, tile2],
+      timelinePanelTextByLabel: panelText,
+      timelinePanelClosesOnLabels: [tile2.ariaLabel],
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, [job1, job2], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0);
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.equal(queue.getById(job2.id).status, 'trashed', 'job2 must be found even though the panel closed arriving at its tile via the trash auto-advance');
+  });
+});
+
+test('waitForTimelineAdvanceConfirmed: MUTATION-PROOF TARGET -- reopens the panel once it notices an empty read after the URL has already changed', async () => {
+  // Direct seam test against the real function -- a hand-built page mock
+  // so "the panel is closed" is the ONE thing under the test's control,
+  // isolated from the rest of walkTimeline's machinery.
+  let infoPanelOpen = false;
+  let iPresses = 0;
+  const page = {
+    url: () => 'https://photos.google.com/photo/NEXT', // already moved -- URL wait resolves instantly
+    keyboard: {
+      press: async (key) => {
+        if (key === 'i') {
+          iPresses += 1;
+          infoPanelOpen = true; // models openInfoPanelOnce's own 'i' keypress opening the panel
+        }
+      },
+    },
+    locator: () => ({
+      first: () => ({
+        waitFor: async () => {}, // openInfoPanelOnce's TRASH_SELECTOR attached-wait
+        isVisible: async () => false, // OPEN_INFO_SELECTOR fallback button -- never visible here, 'i' alone reopens it
+        click: async () => {},
+      }),
+    }),
+    evaluate: async () =>
+      infoPanelOpen
+        ? { detailsAndFile: ['Details\nSep 22\nMon, 1:00 PM\nGMT-04:00\nIMG_9700.HEIC\n100 × 100'], dimsAndFile: [], fileOnly: [] }
+        : { detailsAndFile: [], dimsAndFile: [], fileOnly: [] },
+  };
+  const previousText = 'Details\nSep 21\nMon, 1:00 PM\nGMT-04:00\nIMG_9701.HEIC\n100 × 100';
+
+  const result = await waitForTimelineAdvanceConfirmed(page, 'https://photos.google.com/photo/PREV', previousText);
+
+  assert.ok(result, 'must confirm once the panel is reopened, not give up on the first empty read');
+  assert.match(result.text, /IMG_9700\.HEIC/);
+  assert.ok(iPresses >= 1, 'must have pressed "i" to reopen the closed panel');
+});
+
+test('advanceTimelinePhotoView: MUTATION-PROOF TARGET -- never presses ArrowRight again once the URL has already changed, even when confirmation ultimately fails', async () => {
+  // Direct seam test: the URL moves on the VERY FIRST ArrowRight press and
+  // never changes again, but the panel NEVER renders any content (even
+  // after waitForTimelineAdvanceConfirmed's own reopen attempt) -- models
+  // a genuinely unreadable photo. The old bug pressed ArrowRight again on
+  // every retry regardless, which would silently skip past THIS photo to
+  // a third one. The fix must press ArrowRight exactly once and spend the
+  // rest of its retries only re-reading, never re-pressing.
+  const beforeUrl = 'https://photos.google.com/photo/BEFORE';
+  const afterUrl = 'https://photos.google.com/photo/AFTER';
+  let arrowPresses = 0;
+  let urlChanged = false;
+  const page = {
+    url: () => (urlChanged ? afterUrl : beforeUrl),
+    keyboard: {
+      press: async (key) => {
+        if (key === 'ArrowRight') {
+          arrowPresses += 1;
+          urlChanged = true;
+        }
+      },
+    },
+    locator: (selector) => ({
+      first: () => ({
+        waitFor: async () => {},
+        isVisible: async () => false,
+        click: async () => {},
+      }),
+      all: async () => (/aria-label="View next photo"/i.test(selector) ? [{ isVisible: async () => false, click: async () => {} }] : []),
+    }),
+    evaluate: async () => ({ detailsAndFile: [], dimsAndFile: [], fileOnly: [] }), // panel never renders anything, even after a reopen attempt
+    mouse: { click: async () => {} }, // focusViewerCenter (recovery pass)
+    viewportSize: () => ({ width: 1280, height: 800 }),
+  };
+
+  const result = await advanceTimelinePhotoView(page, 'PREVIOUS TEXT', '[test]');
+
+  assert.equal(result, null, 'confirmation genuinely never succeeds in this fixture');
+  assert.equal(arrowPresses, 1, 'ArrowRight must be pressed exactly ONCE -- never again after the URL already moved, even though confirmation kept failing');
 });

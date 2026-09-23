@@ -544,6 +544,24 @@ function fullOrderedTiles(page) {
  * FIRST such tile regardless of which one is actually open, silently
  * trashing/advancing from the wrong element.
  */
+/**
+ * True when `label` names a photo that the fake's info panel CLOSES on
+ * arrival at, via any of the three ways `page.openedAriaLabel` can change
+ * to it as part of an ADVANCE (ArrowRight, the "View next photo" click
+ * fallback, or a trash's own auto-advance) -- NOT the very first tile
+ * opened this walk, which matches the live finding precisely (2026-09-24,
+ * round 3): instrumented live, the info panel was closed on roughly HALF
+ * of all ArrowRight advances, forcing worker.mjs's
+ * waitForTimelineAdvanceConfirmed to notice the empty read and call
+ * openInfoPanelOnce() again. `config.timelinePanelClosesOnLabels` is an
+ * array or Set of ariaLabels that trigger this.
+ */
+function closesInfoPanelOnArrival(page, label) {
+  const set = page.config.timelinePanelClosesOnLabels;
+  if (!set || label == null) return false;
+  return set instanceof Set ? set.has(label) : Array.isArray(set) && set.includes(label);
+}
+
 function performTrash(page) {
   const identity = page.openedIdentity;
   if (identity == null) return;
@@ -563,6 +581,7 @@ function performTrash(page) {
   const next = idx !== -1 && idx + 1 < ordered.length ? ordered[idx + 1] : null;
   page.openedAriaLabel = next ? next.ariaLabel : null;
   page.openedIdentity = next ? identityOf(next) : null;
+  if (next && closesInfoPanelOnArrival(page, next.ariaLabel)) page.infoPanelOpen = false;
 }
 
 /**
@@ -600,6 +619,7 @@ function advanceToNextTile(page) {
   const next = ordered[idx + 1];
   page.openedAriaLabel = next.ariaLabel;
   page.openedIdentity = identityOf(next);
+  if (closesInfoPanelOnArrival(page, next.ariaLabel)) page.infoPanelOpen = false;
 }
 
 /**

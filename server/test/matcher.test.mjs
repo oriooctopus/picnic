@@ -92,22 +92,22 @@ const LIVE_SAMPLE_1 =
 const LIVE_SAMPLE_2 = 'Details\nSep 22\nYesterday, 2:34 PM\nGMT-04:00\nIMG_2929.JPG\n12.2MP\n3024 × 4032\nUploaded from iOS device';
 const NOW_2026_09_23 = Date.UTC(2026, 8, 23); // "today" per the live probe
 
-test('parsePanelText: captureDateMs parses the REAL live three-line date/label/GMT block, year OMITTED -> current year (nowMs Sep 23, photo Sep 22 -- not future)', () => {
+test('parsePanelText: captureDateMs parses the REAL live three-line date/label/GMT block, year OMITTED -> current year (nowMs Sep 23, photo Sep 22 -- not future), OFFSET APPLIED (GMT-04:00: local 6:25 PM -> UTC 10:25 PM)', () => {
   const parsed = parsePanelText(LIVE_SAMPLE_1, NOW_2026_09_23);
   assert.equal(parsed.filename, 'IMG_2931.HEIC');
-  assert.equal(parsed.captureDateMs, Date.UTC(2026, 8, 22, 18, 25));
+  assert.equal(parsed.captureDateMs, Date.UTC(2026, 8, 22, 22, 25));
 });
 
 test('parsePanelText: captureDateMs on the SECOND real live sample (different photo, same day)', () => {
   const parsed = parsePanelText(LIVE_SAMPLE_2, NOW_2026_09_23);
   assert.equal(parsed.filename, 'IMG_2929.JPG');
-  assert.equal(parsed.captureDateMs, Date.UTC(2026, 8, 22, 14, 34));
+  assert.equal(parsed.captureDateMs, Date.UTC(2026, 8, 22, 18, 34));
 });
 
 test('parsePanelText: captureDateMs on an older-year photo ("Mon D, YYYY" + weekday label) -- UNVERIFIED LIVE, this exact shape was never seen in the live probe', () => {
   const block = 'Details\nMar 17, 2026\nTue, 12:59 AM\nGMT-04:00\nIMG_1.HEIC\n100 × 100';
   const parsed = parsePanelText(block, NOW_2026_09_23);
-  assert.equal(parsed.captureDateMs, Date.UTC(2026, 2, 17, 0, 59));
+  assert.equal(parsed.captureDateMs, Date.UTC(2026, 2, 17, 4, 59));
 });
 
 test('parsePanelText: captureDateMs with no year in the text rolls back to the PREVIOUS year when the current-year guess lands in the future', () => {
@@ -117,7 +117,7 @@ test('parsePanelText: captureDateMs with no year in the text rolls back to the P
   // capture with the year omitted.
   const block = 'Details\nDec 25\nFri, 6:25 PM\nGMT-04:00\nIMG_1.HEIC\n100 × 100';
   const parsed = parsePanelText(block, NOW_2026_09_23);
-  assert.equal(parsed.captureDateMs, Date.UTC(2025, 11, 25, 18, 25));
+  assert.equal(parsed.captureDateMs, Date.UTC(2025, 11, 25, 22, 25));
 });
 
 test('parsePanelText: captureDateMs is null when the text has no GMT-suffixed time at all (never guesses)', () => {
@@ -125,11 +125,26 @@ test('parsePanelText: captureDateMs is null when the text has no GMT-suffixed ti
   assert.equal(parsed.captureDateMs, null);
 });
 
-test('parsePanelText: captureDateMs handles noon/midnight (12 AM/PM) correctly', () => {
+test('parsePanelText: captureDateMs handles noon/midnight (12 AM/PM) correctly, offset applied', () => {
   const noon = 'Details\nSep 22\nMon, 12:00 PM\nGMT-04:00\nIMG_1.HEIC\n100 × 100';
   const midnight = 'Details\nSep 22\nMon, 12:00 AM\nGMT-04:00\nIMG_1.HEIC\n100 × 100';
-  assert.equal(parsePanelText(noon, NOW_2026_09_23).captureDateMs, Date.UTC(2026, 8, 22, 12, 0));
-  assert.equal(parsePanelText(midnight, NOW_2026_09_23).captureDateMs, Date.UTC(2026, 8, 22, 0, 0));
+  assert.equal(parsePanelText(noon, NOW_2026_09_23).captureDateMs, Date.UTC(2026, 8, 22, 16, 0));
+  assert.equal(parsePanelText(midnight, NOW_2026_09_23).captureDateMs, Date.UTC(2026, 8, 22, 4, 0));
+});
+
+// --- timezone offset (2026-09-24 live bug: the offset was read but discarded) ---
+
+test('parsePanelText: captureDateMs applies a NEGATIVE offset correctly (coordinator\'s exact live example: "Sep 22 / Yesterday, 6:27 PM / GMT-04:00" -> 2026-09-22T22:27:00.000Z, not 18:27)', () => {
+  const block = 'Details\nSep 22\nYesterday, 6:27 PM\nGMT-04:00\nIMG_2931.HEIC\n100 × 100';
+  const parsed = parsePanelText(block, NOW_2026_09_23);
+  assert.equal(new Date(parsed.captureDateMs).toISOString(), '2026-09-22T22:27:00.000Z');
+});
+
+test('parsePanelText: captureDateMs applies a POSITIVE offset correctly (GMT+05:30 -- e.g. India)', () => {
+  const block = 'Details\nSep 22\nTue, 10:00 AM\nGMT+05:30\nIMG_1.HEIC\n100 × 100';
+  const parsed = parsePanelText(block, NOW_2026_09_23);
+  // 10:00 AM IST (UTC+5:30) is 04:30 UTC the same day.
+  assert.equal(new Date(parsed.captureDateMs).toISOString(), '2026-09-22T04:30:00.000Z');
 });
 
 test('filenamesAgree: case-insensitive', () => {

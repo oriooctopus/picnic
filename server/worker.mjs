@@ -203,12 +203,16 @@ export const MAX_TIMELINE_PHOTOS = 5000;
 // panel's parsed capture date has to read before the walk gives up looking
 // for anything further back. 2 days (not 1, unlike date search's +/-1-day
 // window) -- this walk has no per-job date attempts to retry, so the buffer
-// has to absorb BOTH a plausible timezone reading error in the panel's
+// has to absorb a plausible DOM-shape/parsing error in the panel's
 // capture-date parse (see matcher.mjs's parsePanelText CAPTURE_DATE_PATTERN,
-// UNVERIFIED LIVE) and the fact that "capture date" here is compared as a
-// raw wall-clock-as-UTC reading with no offset correction at all (accepted:
-// this only ever decides when to stop LOOKING, never whether a photo
-// matches -- findMatchingJob's filename check is unaffected either way).
+// still UNVERIFIED LIVE for the older-year "Mon D, YYYY" form specifically)
+// -- captureDateMs is now a REAL, offset-corrected UTC instant (2026-09-24
+// fix: the GMT offset used to be matched but silently discarded), so this
+// buffer no longer needs to absorb timezone error on top of that, just
+// genuine parse misses. Kept at 2 days as headroom regardless -- this only
+// ever decides when to stop LOOKING, never whether a photo matches
+// (findMatchingJob's filename check is unaffected either way), so a wider
+// buffer than strictly necessary costs nothing but a little extra walking.
 export const TIMELINE_STOP_BUFFER_DAYS = 2;
 const TIMELINE_STOP_BUFFER_MS = TIMELINE_STOP_BUFFER_DAYS * 24 * 60 * 60 * 1000;
 
@@ -1801,6 +1805,22 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = '
  *      rather than polled forever; findMatchingJob's own "never guess"
  *      rule is unaffected either way -- this only ever decides what text
  *      to parse, never whether a job matches it.
+ *
+ * PANEL-CLOSED FIX (2026-09-24, live finding, round 3): instrumented live,
+ * the ACTUAL root cause of "advance did not register" turned out not to be
+ * a slow/stale panel at all -- the URL changed on every single ArrowRight,
+ * but readPanelText() came back genuinely EMPTY (length 0, the info panel
+ * itself is CLOSED on the new photo) on roughly HALF of all advances. The
+ * old caller (advanceTimelinePhotoView) read that as "did not register"
+ * and pressed ArrowRight AGAIN -- silently skipping whatever photo the
+ * panel had failed to reopen for. Once the URL has moved, an empty read is
+ * now treated as "the panel needs reopening", not "nothing happened": this
+ * calls openInfoPanelOnce() once (it already checks before toggling, so
+ * it's always safe to call even if the panel turns out to already be
+ * open) and keeps polling from there. See advanceTimelinePhotoView's own
+ * header for the other half of this fix -- once THIS function's URL-wait
+ * has confirmed a move, the caller must never press ArrowRight again for
+ * the same photo, or the same skip happens one level up.
  */
 export async function waitForTimelineAdvanceConfirmed(page, beforeUrl, previousText) {
   const urlDeadline = Date.now() + (FAST_DELAYS ? 20 : 5000);
@@ -1816,9 +1836,21 @@ export async function waitForTimelineAdvanceConfirmed(page, beforeUrl, previousT
   // see this function's header, point 2, for why the filename specifically
   // can lag well behind both the URL and the rest of the panel's content.
   const filenameDeadline = Date.now() + (FAST_DELAYS ? 30 : 8000);
+  let reopenAttempted = false;
   let text = await readPanelText(page);
   let filename = parsePanelText(text).filename;
   while ((!filename || (previousFilename && filename === previousFilename)) && Date.now() < filenameDeadline) {
+    // See this function's "PANEL-CLOSED FIX" header above -- an empty read
+    // (not just a stale one) means the panel itself is closed on the new
+    // photo roughly half the time, live. openInfoPanelOnce() is safe to
+    // call unconditionally (it checks before toggling), so only ONE
+    // attempt per confirmed URL change is needed; a failure there must
+    // not abort the whole advance, just fall through to the ordinary poll.
+    if (!text && !reopenAttempted) {
+      reopenAttempted = true;
+      if (VERBOSE) console.log('    [timeline] panel empty after move, reopening');
+      await openInfoPanelOnce(page).catch(() => {});
+    }
     await pollDelay();
     text = await readPanelText(page);
     filename = parsePanelText(text).filename;
@@ -1842,14 +1874,36 @@ export async function waitForTimelineAdvanceConfirmed(page, beforeUrl, previousT
  * time. Clicking "View next photo" is kept only as a LAST-RESORT fallback
  * if every ArrowRight attempt fails to move the URL at all.
  */
-async function advanceTimelinePhotoView(page, currentText, logPrefix = '') {
+export async function advanceTimelinePhotoView(page, currentText, logPrefix = '') {
   const beforeUrl = page.url();
   for (let attempt = 0; attempt < ARROW_RETRIES; attempt++) {
-    await releaseFocus(page);
-    await page.keyboard.press('ArrowRight');
+    // NEVER press ArrowRight again once the URL has already moved away
+    // from `beforeUrl` -- live finding 2026-09-24 (round 3): the URL
+    // changing on ArrowRight IS the advance (confirmed 6/6 live); the
+    // actual bug was readPanelText() coming back genuinely EMPTY on
+    // roughly HALF of all advances (the info panel closed on the new
+    // photo), which the OLD retry loop misread as "did not register" and
+    // pressed ArrowRight AGAIN -- silently skipping whatever photo the
+    // panel had failed to reopen for. Once moved, only the READ is ever
+    // retried below (waitForTimelineAdvanceConfirmed's own reopen logic --
+    // see its header), never another keypress.
+    if (page.url() === beforeUrl) {
+      await releaseFocus(page);
+      await page.keyboard.press('ArrowRight');
+    }
     const result = await waitForTimelineAdvanceConfirmed(page, beforeUrl, currentText);
     if (result) return result;
-    // No next-photo control at all is the authoritative end-of-library
+    if (page.url() !== beforeUrl) {
+      // Moved, but still not confirmed even after that function's own
+      // reopen-and-poll window -- stop retrying the KEY here (see the
+      // comment above) and fall through to ONE more read attempt in the
+      // recovery pass below, rather than looping the outer `for` (which
+      // would risk pressing ArrowRight again the next time round).
+      if (VERBOSE) console.log(`  ${logPrefix} URL advanced but panel still unreadable, giving it one more try`);
+      break;
+    }
+    // Still on beforeUrl -- the press genuinely did not register. No
+    // next-photo control at all is the authoritative end-of-library
     // signal (same convention as advancePhotoView) -- no point burning the
     // rest of the retries or falling through to the recovery pass below.
     const candidates = await page.locator(NEXT_PHOTO_SELECTOR).all();
@@ -1858,8 +1912,8 @@ async function advanceTimelinePhotoView(page, currentText, logPrefix = '') {
       console.log(`  ${logPrefix} advance did not register via ArrowRight, retrying (${attempt + 1}/${ARROW_RETRIES})`);
     }
   }
-  // RECOVERY PASS (2026-09-23 live finding): every ArrowRight retry above
-  // can fail for a reason none of them can fix by themselves -- keyboard
+  // RECOVERY PASS (2026-09-23 live finding): a still-on-`beforeUrl` retry
+  // loop can fail for a reason none of its own attempts can fix -- keyboard
   // focus drifting off the viewer entirely (activeElement=BODY on a real
   // run, immediately after moveToTrash's own fallback-click path). Before
   // ever concluding "end of library", explicitly re-focus the viewer
@@ -1867,29 +1921,38 @@ async function advanceTimelinePhotoView(page, currentText, logPrefix = '') {
   // more real try -- a live run wrongly declared EXHAUSTED after 449 of
   // what should have been ~1500+ photos, with 103 jobs still pending
   // (their real photos going back to March), precisely because this
-  // recovery did not exist yet.
-  await focusViewerCenter(page);
-  await releaseFocus(page);
-  await page.keyboard.press('ArrowRight');
+  // recovery did not exist yet. Gated on `page.url() === beforeUrl` the
+  // same way as every other keypress/click here -- if the URL already
+  // moved (the round-3 case above), this only re-reads, never re-presses.
+  if (page.url() === beforeUrl) {
+    await focusViewerCenter(page);
+    await releaseFocus(page);
+    await page.keyboard.press('ArrowRight');
+  }
   const recovered = await waitForTimelineAdvanceConfirmed(page, beforeUrl, currentText);
   if (recovered) return recovered;
 
   // Last-resort click fallback -- see this function's header for why it's
   // no longer tried first. Refocuses again immediately before clicking:
   // the SAME lost-focus state that defeats ArrowRight can make a stale
-  // click land on nothing too.
+  // click land on nothing too. Same URL-changed gate as above -- a click
+  // is itself a potential SECOND advance, so it must never fire once the
+  // photo has already moved on once.
   await focusViewerCenter(page);
-  const candidates = await page.locator(NEXT_PHOTO_SELECTOR).all();
-  for (const candidate of candidates) {
-    if (await candidate.isVisible().catch(() => false)) {
-      await candidate.click().catch(() => {});
-      const result = await waitForTimelineAdvanceConfirmed(page, beforeUrl, currentText);
-      if (result) return result;
-      break;
+  if (page.url() === beforeUrl) {
+    const candidates = await page.locator(NEXT_PHOTO_SELECTOR).all();
+    for (const candidate of candidates) {
+      if (await candidate.isVisible().catch(() => false)) {
+        await candidate.click().catch(() => {});
+        break;
+      }
     }
   }
+  const result = await waitForTimelineAdvanceConfirmed(page, beforeUrl, currentText);
+  if (result) return result;
   // Only NOW -- URL still unchanged despite the recovery pass AND the click
-  // fallback -- is this treated as genuinely the end of the library (or an
+  // fallback, OR moved but never confirmed readable despite every reopen
+  // attempt -- is this treated as genuinely the end of the library (or an
   // advance that was truly swallowed, indistinguishable from here).
   if (VERBOSE) {
     const focus = await page

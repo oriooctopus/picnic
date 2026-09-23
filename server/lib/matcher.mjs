@@ -82,8 +82,13 @@ let capturedDatePatternCache = null;
 function captureDatePattern() {
   if (!capturedDatePatternCache) {
     const monthAlternation = MONTH_NAMES.map((n) => `${n}|${n.slice(0, 3)}`).join('|');
+    // GMT offset is now CAPTURED (sign + HH:MM), not just matched as a bare
+    // literal -- see parseCaptureDateMs' 2026-09-24 header for the bug this
+    // fixes (the offset was being read past but silently discarded, so
+    // "6:27 PM GMT-04:00" -- 10:27 PM UTC -- parsed as 6:27 PM UTC, 4 hours
+    // off).
     capturedDatePatternCache = new RegExp(
-      `(${monthAlternation})\\s+(\\d{1,2})(?:,\\s*(\\d{4}))?\\s+[A-Za-z]+,\\s*(\\d{1,2}):(\\d{2})\\s*(AM|PM)\\s*GMT`,
+      `(${monthAlternation})\\s+(\\d{1,2})(?:,\\s*(\\d{4}))?\\s+[A-Za-z]+,\\s*(\\d{1,2}):(\\d{2})\\s*(AM|PM)\\s*GMT([+-])(\\d{2}):(\\d{2})`,
       'i'
     );
   }
@@ -91,8 +96,8 @@ function captureDatePattern() {
 }
 
 /**
- * Parse a wall-clock-as-UTC capture date/time out of the panel's raw text --
- * added 2026-09-22 for the TIMELINE walk's stop condition ONLY (worker.mjs's
+ * Parse a REAL UTC capture instant out of the panel's raw text -- added
+ * 2026-09-22 for the TIMELINE walk's stop condition ONLY (worker.mjs's
  * walkTimeline: "have we scrolled past the oldest pending job's date yet?").
  * NEVER used for matching, which stays filename-only (findMatchingJob) --
  * this field only decides when to stop LOOKING, so a wrong estimate costs
@@ -101,6 +106,17 @@ function captureDatePattern() {
  * See captureDatePattern's own header for the exact shape this expects and
  * what's still UNVERIFIED LIVE about it (the older-year "Mon D, YYYY" form).
  *
+ * TIMEZONE FIX (2026-09-24, live finding): an earlier version of this
+ * function matched the trailing "GMT[+-]HH:MM" as a bare literal and threw
+ * the offset away entirely, treating the parsed LOCAL wall-clock reading as
+ * if it were already UTC -- "6:27 PM GMT-04:00" (a real capture, 22:27
+ * UTC) parsed as 18:27 UTC, 4 hours off. The offset is now captured and
+ * applied properly: local wall-clock time is UTC PLUS the offset (so a
+ * negative offset like -04:00 means UTC is LATER than the local reading --
+ * UTC = local - offset), which is what standard date-header notation
+ * always means and matches the corrected example above (18:27 - (-4h) =
+ * 22:27).
+ *
  * `nowMs` (real epoch ms, defaulting to Date.now() at the parsePanelText
  * call site) is needed because the panel OMITS the year for the current
  * calendar year (verified live) -- when no year is present in the text,
@@ -108,7 +124,12 @@ function captureDatePattern() {
  * FUTURE relative to `nowMs` (e.g. today is Sep 23 and the photo reads
  * "Dec 25" with no year -- Google would never show a genuinely future
  * capture date with the year omitted), falls back to the PREVIOUS year
- * instead. A year embedded in the text is always trusted as-is.
+ * instead. The year-guess itself is evaluated in UTC terms (before the
+ * offset shift) since `nowMs` is a real instant either way -- a capture
+ * within a few hours of a year boundary could theoretically land on the
+ * "wrong" side of this heuristic, but that only ever costs the stop
+ * condition a slightly early/late decision, never a wrong trash. A year
+ * embedded in the text is always trusted as-is, offset applied the same way.
  *
  * Returns null (never throws, never guesses) when the pattern doesn't match
  * at all, or when the matched "month" text isn't a real month name --
@@ -118,17 +139,19 @@ function captureDatePattern() {
 function parseCaptureDateMs(text, nowMs) {
   const m = captureDatePattern().exec(text);
   if (!m) return null;
-  const [, monthName, day, year, hourStr, minute, ampm] = m;
+  const [, monthName, day, year, hourStr, minute, ampm, offsetSign, offsetHours, offsetMinutes] = m;
   const monthIdx = MONTH_INDEX.get(monthName.toLowerCase());
   if (monthIdx == null) return null; // not a real month name -- a coincidental match, refuse rather than guess
   let hour = Number(hourStr) % 12;
   if (/PM/i.test(ampm)) hour += 12;
+  const offsetMs = (offsetSign === '-' ? -1 : 1) * (Number(offsetHours) * 60 + Number(offsetMinutes)) * 60 * 1000;
+  const localToUtcMs = (y) => Date.UTC(y, monthIdx, Number(day), hour, Number(minute)) - offsetMs;
   if (year != null) {
-    return Date.UTC(Number(year), monthIdx, Number(day), hour, Number(minute));
+    return localToUtcMs(Number(year));
   }
   const currentYear = new Date(nowMs).getUTCFullYear();
-  const candidateMs = Date.UTC(currentYear, monthIdx, Number(day), hour, Number(minute));
-  return candidateMs > nowMs ? Date.UTC(currentYear - 1, monthIdx, Number(day), hour, Number(minute)) : candidateMs;
+  const candidateMs = localToUtcMs(currentYear);
+  return candidateMs > nowMs ? localToUtcMs(currentYear - 1) : candidateMs;
 }
 
 /**
