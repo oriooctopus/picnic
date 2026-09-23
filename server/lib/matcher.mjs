@@ -29,6 +29,13 @@ const EXTENSIONS = 'HEIC|JPG|JPEG|PNG|MOV|MP4';
 const FILENAME_PATTERNS = [
   new RegExp(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.(?:${EXTENSIONS})`, 'gi'),
   new RegExp(`IMG_\\d+\\.(?:${EXTENSIONS})`, 'gi'),
+  // Any other name, anchored to a WHOLE LINE. The live panel's innerText puts
+  // each field on its own line, so a line that is nothing but a name ending
+  // in a media extension is unambiguous. 2026-09-23: without this, names
+  // like IMG_6732_Original.HEIC, lp_image_Original.HEIC and
+  // RecordIt-1785788960.mp4 parsed as "no filename", and 186 photos per walk
+  // were logged UNREADABLE -- including every job the walk never matched.
+  new RegExp(`^[^\\n/\\\\]{1,200}\\.(?:${EXTENSIONS})$`, 'gim'),
 ];
 
 const DIMS_PATTERN = /(\d{3,5})\s*[×x]\s*(\d{3,5})/g;

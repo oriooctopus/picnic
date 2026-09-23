@@ -496,3 +496,16 @@ test('planAriaMatches: refuses (null) when the offset never calibrates', () => {
   const plan = planAriaMatches([ARIA_JOBS[0]], [{ ariaLabel: ARIA_DECOY }]);
   assert.equal(plan, null);
 });
+
+test('parsePanelText reads any whole-line filename, not just IMG_#### and UUID names (2026-09-23 live: these were logged UNREADABLE)', () => {
+  const panel = (name) => `Details\nMar 29\nSun, 12:32 PM\nGMT-04:00\nApple iPhone 13 Pro\nƒ/2.2\n1/60\n${name}\n7.2MP\n2316 × 3088\nUploaded from iOS device`;
+  for (const name of ['IMG_6732_Original.HEIC', 'lp_image_Original.HEIC', 'RecordIt-1785788960.mp4']) {
+    assert.equal(parsePanelText(panel(name)).filename, name);
+  }
+});
+
+test('an edited-name job matches the panel of the same edited name', () => {
+  const job = { filename: 'IMG_6732_Original.HEIC', creationDate: '2026-03-29T16:32:28Z', pixelWidth: 2316, pixelHeight: 3088 };
+  const parsed = parsePanelText('Details\nMar 29, 2026\nSun, 12:32 PM\nGMT-04:00\nIMG_6732_Original.HEIC\n7.2MP\n2316 × 3088');
+  assert.equal(findMatchingJob([job], parsed), job);
+});
