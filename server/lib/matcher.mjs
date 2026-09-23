@@ -116,13 +116,32 @@ export function dimensionsAgree(job, parsed) {
 }
 
 /**
- * Find the single unmatched job that this parsed photo confirms (exact
- * filename AND dimensions-agree-in-either-orientation). Zero or more than
- * one candidate job agreeing => null, never guess.
+ * Find the single unmatched job that this parsed photo confirms.
+ *
+ * FILENAME ONLY as of 2026-09-22 -- dimensions used to gate this too, but
+ * that produced false misses two ways, confirmed live:
+ *   1. An EDITED photo (e.g. cropped) reports its NEW pixel size on the
+ *      phone side (job IMG_6636_Original.JPG: 1170x1111), while Google
+ *      Photos still holds whatever size it has for the same photo -- the
+ *      edit is real, the photo is still the same file, dimensions just
+ *      disagree for a reason that has nothing to do with identity.
+ *   2. openInfoPanelOnce polls up to 15s for the panel to render a
+ *      dimensions string before giving up entirely (job IMG_6636 failed
+ *      live with "info panel never produced dimensions text after 15s" --
+ *      see worker.mjs) -- sometimes it just never renders, taking a
+ *      genuinely matchable photo down with it.
+ * Search is already restricted to the job's date +/-1 day (runDateGroups),
+ * and within that window IMG_#### / UUID filenames are unique, so filename
+ * alone is sufficient identity. dimensionsAgree() is kept (still used to
+ * annotate `comparison` when dimensions happen to be available -- see
+ * confirmAndTrash) but no longer gates a match.
+ *
+ * The "never guess" rule is unchanged: zero or more than one candidate job
+ * agreeing on filename => null.
  */
 export function findMatchingJob(jobs, parsed) {
   if (!parsed || !parsed.filename) return null;
-  const matches = jobs.filter((job) => filenamesAgree(job.filename, parsed.filename) && dimensionsAgree(job, parsed));
+  const matches = jobs.filter((job) => filenamesAgree(job.filename, parsed.filename));
   return matches.length === 1 ? matches[0] : null;
 }
 

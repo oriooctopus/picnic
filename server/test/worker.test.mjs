@@ -29,6 +29,8 @@ const {
   parseArgs,
   stealthDelayRange,
   exitAfterSettled,
+  isTrashConfirmed,
+  moveToTrash,
 } = await import('../worker.mjs');
 
 async function withTempQueue(fn) {
@@ -261,23 +263,26 @@ test('two copies of the same job on one date (identical filename+dims, different
   });
 });
 
-test('same filename, DIFFERENT dimensions on the same date: never swept up as a duplicate copy', async () => {
+// REPLACED 2026-09-22: matching dropped the dimensions gate entirely (see
+// matcher.mjs's findMatchingJob header) -- a "same filename, different
+// dimensions" tile is no longer distinguishable from a genuine duplicate
+// copy (the same case an edited photo's differing size produces, which is
+// exactly the false-miss this change fixes). The brief accepts that
+// filenames are unique within the +/-1-day search window in practice, so
+// this scenario is no longer a case the worker tries to disambiguate --
+// both tiles now confirm the same job and both get trashed, same as any
+// other real duplicate copy (see the 'real duplicate library items' tests
+// above this one).
+test('same filename, different dimensions on the same date: now trashed as a duplicate copy (dimensions no longer gate identity)', async () => {
   await withTempQueue(async (queue) => {
     const { job } = queue.enqueue(IMG_1433_JOB); // 2316x3088
-    const labels = [
-      'Photo - Portrait - tile-A (real copy)',
-      'Photo - Portrait - tile-B (same filename, different photo entirely)',
-    ];
+    const labels = ['Photo - Portrait - tile-A', 'Photo - Portrait - tile-B (same filename, different dims)'];
     const page = createFakePage({
       searchResults: { 'August 5, 2026': labels.map((ariaLabel) => ({ ariaLabel })) },
       panelTextByLabel: {
         'August 5, 2026': {
-          [labels[0]]: IMG_1433_BLOCK, // 2316x3088 -- the real match
-          // Same filename, but different pixel dimensions (neither straight
-          // nor transposed match) -- e.g. a filename collision from a reset
-          // camera counter. dimensionsAgree() must refuse this, exactly the
-          // same "never guess" rule that already governs the FIRST match.
-          [labels[1]]: panelBlock('IMG_1433.HEIC', 1200, 1600),
+          [labels[0]]: IMG_1433_BLOCK, // 2316x3088
+          [labels[1]]: panelBlock('IMG_1433.HEIC', 1200, 1600), // same filename, disagreeing dims
         },
       },
     });
@@ -287,9 +292,9 @@ test('same filename, DIFFERENT dimensions on the same date: never swept up as a 
     assert.equal(stillUnmatched.length, 0);
     const record = queue.getById(job.id);
     assert.equal(record.status, 'trashed');
-    assert.equal(record.copiesTrashed, 1, 'the dimension-mismatched tile must NOT be counted as a second copy');
+    assert.equal(record.copiesTrashed, 2, 'both filename-matching tiles are trashed as copies of the same job');
     const deletions = page.log.filter((l) => l === 'key:#').length;
-    assert.equal(deletions, 1, 'only the genuinely matching tile is ever trashed');
+    assert.equal(deletions, 2, 'both tiles get a trash attempt');
   });
 });
 
@@ -579,6 +584,104 @@ test('a trash action that does not take is recorded as needs_review, never trash
   });
 });
 
+// --- isTrashConfirmed: pure decision, and the exact false positive it fixes ---
+//
+// Confirmed live 2026-09-22: job B4D8DDA7-880E-4641-BF36-69727D7F98AE_Original.JPG
+// was recorded 'trashed' (3 copies) but was STILL PRESENT in Google Photos.
+// moveToTrash's old settled() counted a mere panel-text change/empty as proof
+// of a trash, with no requirement that the "Move to trash" confirm dialog was
+// ever actually shown and clicked. isTrashConfirmed is the fix: dialogConfirmed
+// is now a hard requirement, not just one of several optional signals.
+
+test('isTrashConfirmed: no confirm dialog shown, panel text merely changed -> NOT confirmed (the exact B4D8DDA7... false positive)', () => {
+  assert.equal(isTrashConfirmed({ dialogConfirmed: false, toastShown: false, panelChanged: true }), false);
+});
+
+test('isTrashConfirmed: no confirm dialog shown, even with a "moved to trash" toast somehow visible -> NOT confirmed', () => {
+  // Belt-and-suspenders: the dialog requirement is unconditional, not just
+  // the common case. A toast with no dialog is exactly as untrustworthy as a
+  // panel change with no dialog -- see this function's header.
+  assert.equal(isTrashConfirmed({ dialogConfirmed: false, toastShown: true, panelChanged: false }), false);
+});
+
+test('isTrashConfirmed: dialog shown and clicked, followed by the "moved to trash" toast -> confirmed', () => {
+  assert.equal(isTrashConfirmed({ dialogConfirmed: true, toastShown: true, panelChanged: false }), true);
+});
+
+test('isTrashConfirmed: dialog shown and clicked, followed by the panel moving off this photo -> confirmed', () => {
+  assert.equal(isTrashConfirmed({ dialogConfirmed: true, toastShown: false, panelChanged: true }), true);
+});
+
+test('isTrashConfirmed: dialog shown and clicked, but NEITHER a toast nor a panel change followed -> NOT confirmed (dialog click alone is not proof either)', () => {
+  assert.equal(isTrashConfirmed({ dialogConfirmed: true, toastShown: false, panelChanged: false }), false);
+});
+
+// Direct unit tests against the real moveToTrash(), at the seam it actually
+// makes its decision -- a minimal hand-built page mock rather than the full
+// createFakePage() harness, so the confirm-dialog's visibility is the ONE
+// thing under the test's control (createFakePage's higher-level fixtures
+// above prove the same fix through the full processDateGroup path, but
+// can't isolate "the dialog is never visible, no matter what the panel text
+// does" as directly as this).
+
+test('moveToTrash: confirm dialog NEVER becomes visible (neither the \'#\' shortcut nor the toolbar fallback show one) -> not confirmed, regardless of what the panel text does', async () => {
+  // The panel text changing here (even wildly, on every poll) must not
+  // matter -- this IS the B4D8DDA7... shape: a view that moves on for
+  // reasons that have nothing to do with a dialog ever having been shown.
+  let evaluateCalls = 0;
+  const page = {
+    keyboard: { press: async () => {} },
+    locator: () => ({
+      first: () => ({ isVisible: async () => false, click: async () => {} }),
+      all: async () => [], // no visible toolbar trash control either
+    }),
+    evaluate: async () => {
+      evaluateCalls += 1;
+      return `panel text that changes every read #${evaluateCalls}`;
+    },
+  };
+
+  const confirmed = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
+
+  assert.equal(confirmed, false, 'a confirm dialog that never appears must never read as a confirmed trash');
+});
+
+test('moveToTrash: confirm dialog shown and clicked, followed by the "moved to trash" toast -> confirmed', async () => {
+  let dialogVisible = false;
+  let toastVisible = false;
+  const page = {
+    keyboard: {
+      press: async (key) => {
+        if (key === '#') dialogVisible = true; // '#' opens the confirm dialog
+      },
+    },
+    locator: (selector) => ({
+      first: () => ({
+        isVisible: async () => {
+          if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) return dialogVisible;
+          if (/moved to \(trash\|bin\)/i.test(selector)) return toastVisible;
+          return false;
+        },
+        click: async () => {
+          // Clicking the dialog's own confirm button is what actually
+          // performs the trash and surfaces the toast -- mirrors the real
+          // two-step flow (dialog appears -> click -> Google shows a toast).
+          if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) {
+            dialogVisible = false;
+            toastVisible = true;
+          }
+        },
+      }),
+      all: async () => [],
+    }),
+    evaluate: async () => '', // panel text never changes -- the toast alone must be sufficient
+  };
+
+  const confirmed = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
+
+  assert.equal(confirmed, true, 'a genuinely shown-and-clicked dialog followed by the toast must confirm');
+});
+
 // REWRITTEN 2026-09-01 for the in-photo-view traversal: "how many tiles were
 // opened" is no longer the right fingerprint (only the first tile is ever
 // grid-clicked -- see the two tests above), so this now checks how many
@@ -591,7 +694,12 @@ test('hitting MAX_STEPS_PER_DATE is logged as ABANDONED, distinct from a genuine
     const { job: bigJob } = queue.enqueue({ ...IMG_1433_JOB, filename: 'IMG_NOMATCH.HEIC' });
     const bigLabels = Array.from({ length: MAX_STEPS_PER_DATE + 10 }, (_, i) => `Photo - Portrait - tile-${i}`);
     const bigPanels = {};
-    for (const label of bigLabels) bigPanels[label] = panelBlock(`${label}.HEIC`, 1000, 1000);
+    // Real (parseable) IMG_#### filenames, not the raw tile label -- openInfoPanelOnce's
+    // readiness now polls for a FILENAME (parsePanelText's FILENAME_PATTERNS, "IMG_\d+" or
+    // a UUID -- see its 2026-09-22 header), which the label text itself never matches, so a
+    // panel whose only "filename" is the label text would (correctly, but not what this test
+    // is exercising) time out before ever reaching the MAX_STEPS_PER_DATE bound.
+    for (const [i, label] of bigLabels.entries()) bigPanels[label] = panelBlock(`IMG_9${String(i).padStart(4, '0')}.HEIC`, 1000, 1000);
     const bigPage = createFakePage({
       searchResults: { 'August 5, 2026': bigLabels.map((ariaLabel) => ({ ariaLabel })) },
       panelTextByLabel: { 'August 5, 2026': bigPanels },
@@ -617,7 +725,8 @@ test('hitting MAX_STEPS_PER_DATE is logged as ABANDONED, distinct from a genuine
     const { job: smallJob } = queue.enqueue({ ...IMG_1433_JOB, filename: 'IMG_ALSO_NOMATCH.HEIC' });
     const smallLabels = ['Photo - Portrait - tile-a', 'Photo - Portrait - tile-b', 'Photo - Portrait - tile-c'];
     const smallPanels = {};
-    for (const label of smallLabels) smallPanels[label] = panelBlock(`${label}.HEIC`, 1000, 1000);
+    const smallFilenames = ['IMG_8001.HEIC', 'IMG_8002.HEIC', 'IMG_8003.HEIC']; // see the big-day case's comment above
+    smallLabels.forEach((label, i) => (smallPanels[label] = panelBlock(smallFilenames[i], 1000, 1000)));
     const smallPage = createFakePage({
       searchResults: { 'August 6, 2026': smallLabels.map((ariaLabel) => ({ ariaLabel })) },
       panelTextByLabel: { 'August 6, 2026': smallPanels },
@@ -681,7 +790,7 @@ test('runDateGroups: a real (non-page-closed) throw mid-date must not overwrite 
     // Two jobs in ONE date group. job1's tile opens and matches cleanly and
     // gets trashed; job2's tile has no panelTextByLabel entry at all, so
     // openInfoPanelOnce (called per-tile under walk='grid') spins past its
-    // deadline and throws "info panel never produced dimensions text" --
+    // deadline and throws "info panel never produced filename text" --
     // a real mid-group failure, not the page-closed path exercised above.
     const { job: job1 } = queue.enqueue(IMG_1433_JOB);
     const { job: job2 } = queue.enqueue(IMG_1441_JOB);
@@ -700,7 +809,7 @@ test('runDateGroups: a real (non-page-closed) throw mid-date must not overwrite 
 
     await assert.rejects(
       () => runDateGroups(page, groups, queue, { dryRun: false, walk: 'grid' }),
-      /info panel never produced dimensions text/
+      /info panel never produced filename text/
     );
 
     // The bug: runDateGroups' catch block used to mark every job in the
@@ -958,7 +1067,7 @@ test('lost-keystroke regression: the info panel opens even when the first "i" pr
 
     await assert.rejects(
       () => processDateGroup(neverPage, '2026-08-05', [neverJob], queue, { dryRun: false }),
-      /info panel never produced dimensions text/,
+      /info panel never produced filename text/,
       'must throw rather than hang when the panel genuinely never opens'
     );
   });
@@ -1294,9 +1403,11 @@ test('the grid strategy walks EVERY tile on a virtualized date: the on-screen wi
     const REVEAL_BATCHES = 6; // 1 initial (searchResults) + 6 reveals = 7 total tiles
     const labels = Array.from({ length: REVEAL_BATCHES + 1 }, (_, i) => `Photo - Portrait - tile-${i}`);
     const panelTextByLabel = { 'August 5, 2026': {} };
-    for (const label of labels) {
-      panelTextByLabel['August 5, 2026'][label] = panelBlock(`${label}.HEIC`, 1000, 1000); // never matches IMG_NOMATCH.HEIC
-    }
+    // Real (parseable) IMG_#### filenames, not the raw tile label -- see the
+    // MAX_STEPS_PER_DATE test's identical comment above for why.
+    labels.forEach((label, i) => {
+      panelTextByLabel['August 5, 2026'][label] = panelBlock(`IMG_7${String(i).padStart(4, '0')}.HEIC`, 1000, 1000); // never matches IMG_NOMATCH.HEIC
+    });
 
     const page = createFakePage({
       searchResults: { 'August 5, 2026': [{ ariaLabel: labels[0] }] },

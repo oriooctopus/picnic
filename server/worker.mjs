@@ -34,11 +34,15 @@
  *      ("View next photo"'s keyboard equivalent), reading + parsing the
  *      panel at each stop. An early version of this worker did exactly this
  *      and walked 27 photos on one date in a single live run.
- *   6. A photo confirms a job when filename matches exactly AND dimensions
- *      agree (either orientation) — lib/matcher.mjs's findMatchingJob. This
- *      is the ONLY thing that ever authorises a trash — the aria pre-filter
- *      in step 4 only decides what's worth opening, never confirms a match
- *      by itself.
+ *   6. A photo confirms a job when its filename matches exactly (2026-09-22:
+ *      no longer gated on dimensions agreeing too — an edited photo reports
+ *      a different size on the phone than Google holds, and the info panel
+ *      sometimes never renders dimensions at all; date-window + filename is
+ *      unique enough on its own, see lib/matcher.mjs's findMatchingJob for
+ *      the full history) — lib/matcher.mjs's findMatchingJob. This is the
+ *      ONLY thing that ever authorises a trash — the aria pre-filter in step
+ *      4 only decides what's worth opening, never confirms a match by
+ *      itself.
  *   7. Because the job's creationDate is UTC and Google Photos displays
  *      local capture time, and the offset isn't known ahead of time, a
  *      date group's still-unmatched jobs get a second search on day-1 and
@@ -504,7 +508,14 @@ function tileLocatorFor(page, tile) {
  * the panel is shut, so its mere existence proves nothing.
  *
  * Readiness is therefore judged on CONTENT — poll until the panel actually
- * yields a dimensions string — rather than on any selector being visible.
+ * yields a FILENAME (2026-09-22: was a dimensions string, which produced a
+ * false hang -- job IMG_6636 failed live with "info panel never produced
+ * dimensions text after 15s" because the panel rendered a filename fine but
+ * never rendered dimensions at all. Matching is filename-only now
+ * (lib/matcher.mjs's findMatchingJob), so readiness must be judged on the
+ * same signal that actually authorises a match, not a stricter one that can
+ * block a photo the matcher no longer needs dimensions from) — rather than
+ * on any selector being visible.
  */
 async function openInfoPanelOnce(page) {
   await stealthDelay(500, 1500); // pure mimicry, off unless --slow
@@ -513,7 +524,7 @@ async function openInfoPanelOnce(page) {
   // is what broke the second date of the first successful walk. Only toggle it
   // when it is genuinely shut. Verified live 2026-09-01.
   const already = await readPanelText(page);
-  if (/\d{3,5}\s*[\u00d7x]\s*\d{3,5}/.test(already)) {
+  if (parsePanelText(already).filename) {
     await stealthDelay(400, 1200); // pure mimicry, off unless --slow
     return;
   }
@@ -530,16 +541,18 @@ async function openInfoPanelOnce(page) {
     .catch(() => {});
   await page.keyboard.press('i');
 
-  // Real correctness wait: poll until the panel actually yields dimensions
-  // text. The poll interval (pollDelay) stays fast regardless of --slow --
-  // it's a local content check, not a network action Google could see the
-  // cadence of.
+  // Real correctness wait: poll until the panel actually yields a FILENAME
+  // (2026-09-22: was a dimensions string -- see this function's header for
+  // why that produced a false 15s timeout on a photo whose panel never
+  // rendered dimensions but did render its filename). The poll interval
+  // (pollDelay) stays fast regardless of --slow -- it's a local content
+  // check, not a network action Google could see the cadence of.
   const deadline = Date.now() + (FAST_DELAYS ? 50 : 15000);
   let attempts = 0;
   while (Date.now() < deadline) {
     await pollDelay();
     const text = await readPanelText(page);
-    if (/\d{3,5}\s*[\u00d7x]\s*\d{3,5}/.test(text)) {
+    if (parsePanelText(text).filename) {
       await stealthDelay(800, 2000); // "dwell reading the panel" — pure mimicry, off unless --slow
       return;
     }
@@ -557,7 +570,7 @@ async function openInfoPanelOnce(page) {
       await button.click().catch(() => {});
     }
   }
-  throw new Error('info panel never produced dimensions text after 15s — selector/UI drift, stopping rather than guessing');
+  throw new Error('info panel never produced filename text after 15s — selector/UI drift, stopping rather than guessing');
 }
 
 async function readPanelText(page) {
@@ -567,17 +580,27 @@ async function readPanelText(page) {
   return await page.evaluate(() => {
     const DIMS = /\d{3,5}\s*[\u00d7x]\s*\d{3,5}/;
     const FILE = /[A-Za-z0-9._-]+\.(HEIC|JPG|JPEG|PNG|MOV|MP4)\b/i;
-    // Smallest element containing BOTH dimensions AND a filename. Taking the
+    const bySize = (a, b) => (a.innerText || '').length - (b.innerText || '').length;
+    const all = Array.from(document.querySelectorAll('div,c-wiz,aside'));
+    // Prefer the smallest element containing BOTH dimensions AND a filename
+    // when one exists (dimensions still get parsed/recorded when present --
+    // see confirmAndTrash's `comparison` -- even though matching itself is
+    // filename-only now, see matcher.mjs's findMatchingJob). Taking the
     // smallest element with dimensions alone (the earlier version) returned
     // just "7.2MP2316 x 3088" — no filename — so every photo parsed as a
     // non-match. Verified live 2026-09-01.
-    const hits = Array.from(document.querySelectorAll('div,c-wiz,aside'))
-      .filter((el) => {
-        const t = el.innerText || '';
-        return DIMS.test(t) && FILE.test(t);
-      })
-      .sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
-    return hits.length ? hits[0].innerText : '';
+    const both = all.filter((el) => {
+      const t = el.innerText || '';
+      return DIMS.test(t) && FILE.test(t);
+    });
+    if (both.length) return both.sort(bySize)[0].innerText;
+    // FALLBACK (2026-09-22): dimensions can legitimately never render at all
+    // -- job IMG_6636 failed live with "info panel never produced dimensions
+    // text after 15s" even though its filename was on screen the whole time.
+    // Matching no longer needs dimensions (matcher.mjs's findMatchingJob), so
+    // don't block a filename-only panel from ever being read.
+    const filenameOnly = all.filter((el) => FILE.test(el.innerText || ''));
+    return filenameOnly.length ? filenameOnly.sort(bySize)[0].innerText : '';
   }).catch(() => '');
 }
 
@@ -630,15 +653,36 @@ export function isPageClosedError(page, err) {
 }
 
 /**
+ * Pure decision: was a trash actually CONFIRMED? Exported for tests (the
+ * live moveToTrash below is the only caller, gathering these three booleans
+ * from the real page).
+ *
+ * 2026-09-22 FIX: `dialogConfirmed` is now REQUIRED, not just a hint --
+ * `toastShown`/`panelChanged` alone are not proof. Job
+ * B4D8DDA7-880E-4641-BF36-69727D7F98AE_Original.JPG was recorded 'trashed'
+ * (3 copies) but was still live in Google Photos: the old settled() returned
+ * true purely because the info panel's text changed/emptied, even though the
+ * "Move to trash" confirm dialog never actually appeared (and so nothing was
+ * ever really deleted). A toast or panel change can happen for reasons that
+ * have nothing to do with a trash succeeding (view navigating on its own,
+ * panel re-rendering) -- the CONFIRM DIALOG being shown and clicked is the
+ * one signal that ties directly to the destructive action itself.
+ */
+export function isTrashConfirmed({ dialogConfirmed, toastShown, panelChanged }) {
+  return Boolean(dialogConfirmed) && (Boolean(toastShown) || Boolean(panelChanged));
+}
+
+/**
  * Move the currently-open photo to trash via the UI. NEVER permanent-delete.
  *
- * Returns true only if the deletion was CONFIRMED. "Open info" and "View next
- * photo" both turned out to have hidden duplicates that make a .first() click
- * silently time out, so a click that merely resolves is not evidence the photo
- * was trashed — and a job wrongly marked "trashed" is one we would never
- * revisit. Confirm by the panel moving off this photo.
+ * Returns true only if the deletion was CONFIRMED -- see isTrashConfirmed's
+ * header for the 2026-09-22 fix and the false "trashed" it corrects. "Open
+ * info" and "View next photo" both turned out to have hidden duplicates that
+ * make a .first() click silently time out, so a click that merely resolves
+ * is not evidence the photo was trashed — and a job wrongly marked "trashed"
+ * is one we would never revisit.
  */
-async function moveToTrash(page, panelTextBefore) {
+export async function moveToTrash(page, panelTextBefore) {
   // Ordering matters, and this got it wrong twice:
   //  - '#' is Google Photos' own move-to-trash shortcut and is the ONLY path
   //    ever observed to actually delete (the verified IMG_1418.HEIC deletion
@@ -672,45 +716,63 @@ async function moveToTrash(page, panelTextBefore) {
     return true;
   };
 
+  // Polls for the two POST-dialog signals (never authoritative on their own
+  // -- see isTrashConfirmed) and reports which one (if either) fired, so the
+  // caller can feed both into the actual confirmation decision.
   const settled = async () => {
     const deadline = Date.now() + (FAST_DELAYS ? 50 : 12000);
     while (Date.now() < deadline) {
       await pollDelay();
-      const toast = await page.locator('text=/moved to (trash|bin)/i').first().isVisible().catch(() => false);
-      if (toast) return true;
+      const toastShown = await page.locator('text=/moved to (trash|bin)/i').first().isVisible().catch(() => false);
+      if (toastShown) return { toastShown: true, panelChanged: false };
       const now = await readPanelText(page);
-      if (now && now !== panelTextBefore) return true;
-      if (!now && panelTextBefore) return true;
+      const panelChanged = (Boolean(now) && now !== panelTextBefore) || (!now && Boolean(panelTextBefore));
+      if (panelChanged) return { toastShown: false, panelChanged: true };
     }
-    return false;
+    return { toastShown: false, panelChanged: false };
   };
 
   await stealthDelay(500, 2000); // pure mimicry, off unless --slow
   if (VERBOSE) console.log("    trash: pressing '#'");
   await page.keyboard.press('#');
-  const tookDialog = await confirmDialog();
-  if (VERBOSE) console.log(`    trash: confirmation dialog ${tookDialog ? 'accepted' : 'not shown'}`);
-  if (await settled()) return true;
+  // Sticky across both attempts below: once EITHER path (the '#' shortcut or
+  // the toolbar-click fallback) actually shows and clicks the confirm
+  // dialog, that fact must not be lost even if the OTHER path's dialog
+  // attempt later comes back empty (e.g. the fallback fires after the photo
+  // is already gone, so its own confirmDialog() naturally finds nothing).
+  let dialogConfirmed = await confirmDialog();
+  if (VERBOSE) console.log(`    trash: confirmation dialog ${dialogConfirmed ? 'accepted' : 'not shown'}`);
+  if (dialogConfirmed) {
+    const outcome = await settled();
+    if (isTrashConfirmed({ dialogConfirmed, ...outcome })) return true;
+  }
 
   // Fallback: only now, with no dialog scrim in the way, try the control.
+  // Same rule applies here -- clicking the control is not itself a trash,
+  // only its own confirm dialog appearing and being clicked counts.
   const candidates = await page.locator(TRASH_SELECTOR).all();
   for (const candidate of candidates) {
     if (await candidate.isVisible().catch(() => false)) {
       if (VERBOSE) console.log('    trash: falling back to clicking the visible control');
       await candidate.click();
-      await confirmDialog();
+      if (await confirmDialog()) dialogConfirmed = true;
       break;
     }
   }
-  return await settled();
+  // No confirm dialog on EITHER path -- refuse regardless of any panel/toast
+  // signal. This is exactly the B4D8DDA7... false positive: a panel text
+  // change with no dialog ever shown must never read as confirmed.
+  if (!dialogConfirmed) return false;
+  const outcome = await settled();
+  return isTrashConfirmed({ dialogConfirmed, ...outcome });
 }
 
 
 /**
  * Shared by the aria fast path and the exhaustive walk below: the currently
- * open photo's panel has just been read and parsed, and (by exact filename +
- * dimensions -- lib/matcher.mjs's findMatchingJob, already checked by the
- * caller) confirmed to be `job`'s photo. Live only, trashes it and records
+ * open photo's panel has just been read and parsed, and (by exact filename --
+ * lib/matcher.mjs's findMatchingJob, already checked by the caller) confirmed
+ * to be `job`'s photo. Live only, trashes it and records
  * the outcome on the queue; dry-run only logs. This is the ONLY place that
  * ever calls moveToTrash -- whether the tile got opened via the aria
  * pre-filter or the exhaustive walk makes no difference to how a match gets
@@ -724,9 +786,9 @@ async function moveToTrash(page, panelTextBefore) {
  * earlier in this same date's walk (tracked by the caller's `matchedJobs`
  * set) and this is a further copy of it, found at a DIFFERENT tile. The
  * "never guess" rule is unchanged either way -- the caller only reaches here
- * after findMatchingJob already confirmed this exact job's filename+dims
- * against the parsed panel, whether that job came from `remaining` (first
- * copy) or `matchedJobs` (a further one).
+ * after findMatchingJob already confirmed this exact job's filename against
+ * the parsed panel, whether that job came from `remaining` (first copy) or
+ * `matchedJobs` (a further one).
  *
  * A duplicate trash must NOT overwrite the first copy's `comparison`/
  * `attempts` bookkeeping (that recorded the confirmation that made the job
@@ -931,9 +993,9 @@ async function walkPhotoView(page, dateFirstTile, unmatchedJobs, query, queue, d
     }
     // Check this photo against unmatched jobs AND jobs already matched
     // earlier this date -- a hit against the latter is a further copy of a
-    // job we've already confirmed once (findMatchingJob still requires
-    // filename+dims to agree exactly; "already matched" only widens WHICH
-    // jobs we compare against, never how a match is confirmed).
+    // job we've already confirmed once (findMatchingJob still requires the
+    // filename to agree exactly; "already matched" only widens WHICH jobs we
+    // compare against, never how a match is confirmed).
     const candidateJobs = matchedJobs.size > 0 ? [...remaining, ...matchedJobs] : remaining;
     const job = findMatchingJob(candidateJobs, parsed);
     let advancedByDelete = false;
@@ -1477,14 +1539,14 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = '
 
     for (const job of unmatched) {
       if (dryRun) {
-        console.log(`[dry-run needs_review] ${job.filename}: no filename+dimensions match for ${dateStr} (+/-1 day)`);
+        console.log(`[dry-run needs_review] ${job.filename}: no filename match for ${dateStr} (+/-1 day)`);
       } else {
         queue.update(job.id, {
           status: 'needs_review',
-          comparison: { reason: `no filename+dimensions match for ${dateStr} (+/-1 day)` },
+          comparison: { reason: `no filename match for ${dateStr} (+/-1 day)` },
           attempts: job.attempts + 1,
         });
-        console.log(`[needs_review] ${job.filename}: no filename+dimensions match for ${dateStr} (+/-1 day)`);
+        console.log(`[needs_review] ${job.filename}: no filename match for ${dateStr} (+/-1 day)`);
       }
     }
     await stealthDelay(PACE_MS_MIN, PACE_MS_MAX); // pace between date groups — pure mimicry, off unless --slow

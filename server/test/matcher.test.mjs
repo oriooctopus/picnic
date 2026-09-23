@@ -135,9 +135,42 @@ test('findMatchingJob: filename mismatch never matches, regardless of dimensions
   assert.equal(findMatchingJob(jobs, parsed), null);
 });
 
-test('findMatchingJob: filename matches but dimensions disagree -> no match', () => {
-  const jobs = [{ id: 'a', filename: 'IMG_1433.HEIC', pixelWidth: 2316, pixelHeight: 3088 }];
-  const parsed = { filename: 'IMG_1433.HEIC', pixelWidth: 100, pixelHeight: 100 };
+// 2026-09-22: dimensions no longer gate a match (see findMatchingJob's doc
+// comment) -- a filename+dims-disagree case is now exactly the "edited
+// photo" case below, and correctly DOES match.
+
+test('findMatchingJob: an edited photo (phone reports the cropped size, Google holds a different size) still matches by filename alone', () => {
+  // Confirmed live 2026-09-22: job IMG_6636_Original.JPG carries the phone's
+  // post-crop size (1170x1111); the panel read back from Google Photos for
+  // the same photo showed 1170x2532 (Google's stored size, pre-crop). Same
+  // photo, disagreeing dimensions -- filename is what actually identifies it.
+  const jobs = [{ id: 'a', filename: 'IMG_6636_Original.JPG', pixelWidth: 1170, pixelHeight: 1111 }];
+  const parsed = { filename: 'IMG_6636.JPG', pixelWidth: 1170, pixelHeight: 2532 };
+  assert.equal(findMatchingJob(jobs, parsed)?.id, 'a');
+});
+
+test('findMatchingJob: a panel with no dimensions at all (info panel never rendered them) still matches by filename', () => {
+  // Confirmed live 2026-09-22: job IMG_6636 failed with "info panel never
+  // produced dimensions text after 15s" -- the panel legitimately never
+  // renders a dimensions string for some photos. Matching must not depend
+  // on a signal that can be permanently absent.
+  const jobs = [{ id: 'a', filename: 'IMG_6636.JPG', pixelWidth: 1170, pixelHeight: 1111 }];
+  const parsed = { filename: 'IMG_6636.JPG', pixelWidth: null, pixelHeight: null };
+  assert.equal(findMatchingJob(jobs, parsed)?.id, 'a');
+});
+
+test('findMatchingJob: two queued jobs sharing a filename on the same date window remain ambiguous -> no match, even though only one filename is on the panel', () => {
+  // The "never guess" rule survives dropping the dimensions gate: if two
+  // DISTINCT jobs in the candidate set both carry the panel's filename
+  // (e.g. a burst re-import, or two of Oliver's real duplicate library
+  // items queued as separate jobs), that is still 0-or-many-candidates
+  // ambiguity, not a match -- dimensions used to help disambiguate this,
+  // filename-only can't, so it must refuse exactly like before.
+  const jobs = [
+    { id: 'a', filename: 'IMG_1433.HEIC', pixelWidth: 2316, pixelHeight: 3088 },
+    { id: 'b', filename: 'IMG_1433.HEIC', pixelWidth: 1170, pixelHeight: 2532 },
+  ];
+  const parsed = { filename: 'IMG_1433.HEIC', pixelWidth: 2316, pixelHeight: 3088 };
   assert.equal(findMatchingJob(jobs, parsed), null);
 });
 

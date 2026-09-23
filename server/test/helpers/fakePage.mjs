@@ -441,7 +441,8 @@ function advanceToNextTile(page) {
  *   infoButtonFound?: boolean,       // whether "Open info"/"Close info" controls resolve at all
  *   infoButtonVisible?: boolean,     // whether the "Open info" fallback button is visible
  *   trashButtonVisible?: boolean,    // default true
- *   swallowTrashShortcut?: boolean,  // "#" keyboard fallback does nothing (models an unconfirmed trash)
+ *   swallowTrashShortcut?: boolean,  // "#" keyboard fallback does nothing at all -- no dialog, no trash (falls through to the toolbar-click fallback)
+ *   trashDialogNeverAppears?: boolean, // the toolbar trash-control CLICK resolves but its confirm dialog never renders -- models the confirmed-live B4D8DDA7... false positive (moveToTrash's 2026-09-22 fix)
  *   searchBoxHiddenUntilEscape?: boolean,
  *   closeAfterTiles?: number,        // browser tab "closes" right after this many tiles have been opened, across the whole run
  *   staleTileClickTargets?: Record<string, string>, // ariaLabel -> ariaLabel a POSITIONAL tile.locator.click() actually lands on instead (models live re-render drift; the identity-scoped locator is immune -- see FakeTileLink.click())
@@ -474,6 +475,7 @@ export function createFakePage(config = {}) {
     escapePresses: 0,
     infoPressesSwallowed: 0, // count of "i" presses dropped so far, capped by config.swallowInfoPressesCount
     justTrashedToastVisible: false, // see performTrash() -- flashes true for exactly one isVisible() read after a trash
+    dialogOpen: false, // the "Move to trash"/"Delete"/"Move to bin" confirm dialog -- see the '#' key handler's 2026-09-22 header
     _closed: false,
     isClosed() {
       return page._closed === true;
@@ -506,7 +508,16 @@ export function createFakePage(config = {}) {
             page.infoPanelOpen = !page.infoPanelOpen;
           }
         }
-        if (key === '#' && !page.config.swallowTrashShortcut) performTrash(page);
+        // 2026-09-22: '#' now only OPENS the confirm dialog -- it no longer
+        // trashes directly. This mirrors the live two-step flow moveToTrash()
+        // drives (press '#' -> dialog appears -> click its confirm button),
+        // which is exactly the step the B4D8DDA7... false-positive skipped:
+        // the OLD fake (like the old worker.mjs bug) let '#' alone count as a
+        // trash, so no fixture could ever exercise "dialog never appeared".
+        // `swallowTrashShortcut` keeps its existing meaning (the shortcut
+        // does nothing at all -- worker.mjs falls through to the toolbar
+        // click fallback, whose own dialog is modelled separately below).
+        if (key === '#' && !page.config.swallowTrashShortcut) page.dialogOpen = true;
         if (key === 'ArrowRight') advanceToNextTile(page);
         if (key === 'Enter') {
           page.activeQuery = page.pendingTypedText ?? null;
@@ -617,7 +628,10 @@ export function createFakePage(config = {}) {
         return hasNextPhoto(page) ? 1 : 0;
       }
       if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) {
-        return 0; // no confirmation dialog in the fake UI
+        // 2026-09-22: the confirm dialog is now a real modelled state
+        // (page.dialogOpen), not permanently absent -- see the '#' key
+        // handler's header for why.
+        return page.dialogOpen ? 1 : 0;
       }
       return 0;
     },
@@ -699,11 +713,26 @@ export function createFakePage(config = {}) {
         // dialog covering the toolbar).
         return photoOpen(page) && page.config.trashButtonVisible !== false;
       }
+      if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) {
+        // The confirm dialog's own button -- see the '#'/onClick handlers'
+        // 2026-09-22 header for why this is now a real modelled state.
+        return Boolean(page.dialogOpen);
+      }
       return false;
     },
     async onClick(selector) {
       if (/aria-label="Open info"/i.test(selector)) page.infoPanelOpen = true;
-      if (/aria-label="Move to trash"/i.test(selector)) performTrash(page);
+      // Toolbar fallback click ALSO only opens the dialog now -- see the '#'
+      // handler's comment above. `trashDialogNeverAppears` models the
+      // confirmed-live false positive (job B4D8DDA7...): the click resolves
+      // (so moveToTrash's fallback loop doesn't error) but Google genuinely
+      // never renders a confirm dialog, so nothing should ever count as
+      // trashed via this path either.
+      if (/aria-label="Move to trash"/i.test(selector) && !page.config.trashDialogNeverAppears) page.dialogOpen = true;
+      if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector) && page.dialogOpen) {
+        page.dialogOpen = false;
+        performTrash(page);
+      }
     },
   };
   return page;
