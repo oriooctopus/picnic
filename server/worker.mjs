@@ -97,6 +97,7 @@ import {
   dedupeTilesByIdentity,
   tileIdentity,
   planAriaMatches,
+  parseTileAriaLabel,
 } from './lib/matcher.mjs';
 
 const QUEUE_PATH = process.env.PICNIC_QUEUE_PATH || join(homedir(), '.local/share/picnic/queue.jsonl');
@@ -1985,6 +1986,163 @@ export async function advanceTimelinePhotoView(page, currentText, logPrefix = ''
   return null;
 }
 
+// -- ROUND 5 (2026-09-25 live finding) --------------------------------------
+// Live full run of 9d81e6c: 457 photos walked cleanly (Sep 22 -> Aug 28),
+// then advancing hard-stopped exactly like advanceTimelinePhotoView's own
+// "genuinely at the end" signal -- except pending jobs go back to 2026-03-11,
+// nowhere near Aug 28. An earlier run died the same way at ~449 photos. The
+// consistent ~450 across two independent runs (not the true end, not a
+// random flake) is the signature of a LOADED-content limit: the photo
+// viewer can only ArrowRight through photos the underlying timeline grid has
+// actually MOUNTED, which is however many tiles loaded when the walk opened
+// its first tile (~1 month's worth) -- exactly like the OLD virtualized
+// grid-scroll design's own limit (see walkTimeline's header, "STRATEGY"
+// point 1's history), just relocated from the grid to the viewer's own
+// backing data. resumeTimelineAt below is the fix: fall back to the GRID
+// (which still allows loading more via scroll, since the viewer itself
+// provides no such affordance) to physically load further content, then
+// reopen the last-known-good photo from there and resume the same
+// ArrowRight walk. `parseTileAriaLabel`'s wallClockAsUtcMs (matcher.mjs) is
+// the ordering signal throughout -- see its own header for why it's NOT a
+// real UTC value and must only ever be compared to another value built the
+// SAME way (or, as here, treated as approximately comparable to a real UTC
+// ms with a generous buffer, since we only need coarse "are we roughly
+// there yet" ordering, never an exact match).
+const TIMELINE_RESUME_SCROLL_MAX_STEPS = 600; // brief's own figure -- generous headroom over the ~450-tile initial mount this exists to get past
+const TIMELINE_RESUME_SETTLE_SCROLLS = 2; // "scroll ~2 more steps so older content loads" -- otherwise resuming just re-hits the same wall on the very next advance
+const TIMELINE_START_SKIP_BUFFER_MS = 24 * 60 * 60 * 1000; // "newest pending job + 1 day" per the brief
+const TIMELINE_START_SCROLL_MAX_STEPS = 600; // same budget as the resume scroll -- both are "how far is it reasonable to scroll looking for something" caps
+const MAX_TIMELINE_RESUMES = 40; // bounds total resumes over the WHOLE walk (not per-advance) -- a safety valve against a run that resumes forever without making progress
+
+/**
+ * Extract the photo id (the URL's own last path segment) from a timeline
+ * photo-viewer URL, e.g. "https://photos.google.com/photo/AF1QipNP8FPa..."
+ * -> "AF1QipNP8FPa...". Returns null for anything that isn't a per-photo URL
+ * at all (the bare library root, a search URL, etc.) -- resumeTimelineAt
+ * cannot resume at "no photo", and the caller must treat that as "can't
+ * resume" rather than guessing.
+ */
+function photoIdFromUrl(url) {
+  if (typeof url !== 'string') return null;
+  const m = /\/photo\/([^/?#]+)/.exec(url);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+/**
+ * Re-find and reopen a SPECIFIC photo (by id, as extracted by
+ * photoIdFromUrl) via the timeline GRID rather than the photo viewer --
+ * see this section's own header for why the grid is the only way back once
+ * the viewer's own loaded window is exhausted. Scrolls the grid downward
+ * from the top (goto the bare library root first, so this always starts
+ * from a known, fully-reset scroll position rather than wherever the grid
+ * happened to be left) until a tile whose href names this photo id appears,
+ * using `approxCaptureMs` (the photo's own captureDateMs, from the LAST
+ * successfully read panel text -- see walkTimeline's caller) purely as an
+ * early-bailout signal: once the visible tiles have scrolled CLEARLY past
+ * where this photo should be (more than TIMELINE_STOP_BUFFER_DAYS' worth of
+ * margin, the same trusted buffer walkTimeline's own stop condition uses)
+ * without ever finding it, further scrolling can't help -- something else
+ * is wrong (the photo was itself deleted between read and resume, most
+ * plausibly) and burning the rest of the 600-step budget only delays
+ * reporting that.
+ *
+ * Scrolls a further TIMELINE_RESUME_SETTLE_SCROLLS steps once found, so the
+ * content immediately AFTER this photo is also loaded -- resuming only to
+ * have the very next ArrowRight hit the exact same "nothing more is loaded"
+ * wall this function exists to get past would defeat the point.
+ *
+ * Returns the reopened tile, or null if the photo could not be found at all
+ * (resumeTimelineAt's caller treats that as genuinely reaching the end of
+ * the library, not a transient failure worth retrying).
+ */
+export async function resumeTimelineAt(page, photoId, approxCaptureMs) {
+  if (photoId == null) return null;
+  await page.goto('https://photos.google.com/', { waitUntil: 'domcontentloaded' });
+  await pointAtGrid(page);
+
+  const matchesTarget = (t) => typeof t.href === 'string' && t.href.endsWith(photoId);
+  let tiles = await collectTimelineTiles(page);
+  let steps = 0;
+  let stalledRounds = 0; // consecutive scrolls that loaded nothing new -- see the loop's break below
+  while (!tiles.some(matchesTarget) && steps < TIMELINE_RESUME_SCROLL_MAX_STEPS) {
+    if (approxCaptureMs != null && tiles.length > 0) {
+      const parsedMsValues = tiles.map((t) => parseTileAriaLabel(t.ariaLabel)?.wallClockAsUtcMs).filter((ms) => ms != null);
+      const oldestVisibleMs = parsedMsValues.length ? Math.min(...parsedMsValues) : null;
+      if (oldestVisibleMs != null && oldestVisibleMs < approxCaptureMs - TIMELINE_STOP_BUFFER_MS) {
+        break; // scrolled clearly past where this photo should be -- give up rather than burn the rest of the step budget
+      }
+    }
+    const beforeCount = tiles.length;
+    await scrollResults(page);
+    tiles = await collectTimelineTiles(page);
+    steps += 1;
+    // A scroll that mounts no new tile at all (the grid has genuinely
+    // stopped loading more -- the real end of the library, or a virtualized
+    // grid that only grows on the NEXT round) can't be told apart from a
+    // momentary stall by count alone, so this tolerates a few in a row
+    // before giving up early rather than burning the full step budget on a
+    // grid that will never grow again. Mirrors the exact "10 consecutive
+    // scroll(s) with no new tile" abandonment the pre-2026-09-22 grid-scroll
+    // design used (see pointAtGrid's header) -- same idea, ported here now
+    // that scrolling is back in play for the grid fallback.
+    stalledRounds = tiles.length > beforeCount ? 0 : stalledRounds + 1;
+    if (stalledRounds >= 10) break;
+  }
+
+  const found = tiles.find(matchesTarget);
+  if (!found) {
+    loud(`[timeline] resumeTimelineAt: photo ${photoId} not found after ${steps} scroll(s) -- treating as end of library`);
+    return null;
+  }
+  for (let i = 0; i < TIMELINE_RESUME_SETTLE_SCROLLS; i++) {
+    await scrollResults(page);
+  }
+  const opened = await openFirstTile(page, found, { collectFn: collectTimelineTiles, resultSelector: TIMELINE_TILE_SELECTOR });
+  if (!opened) return null;
+  await openInfoPanelOnce(page);
+  return opened;
+}
+
+/**
+ * Find the first (newest) timeline tile actually worth opening, skipping
+ * past tiles NEWER than any pending job needs -- live finding (round 5): a
+ * 457-photo run wasted its first ~300 photos on Sep 3-22 even though the
+ * newest PENDING job was from ~Sep 2, because the walk always opened the
+ * library's literal newest tile regardless of what was actually queued.
+ * Every one of those wasted photos also counted against the viewer's own
+ * loaded-window budget (see this section's header) that resumeTimelineAt
+ * exists to work around, so skipping them isn't just faster -- it directly
+ * reduces how often a resume is needed at all.
+ *
+ * Scrolls from the top until a visible tile's aria-label time is at or
+ * before `newestPendingMs + TIMELINE_START_SKIP_BUFFER_MS` (a 1-day margin,
+ * matching the brief -- the panel/tile time sources disagree by up to a
+ * timezone's worth of offset, see this section's header). Falls back to
+ * whatever tile IS on screen if nothing ever comes into range within the
+ * step budget, rather than returning null and abandoning the walk entirely
+ * over what is, at worst, a missed optimization.
+ */
+async function findTimelineStartTile(page, newestPendingMs) {
+  const targetMs = newestPendingMs + TIMELINE_START_SKIP_BUFFER_MS;
+  await pointAtGrid(page);
+  const withinRange = (t) => {
+    const parsed = parseTileAriaLabel(t.ariaLabel);
+    return parsed != null && parsed.wallClockAsUtcMs <= targetMs;
+  };
+  let tiles = await collectTimelineTiles(page);
+  let steps = 0;
+  let stalledRounds = 0; // see resumeTimelineAt's identical guard for why this exists
+  while (!tiles.some(withinRange) && tiles.length > 0 && steps < TIMELINE_START_SCROLL_MAX_STEPS) {
+    const beforeCount = tiles.length;
+    await scrollResults(page);
+    tiles = await collectTimelineTiles(page);
+    steps += 1;
+    stalledRounds = tiles.length > beforeCount ? 0 : stalledRounds + 1;
+    if (stalledRounds >= 10) break;
+  }
+  return tiles.find(withinRange) ?? tiles[0] ?? null;
+}
+
 /**
  * Walk the main Google Photos LIBRARY TIMELINE (no search at all) by
  * stepping through its PHOTO VIEWER, exactly like walkPhotoView already
@@ -2047,10 +2205,14 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
 
   const matchedJobs = new Set();
   const oldestPendingMs = Math.min(...remaining.map((j) => new Date(j.creationDate).getTime()));
+  const newestPendingMs = Math.max(...remaining.map((j) => new Date(j.creationDate).getTime()));
   const stopBeforeMs = oldestPendingMs - TIMELINE_STOP_BUFFER_MS;
 
-  const firstTiles = await collectTimelineTiles(page);
-  const tile = await openFirstTile(page, firstTiles[0] ?? null, {
+  // Round 5 start optimization (findTimelineStartTile's own header) --
+  // skips tiles newer than any pending job needs, rather than always
+  // opening the library's literal newest photo.
+  const startTile = await findTimelineStartTile(page, newestPendingMs);
+  const tile = await openFirstTile(page, startTile, {
     collectFn: collectTimelineTiles,
     resultSelector: TIMELINE_TILE_SELECTOR,
   });
@@ -2070,6 +2232,7 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
   let stoppedPastOldest = false;
   let matchedCount = 0;
   let unreadableCount = 0;
+  let resumeCount = 0; // total resumeTimelineAt calls over the WHOLE walk, bounded by MAX_TIMELINE_RESUMES -- see that constant's header
   let text = await readPanelText(page);
   // Live finding, 2026-09-22: a panel read can land EMPTY or STALE
   // immediately after opening/advancing, before Google has actually
@@ -2192,8 +2355,32 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
     }
 
     if (!advancedByDelete) {
-      const next = await advanceTimelinePhotoView(page, text, `[timeline photo ${steps}]`);
-      if (next == null) break; // genuinely end of the library (or an advance ArrowRight+refocus+click all truly swallowed) -- see advanceTimelinePhotoView's header
+      let next = await advanceTimelinePhotoView(page, text, `[timeline photo ${steps}]`);
+      if (next == null) {
+        // ROUND 5 live finding (resumeTimelineAt's own header, above): a
+        // failed advance here is no longer trusted as "genuinely the end of
+        // the library" on its own -- it's also exactly what happens once the
+        // viewer's own loaded-content window runs out, ~450 photos into a
+        // library that goes back to March. `page.url()` is still the LAST
+        // successfully read photo's URL (advanceTimelinePhotoView guarantees
+        // this: it only returns null when the URL never left `beforeUrl`),
+        // so that photo's own id + captureDateMs (parsed for THIS iteration,
+        // above) is exactly what resumeTimelineAt needs to fall back to the
+        // grid and reopen the SAME photo with more of the library now loaded
+        // around it, ready for a second advance attempt from there.
+        if (resumeCount >= MAX_TIMELINE_RESUMES) {
+          loud(`[timeline] BLOCKER: hit MAX_TIMELINE_RESUMES (${MAX_TIMELINE_RESUMES}) -- stopping rather than resuming again, ${remaining.length} job(s) still unmatched`);
+          break;
+        }
+        const photoId = photoIdFromUrl(page.url());
+        if (photoId == null) break; // no per-photo URL to resume AT (shouldn't happen once a photo has been read at all) -- can't guess, treat as the end
+        resumeCount += 1;
+        if (VERBOSE) console.log(`  [timeline photo ${steps}] advance failed, attempting resume ${resumeCount}/${MAX_TIMELINE_RESUMES} at photo ${photoId}`);
+        const resumed = await resumeTimelineAt(page, photoId, parsed.captureDateMs);
+        if (!resumed) break; // resume couldn't find the tile at all -- genuinely the end (or the photo itself is gone)
+        next = await advanceTimelinePhotoView(page, text, `[timeline photo ${steps}]`);
+        if (next == null) break; // advancing still failed right after a successful resume -- genuinely the end this time
+      }
       if (next.unreadable) {
         // LIVE FINDING 2026-09-24 (round 4): a photo whose panel never
         // becomes readable, even after the full bounded recovery window

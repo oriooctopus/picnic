@@ -39,6 +39,7 @@ const {
   selectPanelText,
   focusViewerCenter,
   advanceTimelinePhotoView,
+  resumeTimelineAt,
 } = await import('../worker.mjs');
 
 async function withTempQueue(fn) {
@@ -1712,6 +1713,24 @@ function timelineTile(label, href) {
 }
 
 /**
+ * A timeline tile whose aria-label carries a REAL, matcher.mjs-parseable
+ * capture time (parseTileAriaLabel's TILE_LABEL_PATTERN, e.g.
+ * "Photo - Portrait - Sep 2, 2026, 6:00:00 PM") -- round 5 needs this for
+ * both findTimelineStartTile (compares tile times against a pending job's
+ * date) and resumeTimelineAt's early-bailout check, neither of which
+ * `timelineTile` above supports (its label is an arbitrary opaque string,
+ * never a real date). `time` defaults to "6:00:00 PM", which
+ * parseTileAriaLabel's local-as-UTC bookkeeping turns into an 18:00 UTC
+ * bogus value -- chosen to line up EXACTLY with timelinePanelText's own
+ * default (12:00 PM local, GMT-06:00 -> 18:00 UTC real), so a fixture using
+ * both defaults together never has to reason about a timezone mismatch
+ * between the two independent "what time is this photo" signals.
+ */
+function dateTimelineTile(label, month, day, time = '6:00:00 PM', year = 2026, href) {
+  return { ariaLabel: `Photo - Portrait - ${month} ${day}, ${year}, ${time}`, href: href ?? `./photo/${label}` };
+}
+
+/**
  * Panel text with a real, GMT-suffixed capture date (matcher.mjs's
  * captureDateMs), in the VERIFIED LIVE three-line shape (Oliver's own probe,
  * 2026-09-22): "<Month> <Day>[, <Year>]" on its own line, then
@@ -2443,5 +2462,92 @@ test('walkTimeline: a photo that is PERMANENTLY unreadable does not end the walk
       logs.some((l) => l.includes('[timeline] summary:') && l.includes('1 unreadable')),
       `expected the summary line to count exactly 1 unreadable photo, got: ${JSON.stringify(logs)}`
     );
+  });
+});
+
+// ============================================================================
+// ROUND 5 (2026-09-25 live finding): the photo viewer can only ArrowRight
+// through photos the underlying timeline GRID has actually loaded (~450 of a
+// library going back to March, live-observed) -- resumeTimelineAt falls back
+// to the grid (which CAN load more via scroll) to get past that, and the
+// initial-position optimization skips tiles newer than any pending job.
+// ============================================================================
+
+test('walkTimeline: the viewer can only ArrowRight through what the grid has LOADED -- resumeTimelineAt falls back to the grid to reach a job beyond that cap', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_8001.HEIC', creationDate: '2026-09-20T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const { job: job2 } = queue.enqueue({ filename: 'IMG_8005.HEIC', creationDate: '2026-09-16T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tiles = [
+      dateTimelineTile('cap1', 'Sep', 20),
+      dateTimelineTile('cap2', 'Sep', 19),
+      dateTimelineTile('cap3', 'Sep', 18),
+      dateTimelineTile('cap4', 'Sep', 17),
+      dateTimelineTile('cap5', 'Sep', 16),
+    ];
+    const panelText = {
+      [tiles[0].ariaLabel]: timelinePanelText('IMG_8001.HEIC', 'Sep', 20),
+      [tiles[1].ariaLabel]: timelinePanelText('IMG_8002.HEIC', 'Sep', 19),
+      [tiles[2].ariaLabel]: timelinePanelText('IMG_8003.HEIC', 'Sep', 18),
+      [tiles[3].ariaLabel]: timelinePanelText('IMG_8004.HEIC', 'Sep', 17),
+      [tiles[4].ariaLabel]: timelinePanelText('IMG_8005.HEIC', 'Sep', 16),
+    };
+    const page = createFakePage({
+      timelineTiles: tiles,
+      timelinePanelTextByLabel: panelText,
+      // Only the first 2 tiles are "mounted" at first -- job2's match (tile
+      // 5) is unreachable by ArrowRight alone. A grid-mode scroll (which
+      // resumeTimelineAt performs, never the in-viewer ArrowRight walk)
+      // loads the rest in one step.
+      timelineInitialLoadedCount: 2,
+      timelineLoadStep: 10,
+    });
+    const { stillUnmatched } = await walkTimeline(page, [job1, job2], queue, { dryRun: false });
+    assert.equal(stillUnmatched.length, 0, 'both jobs must be found -- resumeTimelineAt must reach job2 beyond the initial load cap');
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.equal(queue.getById(job2.id).status, 'trashed');
+  });
+});
+
+test('resumeTimelineAt: the target photo cannot be found after scrolling -- returns null rather than looping forever', async () => {
+  const tile1 = dateTimelineTile('present1', 'Sep', 10);
+  const page = createFakePage({
+    timelineTiles: [tile1], // the requested id below is never among these
+    timelinePanelTextByLabel: { [tile1.ariaLabel]: timelinePanelText('IMG_1.HEIC', 'Sep', 10) },
+  });
+  let result;
+  const logs = await captureLogs(async () => {
+    result = await resumeTimelineAt(page, 'nonexistent-photo-id', Date.now());
+  });
+  assert.equal(result, null);
+  assert.ok(
+    logs.some((l) => l.includes('resumeTimelineAt') && l.includes('not found')),
+    `expected a "not found" log, got: ${JSON.stringify(logs)}`
+  );
+});
+
+test('walkTimeline: the initial position skips photos newer than any pending job needs (+ a 1-day margin)', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_7002.HEIC', creationDate: '2026-09-02T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tiles = [
+      dateTimelineTile('new1', 'Sep', 22), // far newer than the pending job -- must be SKIPPED
+      dateTimelineTile('new2', 'Sep', 15), // still newer than job + 1 day -- must be SKIPPED
+      dateTimelineTile('target', 'Sep', 2), // within the 1-day margin -- the walk should open THIS one first
+      dateTimelineTile('older', 'Aug', 28),
+    ];
+    const panelText = {
+      [tiles[0].ariaLabel]: timelinePanelText('IMG_7000.HEIC', 'Sep', 22),
+      [tiles[1].ariaLabel]: timelinePanelText('IMG_7001.HEIC', 'Sep', 15),
+      [tiles[2].ariaLabel]: timelinePanelText('IMG_7002.HEIC', 'Sep', 2),
+      [tiles[3].ariaLabel]: timelinePanelText('IMG_7003.HEIC', 'Aug', 28),
+    };
+    const page = createFakePage({ timelineTiles: tiles, timelinePanelTextByLabel: panelText });
+    await walkTimeline(page, [job1], queue, { dryRun: false });
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    // The very FIRST tile ever opened must be "target" (Sep 2, within the
+    // 1-day margin of the newest pending job), never the library's literal
+    // newest tile ("new1", Sep 22) -- confirmed via the tile-click log entry
+    // the fake records for every open.
+    const firstClick = page.log.find((l) => l.startsWith('tile-click:'));
+    assert.equal(firstClick, `tile-click:${tiles[2].ariaLabel}`, `expected the walk to open "target" first, got: ${firstClick}`);
   });
 });

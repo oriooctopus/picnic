@@ -183,23 +183,34 @@ function windowedTiles(page) {
 
 /**
  * TIMELINE equivalent of tilesInGrid, REWRITTEN 2026-09-22 for the
- * photo-viewer redesign of `--walk=timeline` (worker.mjs's walkTimeline).
+ * photo-viewer redesign of `--walk=timeline` (worker.mjs's walkTimeline),
+ * and given a LOADED-WINDOW cap again in round 5 (2026-09-25).
  *
- * No scrolling/reveals/virtualization modelling here any more -- the old
- * grid-scrolling design (and this fake's matching reveal/window machinery)
- * was disproven by a live dry-run: opening a tile and returning to the grid
- * reset the timeline's scroll position to the top every time. The rewrite
- * opens ONE tile (the newest) and then walks entirely INSIDE the photo
- * viewer via ArrowRight (advancePhotoView, shared with walkPhotoView), never
- * touching the grid again -- so a fixture's `config.timelineTiles` is simply
- * the FULL flat underlying order (newest first), exactly like
- * `fullOrderedTiles`'s role for the grid's ArrowRight traversal. There is no
- * separate "mounted window" to model because nothing ever scrolls the grid
- * to reveal more of it.
+ * Round 4 (the comment this replaces) assumed the grid never needed
+ * revisiting once the viewer opened its first tile -- true for the ArrowRight
+ * traversal ITSELF, but a live run proved the viewer's own ArrowRight can
+ * only reach photos the underlying grid has actually MOUNTED (~450 out of a
+ * library going back to March), which is a real, load-bearing cap this fake
+ * must model or a test can't tell "resumeTimelineAt correctly falls back to
+ * the grid and finds more" from "there was never a cap to hit at all".
+ *
+ * `page.timelineLoadedCount` (mutable, page-level -- see its own init in
+ * createFakePage) is how many of `config.timelineTiles` (newest-first) are
+ * currently "mounted"; it starts at `config.timelineInitialLoadedCount` if
+ * set, else Infinity (unbounded -- every pre-round-5 fixture that never sets
+ * this key keeps its old "the whole library is available immediately"
+ * behaviour exactly). It only ever GROWS, via a downward `scrollResults()`
+ * call while NO photo is open (see the mouse.wheel handler below) -- ArrowRight
+ * inside the viewer never grows it, matching the live finding that the
+ * viewer itself provides no way to load more.
  */
-function tilesInTimeline(page) {
+function loadedTimelineTiles(page) {
   const base = page.config.timelineTiles ?? [];
-  return base.filter((tile) => !page.trashedIdentities.has(identityOf(tile)));
+  return Number.isFinite(page.timelineLoadedCount) ? base.slice(0, page.timelineLoadedCount) : base;
+}
+
+function tilesInTimeline(page) {
+  return loadedTimelineTiles(page).filter((tile) => !page.trashedIdentities.has(identityOf(tile)));
 }
 
 /**
@@ -507,7 +518,10 @@ class FakeTileLink {
  * -- walkTimeline opens the newest tile once and then walks this exact same
  * ArrowRight machinery (performTrash/hasNextPhoto/advanceToNextTile all
  * call this function), so the timeline needs no separate "full order"
- * concept of its own.
+ * concept of its own. ROUND 5: also capped to `page.timelineLoadedCount`
+ * (loadedTimelineTiles, tilesInTimeline's own header) -- ArrowRight must
+ * NOT be able to walk past what the grid has "mounted", the exact live
+ * behaviour resumeTimelineAt exists to work around.
  */
 // Returns the raw tile objects (not flattened to aria-label strings) -- see
 // performTrash's header for why: two tiles can share an aria-label (Oliver's
@@ -517,7 +531,7 @@ class FakeTileLink {
 function fullOrderedTiles(page) {
   const raw =
     page.config.timelineTiles != null
-      ? page.config.timelineTiles
+      ? loadedTimelineTiles(page)
       : [...(page.config.searchResults[page.activeQuery] ?? []), ...(page.config.scrollReveals[page.activeQuery] ?? []).flat()];
   return raw
     .map((t) => (typeof t === 'string' ? { ariaLabel: t, href: undefined } : t))
@@ -715,6 +729,11 @@ export function createFakePage(config = {}) {
     trashedIdentities: new Set(), // keyed by identity (href, falling back to aria-label), not aria-label alone -- see tilesInGrid()'s header
     revealedCount: 0,
     windowStart: 0, // index into tilesInGrid(page) where the mounted window (windowedTiles) currently begins -- see mouse.wheel below
+    // ROUND 5 (2026-09-25): how many of config.timelineTiles are "mounted" --
+    // see loadedTimelineTiles' header. Infinity by default (unbounded) so
+    // every pre-round-5 fixture that never sets timelineInitialLoadedCount
+    // keeps behaving exactly as before; only grows via a grid-mode scroll.
+    timelineLoadedCount: config.timelineInitialLoadedCount ?? Infinity,
     recollectCount: {},
     escapePresses: 0,
     infoPressesSwallowed: 0, // count of "i" presses dropped so far, capped by config.swallowInfoPressesCount
@@ -831,13 +850,26 @@ export function createFakePage(config = {}) {
         // down-scroll.
         page.log.push('wheel');
         page.log.push(scrollingUp ? 'wheel:up' : 'wheel:down');
-        // NOTE: timeline mode (config.timelineTiles) no longer scrolls the
-        // grid at all (2026-09-22 photo-viewer redesign -- see
-        // tilesInTimeline's header) -- there is deliberately no timeline
-        // branch here any more. A test that calls page.mouse.wheel() while
-        // in timeline mode falls through to the grid logic below, which is
-        // harmless (there's no active query, so it's a no-op against empty
-        // grid state) but almost certainly not what the test intended.
+        // TIMELINE MODE, GRID scrolling (round 5, 2026-09-25): the round-4
+        // comment this replaces claimed the grid never needs scrolling once
+        // the viewer opens its first tile, which was true for ArrowRight
+        // ITSELF but missed that the viewer can only reach whatever the grid
+        // has actually MOUNTED -- a live run hard-stopped ~450 photos into a
+        // library going back to March. resumeTimelineAt (worker.mjs) falls
+        // back to the grid specifically to load more, via this exact
+        // scrollResults()/wheel call, while NO photo is open (photoOpen(page)
+        // false -- both resumeTimelineAt and findTimelineStartTile always
+        // goto()/scroll from the base grid, never from inside the viewer).
+        // Growth only happens downward and only for an explicit
+        // `config.timelineLoadStep` -- a fixture that never sets it keeps
+        // timelineLoadedCount at Infinity (unbounded), so every pre-round-5
+        // fixture's assumption ("the whole library is available immediately")
+        // is completely unaffected by this branch existing.
+        if (page.config.timelineTiles != null && !photoOpen(page) && !scrollingUp) {
+          const step = page.config.timelineLoadStep ?? Infinity;
+          page.timelineLoadedCount = Math.min(page.config.timelineTiles.length, page.timelineLoadedCount + step);
+          return;
+        }
         if (scrollingUp) {
           // Move the mounted window back toward the top of whatever has
           // already loaded. Deliberately does NOT touch revealedCount --
@@ -869,6 +901,14 @@ export function createFakePage(config = {}) {
     async goto(url) {
       page.log.push(`goto:${url}`);
       page._url = url;
+      // A real navigation always leaves the photo viewer, back at the base
+      // grid -- resumeTimelineAt (round 5, worker.mjs) explicitly goto()s
+      // the library root before scrolling to find its resume target, and
+      // the mouse.wheel timeline-load-growth branch above only fires while
+      // NO photo is open, so this reset is what actually lets that scroll
+      // do anything after a resume's goto.
+      page.openedAriaLabel = null;
+      page.openedIdentity = null;
     },
     async bringToFront() {
       page.guard();
