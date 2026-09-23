@@ -562,6 +562,52 @@ function closesInfoPanelOnArrival(page, label) {
   return set instanceof Set ? set.has(label) : Array.isArray(set) && set.includes(label);
 }
 
+/**
+ * Call unconditionally right after `page.openedAriaLabel` changes to
+ * `label` as part of an ADVANCE (never the first tile opened) -- a no-op
+ * unless `label` is configured to close the panel (closesInfoPanelOnArrival
+ * above), in which case it ALSO arms the reopen-failure counter
+ * (`config.timelinePanelReopenFailuresBeforeSuccess`) for whatever comes
+ * next, keeping both pieces of state in the one place that sets them.
+ */
+function closeInfoPanelOnArrivalIfConfigured(page, label) {
+  if (closesInfoPanelOnArrival(page, label)) {
+    page.infoPanelOpen = false;
+    page._timelinePanelReopenFailuresRemaining = page.config.timelinePanelReopenFailuresBeforeSuccess ?? 0;
+    return;
+  }
+  // Arriving at a photo NOT configured to close the panel -- any leftover
+  // reopen-failure budget from a PREVIOUS closed photo (e.g. one
+  // deliberately configured to never recover, per
+  // timelinePanelReopenFailuresBeforeSuccess) must not leak forward onto
+  // this one. Caught by writing the "permanently unreadable photo does
+  // NOT end the walk" test: without this reset, the photo immediately
+  // AFTER the unreadable one also read as unreadable, because the fake's
+  // failure counter was still sitting at a huge remaining value with
+  // nothing left to decrement it back down.
+  page._timelinePanelReopenFailuresRemaining = 0;
+}
+
+/**
+ * Shared by the 'i' keyboard shortcut and the "Open info" button click --
+ * both are ways to OPEN a closed info panel. `config.timelinePanelReopenFailuresBeforeSuccess`
+ * (2026-09-24, round 4) models EITHER one failing to actually open it for
+ * the first N attempts after the panel has closed -- worker.mjs's bounded
+ * recovery loop (waitForTimelineAdvanceConfirmed's Phase B) must survive
+ * several failed rounds before the panel finally responds, matching the
+ * live symptom (activeElement ended up BUTTON[Open info] -- the click
+ * path was tried but the panel still hadn't rendered). Defaults to
+ * succeeding immediately (0 failures) when unset, so every pre-existing
+ * fixture's plain "i opens the panel" behaviour is unchanged.
+ */
+function attemptOpenInfoPanel(page) {
+  if (page._timelinePanelReopenFailuresRemaining > 0) {
+    page._timelinePanelReopenFailuresRemaining -= 1;
+    return; // this attempt fails -- panel stays closed
+  }
+  page.infoPanelOpen = true;
+}
+
 function performTrash(page) {
   const identity = page.openedIdentity;
   if (identity == null) return;
@@ -581,7 +627,7 @@ function performTrash(page) {
   const next = idx !== -1 && idx + 1 < ordered.length ? ordered[idx + 1] : null;
   page.openedAriaLabel = next ? next.ariaLabel : null;
   page.openedIdentity = next ? identityOf(next) : null;
-  if (next && closesInfoPanelOnArrival(page, next.ariaLabel)) page.infoPanelOpen = false;
+  if (next) closeInfoPanelOnArrivalIfConfigured(page, next.ariaLabel);
 }
 
 /**
@@ -619,7 +665,7 @@ function advanceToNextTile(page) {
   const next = ordered[idx + 1];
   page.openedAriaLabel = next.ariaLabel;
   page.openedIdentity = identityOf(next);
-  if (closesInfoPanelOnArrival(page, next.ariaLabel)) page.infoPanelOpen = false;
+  closeInfoPanelOnArrivalIfConfigured(page, next.ariaLabel);
 }
 
 /**
@@ -644,6 +690,9 @@ function advanceToNextTile(page) {
  *   timelinePanelTextByLabel?: Record<string, string>, // ariaLabel -> info-panel text, FLAT (no query nesting -- the timeline has no active query) -- timeline equivalent of panelTextByLabel
  *   timelinePanelRenderDelayReads?: number, // 2026-09-23: first N reads after opening/advancing to a timeline photo return EMPTY before the real text renders -- see timelinePanelTextFor's header
  *   timelineStaleReadsAfterAdvance?: number, // 2026-09-23: first N reads after an ArrowRight/click ADVANCE (never the first tile) return the PREVIOUS photo's text before catching up -- models the real lag bug that produced two consecutive stale "IMG_2932.JPG" reads in a live run
+ *   timelinePanelClosesOnLabels?: string[]|Set<string>, // 2026-09-23/24: the info panel is CLOSED on arrival at any of these labels via an ADVANCE (ArrowRight, click fallback, or a trash's own auto-advance) -- never the first tile opened -- see closeInfoPanelOnArrivalIfConfigured
+ *   timelinePanelReopenFailuresBeforeSuccess?: number, // 2026-09-24 (round 4): the first N attempts to reopen a CLOSED panel (via 'i' or the "Open info" button, whichever worker.mjs tries) fail outright; the next one succeeds -- see attemptOpenInfoPanel
+ *   timelineFocusLostAfterFallbackClick?: boolean, // 2026-09-23: a toolbar fallback click (trash control OR "View next photo") leaves keyboard focus off the viewer -- ArrowRight/'#' become no-ops until a real click (focusViewerCenter) restores it
  * }}
  */
 export function createFakePage(config = {}) {
@@ -700,8 +749,13 @@ export function createFakePage(config = {}) {
           const swallowLimit = page.config.swallowInfoPressesCount ?? 0;
           if (page.infoPressesSwallowed < swallowLimit) {
             page.infoPressesSwallowed += 1;
+          } else if (page.infoPanelOpen) {
+            // Was open -- 'i' always closes it. Unaffected by
+            // `timelinePanelReopenFailuresBeforeSuccess` below, which only
+            // ever models an OPEN attempt failing, never a close.
+            page.infoPanelOpen = false;
           } else {
-            page.infoPanelOpen = !page.infoPanelOpen;
+            attemptOpenInfoPanel(page);
           }
         }
         // 2026-09-22: '#' now only OPENS the confirm dialog -- it no longer
@@ -1021,7 +1075,7 @@ export function createFakePage(config = {}) {
       return false;
     },
     async onClick(selector) {
-      if (/aria-label="Open info"/i.test(selector)) page.infoPanelOpen = true;
+      if (/aria-label="Open info"/i.test(selector)) attemptOpenInfoPanel(page);
       // Toolbar fallback click ALSO only opens the dialog now -- see the '#'
       // handler's comment above. `trashDialogNeverAppears` models the
       // confirmed-live false positive (job B4D8DDA7...): the click resolves

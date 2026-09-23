@@ -1764,63 +1764,66 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = '
   }
 }
 
+// Bounded panel-recovery loop (2026-09-24, round 4 live finding) --
+// waitForTimelineAdvanceConfirmed's own header explains why this exists.
+// ~1.5s between rounds is a real-correctness wait (the panel needs actual
+// render time), not a tight poll -- 6 rounds is roughly the brief's
+// "~12s total" once the per-round read+click overhead is added on top of
+// the 6*1.5s=9s of waiting.
+const MAX_PANEL_RECOVERY_ROUNDS = 6;
+const PANEL_RECOVERY_ROUND_WAIT_MS = 1500;
+
 /**
- * Confirm a TIMELINE advance actually happened, returning the new
- * `{ text, url }` or null if it didn't -- 2026-09-23, replacing bare panel
- * text as the timeline walk's advance signal after a real run (commit
- * 7565a5d) proved it unsound: photo 1 and photo 2 of that run both read
- * back "IMG_2932.JPG", because the panel's content lags the actual
- * navigation by a poll or two and a bare "text !== previousText" check
- * accepted a transient, still-stale read as proof of having moved on.
- * Live evidence (Oliver's own probe, same day) showed page.url() -- a
- * distinct "/photo/<id>" per photo -- changes RELIABLY on every ArrowRight
- * (6/6), so URL is now the PRIMARY signal; panel text is only trusted once
- * the URL has already changed, and even then gets a confirmation pass
- * against staleness:
+ * Confirm a TIMELINE advance actually happened, returning `{ text, url,
+ * unreadable }` or null -- 2026-09-23, replacing bare panel text as the
+ * timeline walk's advance signal after a real run (commit 7565a5d) proved
+ * it unsound: photo 1 and photo 2 of that run both read back
+ * "IMG_2932.JPG", because the panel's content lags the actual navigation by
+ * a poll or two and a bare "text !== previousText" check accepted a
+ * transient, still-stale read as proof of having moved on. Live evidence
+ * (Oliver's own probe, same day) showed page.url() -- a distinct
+ * "/photo/<id>" per photo -- changes RELIABLY on every ArrowRight (6/6), so
+ * URL is now the PRIMARY signal; panel text is only trusted once the URL
+ * has already changed, and even then gets a confirmation pass against
+ * staleness:
  *
  *   1. Poll page.url() until it differs from `beforeUrl` (real-correctness
  *      wait, bounded) -- no URL change at all means the advance genuinely
- *      did not register; nothing else here matters.
- *   2. Once the URL has moved, poll readPanelText() until the PARSED
- *      FILENAME (not the raw text) differs from the PREVIOUS photo's
- *      filename, or a bounded (~8s) settle window elapses. LIVE FINDING
- *      2026-09-23 (a 449-photo run): a bare raw-text diff is NOT enough --
- *      photo 3 of that run read back photo 2's filename verbatim while the
- *      URL had already changed, because SOME OTHER part of the panel (the
- *      map/"Backed up" lines, which re-render on their own schedule) had
- *      already changed even though the filename field specifically had
- *      not caught up yet. An earlier version of this function polled on
- *      raw-text-differs and only allowed ONE extra read to resolve a
- *      same-filename result, which was not long enough -- the real lag
- *      can span several polls, so this now polls on the FILENAME itself
- *      for up to ~8s (longer than the 3s an earlier version used) before
- *      ever accepting a same-filename read as final. A photo whose panel
- *      never renders ANY filename within the window (`!text`/no filename
- *      at all) returns null -- not yet confirmed, never guessed.
- *   3. If the filename is STILL equal to the previous photo's after that
- *      full window (not just one extra read), that's the genuinely
- *      ambiguous case -- a real same-filename duplicate sitting right next
- *      to its twin (Oliver's real re-uploaded copies) vs. a read that
- *      simply never caught up in time. Accepted as a genuine duplicate
- *      rather than polled forever; findMatchingJob's own "never guess"
- *      rule is unaffected either way -- this only ever decides what text
- *      to parse, never whether a job matches it.
+ *      did not register; returns null, the ONLY case that means that now
+ *      (see point 4).
+ *   2. Once the URL has moved, read the panel. If it already has a
+ *      filename, skip straight to step 3's staleness check.
+ *   3. Otherwise -- PANEL-RECOVERY LOOP (2026-09-24, round 4): a live run
+ *      showed the panel can stay genuinely unreadable across MULTIPLE
+ *      recovery attempts, and the single keyboard-only reopen an earlier
+ *      version of this function tried can itself fail outright (a real
+ *      run's activeElement ended up BUTTON[Open info] afterward -- the
+ *      click path got as far as landing focus on the button but the panel
+ *      still hadn't rendered, or 'i' toggled an already-open panel shut
+ *      mid-render). For up to MAX_PANEL_RECOVERY_ROUNDS rounds: PREFER
+ *      clicking a VISIBLE "Open info" control over pressing 'i' -- 'i' on
+ *      an ALREADY-OPEN panel CLOSES it (openInfoPanelOnce's own
+ *      sticky-toggle behaviour), so blindly keying risks flipping a panel
+ *      that's merely slow to render shut mid-open; 'i' is only used when
+ *      no visible button exists to click. Waits a real
+ *      PANEL_RECOVERY_ROUND_WAIT_MS between rounds, then re-reads.
+ *   4. If the panel is STILL unreadable after every round, this is no
+ *      longer treated as "not yet confirmed" the way it used to be --
+ *      the URL DID change, we genuinely are on a different, real photo,
+ *      we simply cannot read what it is. Returns
+ *      `{ text: '', url, unreadable: true }` so the caller (walkTimeline)
+ *      can count it and move on WITHOUT ending the walk. null is now
+ *      reserved exclusively for "the URL never changed at all".
+ *   5. Once a filename IS available (immediately, or after recovery), the
+ *      SAME same-filename staleness confirmation as before applies: if it
+ *      equals the PREVIOUS photo's filename, take one more read and only
+ *      trust the match as a genuine duplicate if that second read agrees
+ *      too (never guess between a real duplicate and a read that just
+ *      hadn't caught up).
  *
- * PANEL-CLOSED FIX (2026-09-24, live finding, round 3): instrumented live,
- * the ACTUAL root cause of "advance did not register" turned out not to be
- * a slow/stale panel at all -- the URL changed on every single ArrowRight,
- * but readPanelText() came back genuinely EMPTY (length 0, the info panel
- * itself is CLOSED on the new photo) on roughly HALF of all advances. The
- * old caller (advanceTimelinePhotoView) read that as "did not register"
- * and pressed ArrowRight AGAIN -- silently skipping whatever photo the
- * panel had failed to reopen for. Once the URL has moved, an empty read is
- * now treated as "the panel needs reopening", not "nothing happened": this
- * calls openInfoPanelOnce() once (it already checks before toggling, so
- * it's always safe to call even if the panel turns out to already be
- * open) and keeps polling from there. See advanceTimelinePhotoView's own
- * header for the other half of this fix -- once THIS function's URL-wait
- * has confirmed a move, the caller must never press ArrowRight again for
- * the same photo, or the same skip happens one level up.
+ * findMatchingJob's own "never guess" rule is unaffected by any of this --
+ * this function only ever decides what text (if any) to hand it, never
+ * whether a job matches.
  */
 export async function waitForTimelineAdvanceConfirmed(page, beforeUrl, previousText) {
   const urlDeadline = Date.now() + (FAST_DELAYS ? 20 : 5000);
@@ -1829,39 +1832,67 @@ export async function waitForTimelineAdvanceConfirmed(page, beforeUrl, previousT
     await pollDelay();
     url = page.url();
   }
-  if (url === beforeUrl) return null; // advance never took at all
+  if (url === beforeUrl) return null; // advance never took at all -- the ONLY case this function still returns null for
 
   const previousFilename = parsePanelText(previousText).filename;
-  // Longer than the URL wait above and the old (3s) raw-text version --
-  // see this function's header, point 2, for why the filename specifically
-  // can lag well behind both the URL and the rest of the panel's content.
+
+  // PHASE A -- fast poll (2026-09-23, round 3 fix, unchanged): handles the
+  // ORDINARY lag case where the panel is rendering (or already rendered)
+  // but the filename specifically hasn't caught up to a DIFFERENT photo
+  // yet (surrounding fields like the map/"Backed up" size can re-render on
+  // their own schedule ahead of it). Cheap, tight polling -- no active DOM
+  // actions -- since simply waiting resolves this most of the time.
   const filenameDeadline = Date.now() + (FAST_DELAYS ? 30 : 8000);
-  let reopenAttempted = false;
   let text = await readPanelText(page);
   let filename = parsePanelText(text).filename;
   while ((!filename || (previousFilename && filename === previousFilename)) && Date.now() < filenameDeadline) {
-    // See this function's "PANEL-CLOSED FIX" header above -- an empty read
-    // (not just a stale one) means the panel itself is closed on the new
-    // photo roughly half the time, live. openInfoPanelOnce() is safe to
-    // call unconditionally (it checks before toggling), so only ONE
-    // attempt per confirmed URL change is needed; a failure there must
-    // not abort the whole advance, just fall through to the ordinary poll.
-    if (!text && !reopenAttempted) {
-      reopenAttempted = true;
-      if (VERBOSE) console.log('    [timeline] panel empty after move, reopening');
-      await openInfoPanelOnce(page).catch(() => {});
-    }
     await pollDelay();
     text = await readPanelText(page);
     filename = parsePanelText(text).filename;
   }
-  if (!text) return null; // URL moved but the panel never rendered anything at all -- not yet confirmed
-  // Falls through here either because `filename` genuinely differs now, or
-  // because the whole window elapsed with it still matching `previousFilename`
-  // -- see this function's header, point 3, for why the latter is accepted
-  // (a genuine duplicate) rather than treated as a failure to confirm.
 
-  return { text, url };
+  // PHASE B -- bounded active-recovery loop (2026-09-24, round 4 fix):
+  // engages ONLY when Phase A's whole window elapsed with the panel still
+  // genuinely EMPTY (not merely stale-but-present, which Phase A already
+  // handles) -- a different problem needing real DOM actions, not more
+  // passive waiting.
+  for (let round = 0; round < MAX_PANEL_RECOVERY_ROUNDS && !filename; round++) {
+    if (VERBOSE) {
+      console.log(`    [timeline] panel unreadable after URL change, recovery round ${round + 1}/${MAX_PANEL_RECOVERY_ROUNDS}`);
+    }
+    const openInfoButton = page.locator(OPEN_INFO_SELECTOR).first();
+    if (await openInfoButton.isVisible().catch(() => false)) {
+      await openInfoButton.click().catch(() => {});
+    } else {
+      // Only fall back to the keyboard when there's genuinely no visible
+      // button to click -- see this function's header, step 3.
+      await page.keyboard.press('i');
+    }
+    await sleep(FAST_DELAYS ? 0 : PANEL_RECOVERY_ROUND_WAIT_MS);
+    text = await readPanelText(page);
+    filename = parsePanelText(text).filename;
+  }
+
+  if (!filename) {
+    // Unreadable even after the full recovery window -- see this
+    // function's header, step 4. The caller must NOT treat this as
+    // end-of-library.
+    return { text: '', url, unreadable: true };
+  }
+
+  if (previousFilename && filename === previousFilename) {
+    // Ambiguous same-filename result -- see this function's header, step 5.
+    await pollDelay();
+    const secondText = await readPanelText(page);
+    const secondFilename = parsePanelText(secondText).filename;
+    if (secondFilename && secondFilename !== filename) {
+      text = secondText; // disagreed -- the first read was stale, trust the later one
+    }
+    // else: both reads agree (or the second also came back empty) -- trust
+    // the original read as a genuine duplicate rather than looping forever.
+  }
+
+  return { text, url, unreadable: false };
 }
 
 /**
@@ -1873,35 +1904,31 @@ export async function waitForTimelineAdvanceConfirmed(page, beforeUrl, previousT
  * direct probe (ArrowRight x6, no click involved at all) succeeded every
  * time. Clicking "View next photo" is kept only as a LAST-RESORT fallback
  * if every ArrowRight attempt fails to move the URL at all.
+ *
+ * SIMPLIFIED 2026-09-24 (round 4): waitForTimelineAdvanceConfirmed now
+ * returns null EXCLUSIVELY when the URL never moved at all (an unreadable-
+ * but-moved photo returns a real `{ ..., unreadable: true }` object
+ * instead of null -- see its own header). That means every `result` this
+ * function gets back, truthy or not, already tells the whole story: truthy
+ * = we moved (confirmed or unreadable, walkTimeline decides what to do
+ * with that), falsy = we are still on `beforeUrl` and can safely try
+ * again. The `page.url() === beforeUrl` guards before every keypress/click
+ * below are accordingly simpler than an earlier version needed (no longer
+ * have to separately special-case "moved but not yet confirmed") but are
+ * kept anyway as defence-in-depth against the URL changing between this
+ * function's own checks (e.g. a slow-to-register press that only completes
+ * after waitForTimelineAdvanceConfirmed's internal deadline already gave
+ * up) -- never press/click again once truly moved.
  */
 export async function advanceTimelinePhotoView(page, currentText, logPrefix = '') {
   const beforeUrl = page.url();
   for (let attempt = 0; attempt < ARROW_RETRIES; attempt++) {
-    // NEVER press ArrowRight again once the URL has already moved away
-    // from `beforeUrl` -- live finding 2026-09-24 (round 3): the URL
-    // changing on ArrowRight IS the advance (confirmed 6/6 live); the
-    // actual bug was readPanelText() coming back genuinely EMPTY on
-    // roughly HALF of all advances (the info panel closed on the new
-    // photo), which the OLD retry loop misread as "did not register" and
-    // pressed ArrowRight AGAIN -- silently skipping whatever photo the
-    // panel had failed to reopen for. Once moved, only the READ is ever
-    // retried below (waitForTimelineAdvanceConfirmed's own reopen logic --
-    // see its header), never another keypress.
     if (page.url() === beforeUrl) {
       await releaseFocus(page);
       await page.keyboard.press('ArrowRight');
     }
     const result = await waitForTimelineAdvanceConfirmed(page, beforeUrl, currentText);
-    if (result) return result;
-    if (page.url() !== beforeUrl) {
-      // Moved, but still not confirmed even after that function's own
-      // reopen-and-poll window -- stop retrying the KEY here (see the
-      // comment above) and fall through to ONE more read attempt in the
-      // recovery pass below, rather than looping the outer `for` (which
-      // would risk pressing ArrowRight again the next time round).
-      if (VERBOSE) console.log(`  ${logPrefix} URL advanced but panel still unreadable, giving it one more try`);
-      break;
-    }
+    if (result) return result; // moved -- confirmed OR unreadable, both are a real outcome now; bubble straight up, never retry a keypress
     // Still on beforeUrl -- the press genuinely did not register. No
     // next-photo control at all is the authoritative end-of-library
     // signal (same convention as advancePhotoView) -- no point burning the
@@ -1921,39 +1948,31 @@ export async function advanceTimelinePhotoView(page, currentText, logPrefix = ''
   // more real try -- a live run wrongly declared EXHAUSTED after 449 of
   // what should have been ~1500+ photos, with 103 jobs still pending
   // (their real photos going back to March), precisely because this
-  // recovery did not exist yet. Gated on `page.url() === beforeUrl` the
-  // same way as every other keypress/click here -- if the URL already
-  // moved (the round-3 case above), this only re-reads, never re-presses.
-  if (page.url() === beforeUrl) {
-    await focusViewerCenter(page);
-    await releaseFocus(page);
-    await page.keyboard.press('ArrowRight');
-  }
+  // recovery did not exist yet.
+  await focusViewerCenter(page);
+  await releaseFocus(page);
+  await page.keyboard.press('ArrowRight');
   const recovered = await waitForTimelineAdvanceConfirmed(page, beforeUrl, currentText);
   if (recovered) return recovered;
 
   // Last-resort click fallback -- see this function's header for why it's
   // no longer tried first. Refocuses again immediately before clicking:
   // the SAME lost-focus state that defeats ArrowRight can make a stale
-  // click land on nothing too. Same URL-changed gate as above -- a click
-  // is itself a potential SECOND advance, so it must never fire once the
-  // photo has already moved on once.
+  // click land on nothing too.
   await focusViewerCenter(page);
-  if (page.url() === beforeUrl) {
-    const candidates = await page.locator(NEXT_PHOTO_SELECTOR).all();
-    for (const candidate of candidates) {
-      if (await candidate.isVisible().catch(() => false)) {
-        await candidate.click().catch(() => {});
-        break;
-      }
+  const candidates = await page.locator(NEXT_PHOTO_SELECTOR).all();
+  for (const candidate of candidates) {
+    if (await candidate.isVisible().catch(() => false)) {
+      await candidate.click().catch(() => {});
+      break;
     }
   }
   const result = await waitForTimelineAdvanceConfirmed(page, beforeUrl, currentText);
   if (result) return result;
-  // Only NOW -- URL still unchanged despite the recovery pass AND the click
-  // fallback, OR moved but never confirmed readable despite every reopen
-  // attempt -- is this treated as genuinely the end of the library (or an
-  // advance that was truly swallowed, indistinguishable from here).
+  // Only NOW -- ArrowRight + refocus + the click fallback ALL failed to
+  // move the URL at all -- is this treated as genuinely the end of the
+  // library (or an advance that was truly swallowed, indistinguishable
+  // from here).
   if (VERBOSE) {
     const focus = await page
       .evaluate(() => {
@@ -2015,6 +2034,12 @@ export async function advanceTimelinePhotoView(page, currentText, logPrefix = ''
  *      library).
  *   6. Progress is logged every 100 photos (count + the current photo's
  *      parsed capture date, when one parsed) so a live run can be watched.
+ *   7. A photo whose panel never becomes readable (waitForTimelineAdvance-
+ *      Confirmed's bounded recovery loop exhausts) does NOT stop the walk --
+ *      it's logged loudly, counted, and skipped; a live run wrongly declared
+ *      EXHAUSTED with 103 real jobs still pending over exactly this before
+ *      the fix (2026-09-24). A one-line summary (photos visited, matched,
+ *      unreadable) prints once the loop ends either way.
  */
 export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
   let remaining = [...pendingJobs];
@@ -2043,6 +2068,8 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
   let steps = 0;
   let boundHit = false;
   let stoppedPastOldest = false;
+  let matchedCount = 0;
+  let unreadableCount = 0;
   let text = await readPanelText(page);
   // Live finding, 2026-09-22: a panel read can land EMPTY or STALE
   // immediately after opening/advancing, before Google has actually
@@ -2092,6 +2119,7 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
     let advancedByDelete = false;
 
     if (job) {
+      matchedCount += 1;
       const isDuplicateCopy = matchedJobs.has(job);
       const beforeTrashUrl = page.url(); // captured BEFORE confirmAndTrash -- see the advanced-read comment below
       const confirmed = await confirmAndTrash(page, job, parsed, text, 'timeline', queue, dryRun, isDuplicateCopy);
@@ -2113,7 +2141,32 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
         // wherever the auto-advance already landed) as the baseline for
         // detecting the move.
         const advanced = await waitForTimelineAdvanceConfirmed(page, beforeTrashUrl, text);
-        if (confirmed) {
+        // A trash-driven "unreadable" needs one more check that the
+        // ArrowRight branch below doesn't: trashing the library's LAST photo
+        // makes performTrash's own auto-advance land on NO photo at all (the
+        // view closes, URL reverts to the bare library root), and that reads
+        // as "URL changed, no filename ever appeared" -- identical to a
+        // genuinely-there-but-unreadable photo from waitForTimelineAdvance-
+        // Confirmed's perspective, since it has no way to tell "closed" from
+        // "open but broken". TRASH_SELECTOR visibility is the disambiguator:
+        // it's only present while an actual photo viewer is open, so its
+        // absence here means we've simply reached the end of the library via
+        // this trash's own auto-advance, not a real unreadable photo to
+        // retry later. Caught by a test with a 3rd, trailing readable tile
+        // being wrongly counted as unreadable after the LAST job's trash.
+        const viewerStillOpen = advanced && advanced.unreadable
+          ? await page.locator(TRASH_SELECTOR).first().isVisible().catch(() => false)
+          : false;
+        if (advanced && advanced.unreadable && viewerStillOpen) {
+          // See the ArrowRight-advance branch's identical handling below
+          // for the full "must not end the walk" rationale -- same rule
+          // applies to a trash-driven auto-advance landing on an
+          // unreadable photo.
+          unreadableCount += 1;
+          loud(`[timeline] UNREADABLE photo ${steps + 1} (url ${advanced.url}) — skipped, a later pass will retry`);
+          text = '';
+          advancedByDelete = true;
+        } else if (confirmed) {
           // A confirmed trash ALWAYS counts as having advanced, whether or
           // not waitForTimelineAdvanceConfirmed managed to confirm a full
           // (URL + fresh text) transition -- e.g. trashing the library's
@@ -2140,10 +2193,28 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
 
     if (!advancedByDelete) {
       const next = await advanceTimelinePhotoView(page, text, `[timeline photo ${steps}]`);
-      if (next == null) break; // end of the library, or advancing genuinely failed
-      text = next.text;
+      if (next == null) break; // genuinely end of the library (or an advance ArrowRight+refocus+click all truly swallowed) -- see advanceTimelinePhotoView's header
+      if (next.unreadable) {
+        // LIVE FINDING 2026-09-24 (round 4): a photo whose panel never
+        // becomes readable, even after the full bounded recovery window
+        // (waitForTimelineAdvanceConfirmed's own header), must NEVER end
+        // the walk -- the URL DID change, this is a real, different photo,
+        // we simply couldn't read it this pass. A live run wrongly
+        // declared EXHAUSTED with 103 jobs still pending (real photos
+        // going back to March) over exactly this. Count it loudly and
+        // keep walking from here -- `text=''` means the next loop
+        // iteration finds no filename (never guesses a match) and moves
+        // straight on to advancing again.
+        unreadableCount += 1;
+        loud(`[timeline] UNREADABLE photo ${steps + 1} (url ${next.url}) — skipped, a later pass will retry`);
+        text = '';
+      } else {
+        text = next.text;
+      }
     }
   }
+
+  console.log(`[timeline] summary: ${steps} photo(s) visited, ${matchedCount} matched, ${unreadableCount} unreadable`);
 
   if (remaining.length > 0) {
     if (boundHit) {

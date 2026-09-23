@@ -62,12 +62,19 @@ function panelBlock(filename, w, h, timeLabel = 'Aug 5Wed, 6:54 PMGMT-06:00') {
 /** Capture console.log lines during `fn`, restoring the real console.log after. */
 async function captureLogs(fn) {
   const lines = [];
-  const original = console.log;
+  const originalLog = console.log;
+  const originalError = console.error;
+  // loud() (worker.mjs) writes its "=== PICNIC WORKER BLOCKER ===" lines via
+  // console.error, not console.log -- a caller asserting on an UNREADABLE
+  // log line needs both captured, or the assertion silently only ever sees
+  // ordinary console.log output.
   console.log = (...args) => lines.push(args.join(' '));
+  console.error = (...args) => lines.push(args.join(' '));
   try {
     await fn();
   } finally {
-    console.log = original;
+    console.log = originalLog;
+    console.error = originalError;
   }
   return lines;
 }
@@ -2320,14 +2327,17 @@ test('waitForTimelineAdvanceConfirmed: MUTATION-PROOF TARGET -- reopens the pane
   assert.ok(iPresses >= 1, 'must have pressed "i" to reopen the closed panel');
 });
 
-test('advanceTimelinePhotoView: MUTATION-PROOF TARGET -- never presses ArrowRight again once the URL has already changed, even when confirmation ultimately fails', async () => {
+test('advanceTimelinePhotoView: MUTATION-PROOF TARGET -- never presses ArrowRight again once the URL has already changed, even when the photo turns out UNREADABLE', async () => {
   // Direct seam test: the URL moves on the VERY FIRST ArrowRight press and
   // never changes again, but the panel NEVER renders any content (even
-  // after waitForTimelineAdvanceConfirmed's own reopen attempt) -- models
-  // a genuinely unreadable photo. The old bug pressed ArrowRight again on
-  // every retry regardless, which would silently skip past THIS photo to
-  // a third one. The fix must press ArrowRight exactly once and spend the
-  // rest of its retries only re-reading, never re-pressing.
+  // after the full bounded recovery window) -- models a genuinely
+  // unreadable photo (2026-09-24, round 4: this now resolves to a real
+  // `{ unreadable: true }` outcome, not a failure to confirm -- see
+  // waitForTimelineAdvanceConfirmed's header). The old bug pressed
+  // ArrowRight again on every retry regardless, which would silently skip
+  // past THIS photo to a third one. The fix must press ArrowRight exactly
+  // once and spend the rest of its retries only re-reading, never
+  // re-pressing.
   const beforeUrl = 'https://photos.google.com/photo/BEFORE';
   const afterUrl = 'https://photos.google.com/photo/AFTER';
   let arrowPresses = 0;
@@ -2357,6 +2367,81 @@ test('advanceTimelinePhotoView: MUTATION-PROOF TARGET -- never presses ArrowRigh
 
   const result = await advanceTimelinePhotoView(page, 'PREVIOUS TEXT', '[test]');
 
-  assert.equal(result, null, 'confirmation genuinely never succeeds in this fixture');
-  assert.equal(arrowPresses, 1, 'ArrowRight must be pressed exactly ONCE -- never again after the URL already moved, even though confirmation kept failing');
+  assert.ok(result, 'a URL change with a permanently unreadable panel is a real outcome now, not null (see round 4)');
+  assert.equal(result.unreadable, true);
+  assert.equal(result.url, afterUrl);
+  assert.equal(arrowPresses, 1, 'ArrowRight must be pressed exactly ONCE -- never again after the URL already moved, even though the panel never became readable');
+});
+
+// ============================================================================
+// 2026-09-24 live finding, round 4: a full live run (e6e448b) still ended
+// EXHAUSTED at photo 105 with 103 jobs pending (real photos going back to
+// March) -- "URL advanced but panel still unreadable" fired twice, the
+// second time landing on activeElement=BUTTON[Open info] (the reopen click
+// path was tried but the panel still hadn't rendered, or 'i' toggled an
+// already-open panel shut mid-render). Fixed: the panel-recovery step is now
+// a BOUNDED LOOP (~6 rounds, prefers clicking a VISIBLE "Open info" control
+// over 'i'), and a photo that's STILL unreadable after the full loop no
+// longer ends the walk at all -- it's counted and skipped, the walk keeps
+// going past it.
+// ============================================================================
+
+test('walkTimeline: the panel refuses to open for 2 rounds then succeeds -- the bounded recovery loop still finds the photo', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_9500.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const { job: job2 } = queue.enqueue({ filename: 'IMG_9501.HEIC', creationDate: '2026-08-19T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = timelineTile('recover1');
+    const tile2 = timelineTile('recover2'); // panel closes on arrival, refuses to reopen for 2 attempts
+    const panelText = {
+      [tile1.ariaLabel]: timelinePanelText('IMG_9500.HEIC', 'Aug', 20),
+      [tile2.ariaLabel]: timelinePanelText('IMG_9501.HEIC', 'Aug', 19),
+    };
+    const page = createFakePage({
+      timelineTiles: [tile1, tile2],
+      timelinePanelTextByLabel: panelText,
+      timelinePanelClosesOnLabels: [tile2.ariaLabel],
+      timelinePanelReopenFailuresBeforeSuccess: 2, // fewer than MAX_PANEL_RECOVERY_ROUNDS (6) -- must still succeed
+      infoButtonVisible: true, // exercises the PREFERRED click-to-open path, not the 'i' fallback
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, [job1, job2], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'both jobs must be found -- the panel eventually opens within the bounded recovery window');
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.equal(queue.getById(job2.id).status, 'trashed');
+  });
+});
+
+test('walkTimeline: a photo that is PERMANENTLY unreadable does not end the walk -- it is skipped, counted, and the NEXT photo is still checked', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_9600.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const { job: job3 } = queue.enqueue({ filename: 'IMG_9602.HEIC', creationDate: '2026-08-18T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = timelineTile('unread1');
+    const tile2 = timelineTile('unread2'); // never opens, no matter how many rounds
+    const tile3 = timelineTile('unread3');
+    const panelText = {
+      [tile1.ariaLabel]: timelinePanelText('IMG_9600.HEIC', 'Aug', 20),
+      // tile2 deliberately has NO panel text at all -- it can never render a filename.
+      [tile3.ariaLabel]: timelinePanelText('IMG_9602.HEIC', 'Aug', 18),
+    };
+    const page = createFakePage({
+      timelineTiles: [tile1, tile2, tile3],
+      timelinePanelTextByLabel: panelText,
+      timelinePanelClosesOnLabels: [tile2.ariaLabel],
+      timelinePanelReopenFailuresBeforeSuccess: 999, // never succeeds -- exceeds MAX_PANEL_RECOVERY_ROUNDS by a wide margin
+    });
+
+    const logs = await captureLogs(() => walkTimeline(page, [job1, job3], queue, { dryRun: false }));
+
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.equal(queue.getById(job3.id).status, 'trashed', 'the photo AFTER the unreadable one must still be reached and matched');
+    assert.ok(
+      logs.some((l) => l.includes('UNREADABLE photo') && l.includes('skipped')),
+      `expected a loud UNREADABLE log line, got: ${JSON.stringify(logs)}`
+    );
+    assert.ok(
+      logs.some((l) => l.includes('[timeline] summary:') && l.includes('1 unreadable')),
+      `expected the summary line to count exactly 1 unreadable photo, got: ${JSON.stringify(logs)}`
+    );
+  });
 });
