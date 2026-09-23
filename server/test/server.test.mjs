@@ -163,6 +163,25 @@ test('POST /retry/:id resets an errored job to queued', async () => {
   assert.equal(body.job.status, 'queued');
 });
 
+test('POST /close/:id marks a job not_in_google with the verification reason', async () => {
+  const created = await post('/queue', { filename: 'IMG_4001.HEIC', creationDate: '2026-06-15T14:31:00.000Z', pixelWidth: 4032, pixelHeight: 3024 });
+  const { job } = await created.json();
+  const res = await post(`/close/${job.id}`, { reason: 'three full timeline walks read its neighbours, never it' });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.job.status, 'not_in_google');
+  assert.equal(body.job.closedReason, 'three full timeline walks read its neighbours, never it');
+  const listed = await (await get('/queue?status=not_in_google')).json();
+  assert.ok(listed.jobs.some((j) => j.id === job.id));
+});
+
+test('POST /close/:id requires a reason and a known id', async () => {
+  const created = await post('/queue', { filename: 'IMG_4002.HEIC', creationDate: '2026-06-15T14:32:00.000Z', pixelWidth: 4032, pixelHeight: 3024 });
+  const { job } = await created.json();
+  assert.equal((await post(`/close/${job.id}`, {})).status, 400);
+  assert.equal((await post('/close/does-not-exist', { reason: 'x' })).status, 404);
+});
+
 test('unknown route returns 404', async () => {
   const res = await get('/nope');
   assert.equal(res.status, 404);

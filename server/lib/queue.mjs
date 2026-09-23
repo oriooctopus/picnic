@@ -2,7 +2,10 @@ import { createHash } from 'node:crypto';
 import { readFileSync, appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-export const STATUSES = ['queued', 'trashed', 'needs_review', 'error'];
+// not_in_google: a human verified the photo is absent from the Google Photos
+// library (already in Trash, or deleted on the phone before it ever uploaded),
+// so there is nothing left to mirror. Set only via POST /close/:id.
+export const STATUSES = ['queued', 'trashed', 'needs_review', 'error', 'not_in_google'];
 
 /**
  * Deterministic job id from the idempotency key (filename + creationDate).

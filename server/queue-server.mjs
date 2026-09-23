@@ -358,6 +358,20 @@ export function createApp({ autoDrain = NOOP_AUTO_DRAIN } = {}) {
         return send(res, 200, { job });
       }
 
+      const closeMatch = /^\/close\/([^/]+)$/.exec(url.pathname);
+      if (req.method === 'POST' && closeMatch) {
+        if (!requireAuth(req, res)) return;
+        const id = closeMatch[1];
+        const existing = queue.getById(id);
+        if (!existing) return send(res, 404, { error: 'no such job' });
+        const body = await readJsonBody(req);
+        if (typeof body?.reason !== 'string' || body.reason.trim() === '') {
+          return send(res, 400, { error: 'reason is required: say how absence from Google Photos was verified' });
+        }
+        const job = queue.update(id, { status: 'not_in_google', error: null, closedReason: body.reason.trim() });
+        return send(res, 200, { job });
+      }
+
       const thumbMatch = /^\/thumb\/([^/]+)$/.exec(url.pathname);
       if (req.method === 'GET' && thumbMatch) {
         if (!requireAuthQueryOrHeader(req, res, url)) return;
