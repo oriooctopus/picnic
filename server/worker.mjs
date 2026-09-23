@@ -83,6 +83,7 @@
  * only ever differ in HOW a tile gets opened and read.
  */
 import { execSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { JobQueue } from './lib/queue.mjs';
@@ -239,12 +240,17 @@ let SLOW = false;
 // is now reliable, both are kept selectable so they can be A/B'd live --
 // `photo` (walkPhotoView) stays the default so nothing changes unless asked.
 export function parseArgs(argv) {
-  const args = { cap: DEFAULT_CAP, dryRun: false, slow: false, walk: 'photo' };
+  const args = { cap: DEFAULT_CAP, dryRun: false, slow: false, walk: 'photo', revisitFile: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--cap') args.cap = Number(argv[++i]);
     if (argv[i] === '--dry-run') args.dryRun = true;
     if (argv[i] === '--verbose') VERBOSE = true;
     if (argv[i] === '--slow') args.slow = true;
+    // ROUND 9 (2026-09-25): reuse the revisit pass standalone, against a
+    // previously-logged list of unreadable URLs, without paying for another
+    // multi-thousand-photo walk just to re-collect the same URLs -- see
+    // runRevisitFromFile's own header.
+    if (argv[i] === '--revisit-file') args.revisitFile = argv[++i];
     if (argv[i].startsWith('--walk=')) {
       const value = argv[i].slice('--walk='.length);
       if (value !== 'photo' && value !== 'grid' && value !== 'timeline') {
@@ -254,14 +260,16 @@ export function parseArgs(argv) {
     }
     if (argv[i] === '--help' || argv[i] === '-h') {
       console.log(
-        'Usage: node worker.mjs [--dry-run] [--cap N] [--slow] [--walk=photo|grid|timeline]\n' +
+        'Usage: node worker.mjs [--dry-run] [--cap N] [--slow] [--walk=photo|grid|timeline] [--revisit-file PATH]\n' +
           '  --dry-run    Search + read candidate info + decide, but never trash. Safe default for a first run.\n' +
           '  --cap N      Max queued jobs to process this run (default 50).\n' +
           '  --slow       Restore human-scale pacing (inter-click jitter, dwell, per-character typing). Off by default.\n' +
           '  --walk=MODE  "photo" (default, date-search + ArrowRight through the photo view), "grid" (date-search,\n' +
           '               opens each tile from the results grid directly), or "timeline" (no search at all -- date\n' +
           '               search was measured badly incomplete live -- opens the main library\'s newest photo and\n' +
-          '               walks the photo viewer with ArrowRight, checking every photo\'s filename; see walkTimeline).'
+          '               walks the photo viewer with ArrowRight, checking every photo\'s filename; see walkTimeline).\n' +
+          '  --revisit-file PATH  Skip the walk entirely -- run ONLY the revisit pass (revisitUnreadable), one URL per\n' +
+          '               line in PATH, against currently queued jobs. Ignores --walk when set.'
       );
       process.exit(0);
     }
@@ -2442,7 +2450,14 @@ export async function resumeTimelineAtTime(page, afterCaptureMs, visitedIds = ne
  */
 export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
   let remaining = [...pendingJobs];
-  if (remaining.length === 0) return { stillUnmatched: remaining };
+  // ROUND 9 (2026-09-25 live finding): every URL logged as UNREADABLE this
+  // walk, deduped -- runTimelineWalk feeds this straight into
+  // revisitUnreadable's own direct-navigation pass afterward (see that
+  // function's header for why a direct page.goto() reads reliably where the
+  // in-viewer ArrowRight walk sometimes never resolves a photo's panel at
+  // all, e.g. a Live Photo's heavier page shape).
+  const unreadableUrls = new Set();
+  if (remaining.length === 0) return { stillUnmatched: remaining, unreadableUrls: [...unreadableUrls] };
 
   const matchedJobs = new Set();
   const oldestPendingMs = Math.min(...remaining.map((j) => new Date(j.creationDate).getTime()));
@@ -2460,7 +2475,7 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
   if (!tile) {
     // Nothing on the timeline at all to open -- not a bug, just nothing to walk.
     console.log(`[timeline] EXHAUSTED: 0 photo(s) visited (nothing on the timeline to open), ${remaining.length} job(s) still unmatched`);
-    return { stillUnmatched: remaining };
+    return { stillUnmatched: remaining, unreadableUrls: [...unreadableUrls] };
   }
 
   // Opened ONCE for the whole walk -- the panel is sticky and stays open as
@@ -2664,6 +2679,7 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
           // applies to a trash-driven auto-advance landing on an
           // unreadable photo.
           unreadableCount += 1;
+          unreadableUrls.add(advanced.url);
           loud(`[timeline] UNREADABLE photo ${steps + 1} (url ${advanced.url}) — skipped, a later pass will retry`);
           text = '';
           advancedByDelete = true;
@@ -2744,6 +2760,7 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
         // iteration finds no filename (never guesses a match) and moves
         // straight on to advancing again.
         unreadableCount += 1;
+        unreadableUrls.add(next.url);
         loud(`[timeline] UNREADABLE photo ${steps + 1} (url ${next.url}) — skipped, a later pass will retry`);
         text = '';
       } else {
@@ -2789,7 +2806,23 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
       // back to resume-by-TIME when the last-known tile is gone) to re-find
       // a usable photo and keep walking, rather than declaring the whole
       // walk dead over one photo's failure.
-      const recovery = await recoverOrStop(`[timeline photo ${steps}]`);
+      // recoverOrStop itself can throw (resumeTimelineAt's own internal
+      // openInfoPanelOnce call has the SAME 15s "never found a filename"
+      // throw contract as the try block above, not a graceful null return)
+      // -- a SECOND exception here, while already inside this catch, must
+      // not crash the whole walk either. Caught by writing a test where the
+      // photo the exception happened on is ALSO permanently unreadable via
+      // every resume path (a real, if narrow, live possibility): without
+      // this its own try/catch, that second throw propagated straight out
+      // of runTimelineWalk uncaught.
+      let recovery;
+      try {
+        recovery = await recoverOrStop(`[timeline photo ${steps}]`);
+      } catch (recoveryErr) {
+        if (isPageClosedError(page, recoveryErr)) throw recoveryErr;
+        loud(`[timeline] BLOCKER: recovery itself failed on photo ${steps} -- ${recoveryErr.stack || recoveryErr}`);
+        break;
+      }
       if (recovery === 'stop') {
         stoppedPastOldest = true;
         break;
@@ -2821,6 +2854,97 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
     }
   }
 
+  return { stillUnmatched: remaining, unreadableUrls: [...unreadableUrls] };
+}
+
+/**
+ * REVISIT PASS (round 9, 2026-09-25 live finding): live run 11 logged 186
+ * UNREADABLE photos, 8 jobs never read at all -- but one of those exact URLs
+ * (a Live Photo, "Turn on motion" + "People / 1 face available to add"
+ * sections above Details -- a heavier page than an ordinary photo) turned
+ * out to BE one of the pending jobs, and Oliver's own direct probe
+ * (page.goto() straight to the URL) read its filename cleanly on the FIRST
+ * attempt, ~1.5s in. Direct navigation reads reliably exactly where the
+ * in-viewer ArrowRight walk's own bounded recovery (waitForTimelineAdvance-
+ * Confirmed's MAX_PANEL_RECOVERY_ROUNDS) sometimes never resolves at all.
+ *
+ * For each URL: goto() it (a live probe TIMED OUT at 30s -- the default
+ * Playwright navigation timeout was too tight for this specific, heavier
+ * page shape, so this uses a 60s timeout instead), then reuses
+ * openInfoPanelOnce UNCHANGED -- the exact same open-if-closed / poll-if-
+ * loading / never-toggle-while-loading machinery (see its own header,
+ * round 8) the main walk already trusts, not a second implementation of the
+ * same logic. Once readable, runs the SAME findMatchingJob + confirmAndTrash
+ * path walkTimeline uses, including duplicate copies (the same matchedJobs
+ * convention: a job stays a candidate after its first trash, so a further
+ * copy at a LATER url in the list still gets found).
+ *
+ * A goto() that times out or throws for any other reason is caught and
+ * logged, never crashes the pass -- one bad URL must not cost every other
+ * one a chance (see the "goto timeout on one URL doesn't stop the pass"
+ * test). A genuine isPageClosedError (CDP/tab gone) is the one exception
+ * that still propagates -- not a per-URL quirk, an infra failure the caller
+ * needs to know about.
+ *
+ * Returns { stillUnmatched } plus the counts revisitUnreadable's own caller
+ * needs for its summary line.
+ */
+export async function revisitUnreadable(page, urls, pendingJobs, queue, { dryRun }) {
+  let remaining = [...pendingJobs];
+  const matchedJobs = new Set();
+  let revisitedCount = 0;
+  let readCount = 0;
+  let matchedCount = 0;
+
+  for (let i = 0; i < urls.length; i++) {
+    // Once nothing is left to find (no remaining jobs, and no duplicate
+    // copies of an already-trashed job worth still hunting for -- same
+    // convention walkTimeline's own main loop uses), stop early rather than
+    // burning the rest of the URL list for nothing.
+    if (remaining.length === 0 && matchedJobs.size === 0) break;
+    const url = urls[i];
+    revisitedCount += 1;
+
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    } catch (err) {
+      if (isPageClosedError(page, err)) throw err; // genuine infra failure -- must propagate, never swallowed as "just this URL"
+      console.log(`[revisit] ${i + 1}/${urls.length} ${url} → goto failed (${err.message || err})`);
+      continue;
+    }
+
+    let text;
+    try {
+      await openInfoPanelOnce(page);
+      text = await readPanelText(page);
+    } catch (err) {
+      // openInfoPanelOnce's own 15s-bounded throw ("info panel never
+      // produced filename text") means this URL is STILL unreadable even
+      // via direct navigation -- log and move on to the next one.
+      console.log(`[revisit] ${i + 1}/${urls.length} ${url} → still unreadable (${err.message || err})`);
+      continue;
+    }
+    readCount += 1;
+    const parsed = parsePanelText(text);
+    console.log(`[revisit] ${i + 1}/${urls.length} ${url} → ${parsed.filename ?? '(no filename)'}`);
+    if (!parsed.filename) continue;
+
+    const candidateJobs = matchedJobs.size > 0 ? [...remaining, ...matchedJobs] : remaining;
+    const job = findMatchingJob(candidateJobs, parsed);
+    if (!job) continue;
+
+    matchedCount += 1;
+    const isDuplicateCopy = matchedJobs.has(job);
+    await confirmAndTrash(page, job, parsed, text, 'revisit', queue, dryRun, isDuplicateCopy);
+    if (!isDuplicateCopy) {
+      remaining = remaining.filter((j) => j !== job);
+      matchedJobs.add(job);
+    }
+  }
+
+  console.log(
+    `[revisit] summary: ${revisitedCount} revisited, ${readCount} read, ${matchedCount} matched, ${revisitedCount - readCount} still unreadable`
+  );
   return { stillUnmatched: remaining };
 }
 
@@ -2843,8 +2967,19 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
 export async function runTimelineWalk(page, jobs, queue, { dryRun }) {
   let unmatched = [...jobs];
   try {
-    const { stillUnmatched } = await walkTimeline(page, unmatched, queue, { dryRun });
+    const { stillUnmatched, unreadableUrls } = await walkTimeline(page, unmatched, queue, { dryRun });
     unmatched = stillUnmatched;
+    // ROUND 9 (2026-09-25 live finding): after the main walk ends normally
+    // (EXHAUSTED / stopped past the oldest job / MAX_TIMELINE_PHOTOS --
+    // never after a page-closed throw, handled entirely separately below),
+    // any job still unmatched gets one more chance via revisitUnreadable's
+    // own header for the live evidence this exists for -- direct navigation
+    // reads reliably where the in-viewer walk sometimes never resolves a
+    // photo's panel at all.
+    if (unmatched.length > 0 && unreadableUrls.length > 0) {
+      const { stillUnmatched: afterRevisit } = await revisitUnreadable(page, unreadableUrls, unmatched, queue, { dryRun });
+      unmatched = afterRevisit;
+    }
   } catch (err) {
     if (isPageClosedError(page, err)) {
       // Nothing was learned about any in-flight job -- everything not
@@ -2885,7 +3020,37 @@ export async function runTimelineWalk(page, jobs, queue, { dryRun }) {
   }
 }
 
-export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'photo' } = {}) {
+/**
+ * Standalone entry for `--revisit-file PATH` (round 9): runs ONLY
+ * revisitUnreadable, against currently queued jobs, reading one URL per
+ * line from `filePath` -- lets Oliver feed back the exact "[timeline]
+ * UNREADABLE photo ... (url ...)" URLs a PREVIOUS full walk already
+ * printed, without paying for another multi-thousand-photo walk just to
+ * re-collect the same list (live run 11 alone logged 186 of them).
+ */
+export async function runRevisitFromFile(page, filePath, jobs, queue, { dryRun }) {
+  const urls = readFileSync(filePath, 'utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (urls.length === 0) {
+    console.log(`[revisit] ${filePath} contained no URLs -- nothing to do`);
+    return;
+  }
+  console.log(`[revisit] standalone run: ${urls.length} URL(s) from ${filePath}, ${jobs.length} queued job(s)`);
+  const { stillUnmatched } = await revisitUnreadable(page, urls, jobs, queue, { dryRun });
+  for (const job of stillUnmatched) {
+    const reason = `revisit pass (${urls.length} URL(s) from --revisit-file) found no filename match`;
+    if (dryRun) {
+      console.log(`[dry-run needs_review] ${job.filename}: ${reason}`);
+    } else {
+      queue.update(job.id, { status: 'needs_review', comparison: { reason }, attempts: job.attempts + 1 });
+      console.log(`[needs_review] ${job.filename}: ${reason}`);
+    }
+  }
+}
+
+export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'photo', revisitFile = null } = {}) {
   const queue = new JobQueue(QUEUE_PATH);
   const jobs = queue.loadAll().filter((j) => j.status === 'queued').slice(0, cap);
 
@@ -2896,14 +3061,17 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'pho
 
   // Date grouping is only meaningful for the search-based walks -- the
   // timeline walk takes the flat job list directly (see runTimelineWalk's
-  // header for why it needs no per-date loop).
-  const groups = walk === 'timeline' ? null : groupJobsByDate(jobs);
+  // header for why it needs no per-date loop), and --revisit-file skips
+  // grouping/walking entirely (runRevisitFromFile's own header).
+  const groups = revisitFile || walk === 'timeline' ? null : groupJobsByDate(jobs);
 
   if (dryRun) {
     console.log(
-      walk === 'timeline'
-        ? `--dry-run: will scroll the timeline + decide for ${jobs.length} job(s) but never trash or mutate the queue.`
-        : `--dry-run: will search + decide for ${jobs.length} job(s) across ${groups.size} date(s) but never trash or mutate the queue.`
+      revisitFile
+        ? `--dry-run: will revisit ${jobs.length} job(s) against the URL list in ${revisitFile} but never trash or mutate the queue.`
+        : walk === 'timeline'
+          ? `--dry-run: will scroll the timeline + decide for ${jobs.length} job(s) but never trash or mutate the queue.`
+          : `--dry-run: will search + decide for ${jobs.length} job(s) across ${groups.size} date(s) but never trash or mutate the queue.`
     );
   }
 
@@ -2938,7 +3106,11 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'pho
     const context = browser.contexts()[0] ?? (await browser.newContext());
     page = await context.newPage();
     await openPhotosHome(page); // lands on the main timeline either way -- no search is ever performed for --walk=timeline
-    if (walk === 'timeline') {
+    if (revisitFile) {
+      // Standalone revisit -- skips the walk (--walk) entirely, see
+      // runRevisitFromFile's own header.
+      await runRevisitFromFile(page, revisitFile, jobs, queue, { dryRun });
+    } else if (walk === 'timeline') {
       await runTimelineWalk(page, jobs, queue, { dryRun });
     } else {
       await runDateGroups(page, groups, queue, { dryRun, walk });

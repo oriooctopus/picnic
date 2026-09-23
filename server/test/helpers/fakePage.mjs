@@ -778,6 +778,8 @@ function advanceToNextTile(page) {
  *   confirmClickFailuresBeforeSuccess?: number, // 2026-09-25 (round 5): the first N clicks on the trash CONFIRM DIALOG's own button throw a detach-style error -- see isConfirmDialogButtonSelector
  *   confirmClickAlreadyTrashedOnFailure?: boolean, // 2026-09-25 (round 5): when a confirm-dialog click is configured to fail (above), also model the FIRST such click having actually worked (performTrash runs, dialogOpen closes) before it throws -- the "gone with the photo already trashed" variant confirmDialog's recovery must recognize
  *   throwOnKeyForLabel?: {label: string, key: string, message?: string}, // 2026-09-25 (round 5): the NEXT press of `key` while `label`'s photo is open throws a generic Error -- models an arbitrary unexpected failure walkTimeline's own per-photo try/catch must recover from, distinct from the confirm-dialog-specific detach above
+ *   gotoFailsForUrls?: string[]|Set<string>, // 2026-09-25 (round 9): page.goto() throws (timeout-shaped) for these exact URLs -- see revisitUnreadable's own try/catch in worker.mjs
+ *   revisitPanelTextByLabel?: Record<string, string>, // 2026-09-25 (round 9): panel text seen ONLY via a direct page.goto(url) open (the timeline photo URL shape), distinct from timelinePanelTextByLabel -- models a photo reading reliably via direct navigation where the in-viewer walk never resolved it
  * }}
  */
 export function createFakePage(config = {}) {
@@ -1001,6 +1003,17 @@ export function createFakePage(config = {}) {
     },
     async goto(url) {
       page.log.push(`goto:${url}`);
+      // ROUND 9 (2026-09-25, revisitUnreadable): models a goto() that TIMES
+      // OUT or otherwise throws for a specific URL -- Oliver's own live
+      // probe hit a genuine 30s goto timeout on one URL, which is exactly
+      // the failure revisitUnreadable's own try/catch must survive without
+      // aborting the whole pass. `config.gotoFailsForUrls` is an
+      // array/Set of URLs; any other URL navigates normally.
+      const fails = page.config.gotoFailsForUrls;
+      const shouldFail = fails instanceof Set ? fails.has(url) : Array.isArray(fails) && fails.includes(url);
+      if (shouldFail) {
+        throw new Error(`ROUND 9 FIXTURE: simulated goto failure (e.g. timeout) for ${url}`);
+      }
       page._url = url;
       // A real navigation always leaves the photo viewer, back at the base
       // grid -- resumeTimelineAt (round 5, worker.mjs) explicitly goto()s
@@ -1010,6 +1023,57 @@ export function createFakePage(config = {}) {
       // do anything after a resume's goto.
       page.openedAriaLabel = null;
       page.openedIdentity = null;
+      page.infoPanelOpen = false; // a fresh page load never carries over a previously-open panel
+      // ROUND 9 (2026-09-25, revisitUnreadable): a direct page.goto(url) to
+      // one of THIS walk's own timeline photo URLs (exactly the shape
+      // page.url() derives below: "https://photos.google.com/photo/
+      // <encodeURIComponent(identity)>") lands straight in that photo's
+      // viewer, matching the real Google Photos behaviour revisitUnreadable
+      // depends on -- opening the SAME tile identity-scoped (openTileInFake)
+      // reuses every existing panel-text/lag-simulation fixture unchanged,
+      // rather than needing a second, URL-keyed config surface. A trashed
+      // identity is skipped (its tile is genuinely gone), leaving the panel
+      // closed -- openInfoPanelOnce then correctly times out on it, exactly
+      // like a live 404/redirect on an already-deleted photo's URL would.
+      //
+      // Deliberately scoped to ONLY this photo-URL branch, not every
+      // goto() (e.g. resumeTimelineAt's own base-library-root goto): a
+      // leftover reopen-failure budget (timelinePanelReopenFailuresBefore-
+      // Success, armed when the panel closed on arrival DURING the walk's
+      // own ArrowRight traversal) belongs to the OLD render context, and a
+      // genuinely fresh navigation has no such "recently failed to reopen"
+      // history to inherit -- but resetting it unconditionally on EVERY
+      // goto() would have silently changed round 6's resume-by-id behaviour
+      // too (its own reopen of the SAME still-failing tile would then
+      // spuriously succeed), caught by running the full suite after an
+      // earlier draft did exactly that, not by inspection.
+      const m = /^https:\/\/photos\.google\.com\/photo\/(.+)$/.exec(url);
+      if (m && page.config.timelineTiles != null) {
+        const identity = decodeURIComponent(m[1]);
+        if (!page.trashedIdentities.has(identity)) {
+          const tile = page.config.timelineTiles.find((t) => identityOf(t) === identity);
+          if (tile) {
+            page._timelinePanelReopenFailuresRemaining = 0;
+            openTileInFake(page, tile.ariaLabel, tile.href);
+            // ROUND 9: `config.revisitPanelTextByLabel` lets a fixture
+            // configure content that's ONLY seen via a direct navigation
+            // open, distinct from `timelinePanelTextByLabel` (what the
+            // in-viewer ArrowRight walk sees) -- directly models the live
+            // finding that the SAME photo read reliably via page.goto()
+            // where the walk's own ArrowRight/resume traversal never
+            // resolved it at all. Force a fresh "transition" so this
+            // overrides whatever state the label carried from earlier in
+            // the walk (a prior render-delay/stale-read countdown, etc.).
+            if (page.config.revisitPanelTextByLabel?.[tile.ariaLabel] != null) {
+              page._timelinePanelIdentity = page.openedIdentity ?? page.openedAriaLabel;
+              page._timelinePanelRealText = page.config.revisitPanelTextByLabel[tile.ariaLabel];
+              page._timelinePendingRenderDelay = 0;
+              page._timelinePendingDetailsOnly = 0;
+              page._timelinePendingStaleReads = 0;
+            }
+          }
+        }
+      }
     },
     async bringToFront() {
       page.guard();

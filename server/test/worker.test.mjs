@@ -33,6 +33,8 @@ const {
   moveToTrash,
   walkTimeline,
   runTimelineWalk,
+  revisitUnreadable,
+  runRevisitFromFile,
   MAX_TIMELINE_PHOTOS,
   TIMELINE_STOP_BUFFER_DAYS,
   waitForTimelineAdvanceConfirmed,
@@ -1491,6 +1493,11 @@ test('both --walk strategies reach a job whose photo is LAST on the date; the de
   assert.equal(parseArgs(['--walk=photo']).walk, 'photo');
 });
 
+test('parseArgs: --revisit-file PATH (round 9) is null by default and captures the given path', () => {
+  assert.equal(parseArgs([]).revisitFile, null, 'no --revisit-file flag must leave the standalone revisit pass off');
+  assert.equal(parseArgs(['--revisit-file', '/tmp/urls.txt']).revisitFile, '/tmp/urls.txt');
+});
+
 // REGRESSION TEST for the exact bug walkGrid's cumulative `seen` set exists
 // to prevent: a VIRTUALIZED grid (config.windowSize) only ever mounts a
 // WINDOW of tiles, so the on-screen tile COUNT can stay perfectly flat across
@@ -2828,5 +2835,101 @@ test('waitForTimelineAdvanceConfirmed / openInfoPanelOnce: a GENUINELY closed pa
       page.log.some((l) => l === 'key:i' || l.includes('Open info')),
       `expected a real reopen action (key press or "Open info" click) in the log, got: ${JSON.stringify(page.log)}`
     );
+  });
+});
+
+// ============================================================================
+// ROUND 9 (2026-09-25 live finding): live run 11 read 0/2397 photos into a
+// match, 186 UNREADABLE, 8 jobs never read at all -- but Oliver's own probe
+// showed ONE of those exact unreadable URLs IS a pending job (a Live Photo),
+// and a DIRECT page.goto() to it read the filename cleanly on the first try
+// where the in-viewer ArrowRight walk never could. revisitUnreadable
+// (worker.mjs) is the fix: after the main walk, re-navigate directly to
+// every URL it logged as unreadable and try again.
+// ============================================================================
+
+test('runTimelineWalk: an UNREADABLE photo during the walk gets found and trashed by the revisit pass afterward', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_9930.HEIC', creationDate: '2026-09-10T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const { job: job2 } = queue.enqueue({ filename: 'IMG_9931.HEIC', creationDate: '2026-09-09T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = dateTimelineTile('rev1', 'Sep', 10);
+    const tile2 = dateTimelineTile('rev2', 'Sep', 9);
+    const page = createFakePage({
+      timelineTiles: [tile1, tile2],
+      timelinePanelTextByLabel: {
+        [tile1.ariaLabel]: timelinePanelText('IMG_9930.HEIC', 'Sep', 10),
+        // tile2 deliberately has NO entry here -- unreadable through EVERY
+        // in-viewer mechanism (the main ArrowRight walk, and round 6's own
+        // resume-by-id/resume-by-time, both of which reopen the SAME tile
+        // via the SAME lookup) -- exactly the live "186 UNREADABLE, 8 jobs
+        // never read" symptom this round exists to recover from.
+      },
+      // Content ONLY a direct page.goto(url) to tile2's own URL sees -- see
+      // revisitPanelTextByLabel's own header for why this is the live
+      // finding's actual shape (direct navigation reads reliably where the
+      // walk doesn't), not a shortcut around it.
+      revisitPanelTextByLabel: {
+        [tile2.ariaLabel]: timelinePanelText('IMG_9931.HEIC', 'Sep', 9),
+      },
+    });
+
+    await runTimelineWalk(page, [queue.getById(job1.id), queue.getById(job2.id)], queue, { dryRun: false });
+
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.equal(
+      queue.getById(job2.id).status,
+      'trashed',
+      'the revisit pass must find and trash job2 via direct navigation after the main walk marked it unreadable'
+    );
+  });
+});
+
+test('revisitUnreadable: a goto() timeout on ONE url does not stop the pass -- the next url is still tried and matched', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_9940.HEIC', creationDate: '2026-09-10T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = dateTimelineTile('goto-fail-target', 'Sep', 10);
+    const page = createFakePage({
+      timelineTiles: [tile1],
+      timelinePanelTextByLabel: {}, // in-viewer text irrelevant -- revisit navigates directly
+      revisitPanelTextByLabel: { [tile1.ariaLabel]: timelinePanelText('IMG_9940.HEIC', 'Sep', 10) },
+      gotoFailsForUrls: ['https://photos.google.com/photo/broken-url-1'],
+    });
+    const urls = ['https://photos.google.com/photo/broken-url-1', `https://photos.google.com/photo/${encodeURIComponent(tile1.href)}`];
+
+    const logs = await captureLogs(() =>
+      revisitUnreadable(page, urls, [queue.getById(job1.id)], queue, { dryRun: false })
+    );
+
+    assert.equal(queue.getById(job1.id).status, 'trashed', 'the SECOND url must still be tried and matched despite the first url\'s goto failing');
+    assert.ok(
+      logs.some((l) => l.includes('goto failed')),
+      `expected a "goto failed" log for the broken url, got: ${JSON.stringify(logs)}`
+    );
+  });
+});
+
+test('runRevisitFromFile: --revisit-file standalone entry reads one URL per line and runs ONLY the revisit pass', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_9950.HEIC', creationDate: '2026-09-10T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = dateTimelineTile('file-target', 'Sep', 10);
+    const page = createFakePage({
+      timelineTiles: [tile1],
+      revisitPanelTextByLabel: { [tile1.ariaLabel]: timelinePanelText('IMG_9950.HEIC', 'Sep', 10) },
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'picnic-revisit-file-test-'));
+    const filePath = join(dir, 'urls.txt');
+    // Blank lines and surrounding whitespace, matching a real pasted-in log
+    // excerpt (Oliver's own use case: feed back a previous run's own
+    // "[timeline] UNREADABLE photo ... (url ...)" lines) -- must be
+    // tolerated, never treated as an empty/invalid URL to navigate to.
+    writeFileSync(filePath, `\n  https://photos.google.com/photo/${encodeURIComponent(tile1.href)}  \n\n`, 'utf8');
+
+    try {
+      await runRevisitFromFile(page, filePath, [queue.getById(job1.id)], queue, { dryRun: false });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    assert.equal(queue.getById(job1.id).status, 'trashed', 'the standalone --revisit-file entry must find and trash the job via the file\'s URL');
   });
 });
