@@ -706,6 +706,97 @@ test('moveToTrash: confirm dialog shown and clicked, followed by the "moved to t
   assert.equal(confirmed, true, 'a genuinely shown-and-clicked dialog followed by the toast must confirm');
 });
 
+// ROUND 5 (2026-09-25 live finding): a live run's confirm-dialog click
+// threw "element was detached from the DOM, retrying" with NO explicit
+// timeout (Playwright's 30s default), hanging uncaught out of moveToTrash
+// and, via walkTimeline's old no-catch design, killing the whole walk and
+// wrongly marking 102 OTHER unrelated jobs 'error'. Two variants below,
+// matching confirmDialog's own two recovery paths.
+
+test('moveToTrash: the confirm dialog button DETACHES on the first click but the dialog is still genuinely up -- retries and confirms', async () => {
+  let dialogVisible = false;
+  let toastVisible = false;
+  let clickAttempts = 0;
+  const page = {
+    keyboard: {
+      press: async (key) => {
+        if (key === '#') dialogVisible = true;
+      },
+    },
+    locator: (selector) => ({
+      first: () => ({
+        isVisible: async () => {
+          if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) return dialogVisible;
+          if (/moved to \(trash\|bin\)/i.test(selector)) return toastVisible;
+          return false;
+        },
+        click: async () => {
+          if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) {
+            clickAttempts += 1;
+            if (clickAttempts === 1) {
+              // The button re-rendered/repositioned mid-click -- the dialog
+              // is STILL genuinely up (dialogVisible untouched).
+              throw new Error('element was detached from the DOM, retrying');
+            }
+            dialogVisible = false;
+            toastVisible = true;
+          }
+        },
+      }),
+      all: async () => [],
+    }),
+    viewportSize: () => ({ width: 1280, height: 800 }),
+    mouse: { click: async () => {} },
+    evaluate: async () => ({ detailsAndFile: [], dimsAndFile: [], fileOnly: [] }),
+  };
+
+  const confirmed = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
+
+  assert.equal(confirmed, true, 'a detach mid-click with the dialog still up must retry and confirm, not throw');
+  assert.equal(clickAttempts, 2, 'expected exactly one retry after the first detach');
+});
+
+test('moveToTrash: the confirm dialog button DETACHES on the first click because the dialog already closed -- the photo WAS trashed -- confirmed without a further retry', async () => {
+  let dialogVisible = false;
+  let toastVisible = false;
+  let clickAttempts = 0;
+  const page = {
+    keyboard: {
+      press: async (key) => {
+        if (key === '#') dialogVisible = true;
+      },
+    },
+    locator: (selector) => ({
+      first: () => ({
+        isVisible: async () => {
+          if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) return dialogVisible;
+          if (/moved to \(trash\|bin\)/i.test(selector)) return toastVisible;
+          return false;
+        },
+        click: async () => {
+          if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) {
+            clickAttempts += 1;
+            // The click DID work -- Google's own dialog-close animation is
+            // what detached the button out from under the click handler.
+            dialogVisible = false;
+            toastVisible = true;
+            throw new Error('element was detached from the DOM, retrying');
+          }
+        },
+      }),
+      all: async () => [],
+    }),
+    viewportSize: () => ({ width: 1280, height: 800 }),
+    mouse: { click: async () => {} },
+    evaluate: async () => ({ detailsAndFile: [], dimsAndFile: [], fileOnly: [] }),
+  };
+
+  const confirmed = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
+
+  assert.equal(confirmed, true, 'a detach whose dialog is already gone WITH toast evidence must confirm without a further retry click');
+  assert.equal(clickAttempts, 1, 'must not retry once gone-with-evidence is recognized');
+});
+
 // REWRITTEN 2026-09-01 for the in-photo-view traversal: "how many tiles were
 // opened" is no longer the right fingerprint (only the first tile is ever
 // grid-clicked -- see the two tests above), so this now checks how many
@@ -2549,5 +2640,48 @@ test('walkTimeline: the initial position skips photos newer than any pending job
     // the fake records for every open.
     const firstClick = page.log.find((l) => l.startsWith('tile-click:'));
     assert.equal(firstClick, `tile-click:${tiles[2].ariaLabel}`, `expected the walk to open "target" first, got: ${firstClick}`);
+  });
+});
+
+test('walkTimeline: an unexpected exception on ONE photo does not kill the whole walk -- only that job goes to needs_review, the rest keep matching', async () => {
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_9700.HEIC', creationDate: '2026-09-10T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const { job: job2 } = queue.enqueue({ filename: 'IMG_9701.HEIC', creationDate: '2026-09-09T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = dateTimelineTile('exc1', 'Sep', 10);
+    const tile2 = dateTimelineTile('exc2', 'Sep', 9);
+    const panelText = {
+      [tile1.ariaLabel]: timelinePanelText('IMG_9700.HEIC', 'Sep', 10),
+      [tile2.ariaLabel]: timelinePanelText('IMG_9701.HEIC', 'Sep', 9),
+    };
+    const page = createFakePage({
+      timelineTiles: [tile1, tile2],
+      timelinePanelTextByLabel: panelText,
+      // Simulates an arbitrary unexpected failure mid-trash for job1's photo
+      // specifically -- see throwOnKeyForLabel's own header. Distinct from
+      // the confirm-dialog-detach scenario the two moveToTrash tests above
+      // cover: this exercises walkTimeline's OWN recovery, not confirmDialog's.
+      throwOnKeyForLabel: { label: tile1.ariaLabel, key: '#', message: 'simulated unexpected trash failure' },
+    });
+
+    const logs = await captureLogs(() => walkTimeline(page, [job1, job2], queue, { dryRun: false }));
+
+    assert.equal(
+      queue.getById(job1.id).status,
+      'needs_review',
+      'the photo whose trash step threw must be needs_review, never left queued or wrongly marked trashed'
+    );
+    assert.equal(
+      queue.getById(job2.id).status,
+      'trashed',
+      'the OTHER job must still be reached and correctly matched despite job1 throwing'
+    );
+    assert.ok(
+      logs.some((l) => l.includes('BLOCKER') && l.includes('unexpected error')),
+      `expected a loud BLOCKER log for the unexpected error, got: ${JSON.stringify(logs)}`
+    );
+    assert.ok(
+      logs.some((l) => l.includes('needs_review') && l.includes('IMG_9700')),
+      `expected a needs_review log naming the failed job, got: ${JSON.stringify(logs)}`
+    );
   });
 });

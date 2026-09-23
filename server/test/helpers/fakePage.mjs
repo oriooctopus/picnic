@@ -126,6 +126,18 @@ function isTimelineSelector(selector) {
 }
 
 /**
+ * True when `selector` is the trash CONFIRM DIALOG's own button (worker.mjs's
+ * moveToTrash: `'button:has-text("Move to trash"), button:has-text("Delete"),
+ * button:has-text("Move to bin")'`) -- distinct from TRASH_SELECTOR, the
+ * TOOLBAR control that OPENS the dialog. Round 5 (2026-09-25) needs to
+ * recognize this specific selector to model a click that DETACHES the
+ * element it just resolved (config.confirmClickFailuresBeforeSuccess below).
+ */
+function isConfirmDialogButtonSelector(selector) {
+  return typeof selector === 'string' && (/has-text\("Move to trash"\)/i.test(selector) || /has-text\("Delete"\)/i.test(selector));
+}
+
+/**
  * All tiles currently "in the grid" for the active query: the base
  * searchResults plus whatever scroll has revealed so far, minus anything
  * already trashed. Shared by the identity-selector count/visible/click
@@ -431,6 +443,32 @@ class FakeLocator {
         return;
       }
     }
+    // ROUND 5 (2026-09-25 live finding): the confirm dialog's OWN button can
+    // DETACH mid-click ("element was detached from the DOM, retrying") --
+    // see confirmDialog's own header in worker.mjs for the two distinct
+    // causes this models, matched by `config.confirmClickAlreadyTrashedOnFailure`:
+    //   - unset (default): the button re-rendered/repositioned -- the dialog
+    //     stays open (page.dialogOpen untouched), so confirmDialog's retry
+    //     re-resolves and clicks again, succeeding once the budget below runs
+    //     out.
+    //   - true: the FIRST click actually WORKED (performTrash runs here,
+    //     exactly as a real successful click would trigger via onClick
+    //     below) and it's the dialog's own close animation that detaches the
+    //     button out from under the click handler -- confirmDialog must
+    //     recognize the toast/panel-change evidence and treat this as
+    //     confirmed WITHOUT a further retry.
+    // Either way the throw itself is unconditional: a real detach IS a
+    // thrown exception from Playwright's click(), which is exactly the
+    // shape confirmDialog's try/catch must recover from, not a config value
+    // it gets to peek at.
+    if (isConfirmDialogButtonSelector(this.selector) && this.page._confirmClickFailuresRemaining > 0) {
+      this.page._confirmClickFailuresRemaining -= 1;
+      if (this.page.config.confirmClickAlreadyTrashedOnFailure) {
+        this.page.dialogOpen = false;
+        performTrash(this.page);
+      }
+      throw new Error('element was detached from the DOM, retrying');
+    }
     await this.page.onClick?.(this.selector);
   }
   async count() {
@@ -707,6 +745,11 @@ function advanceToNextTile(page) {
  *   timelinePanelClosesOnLabels?: string[]|Set<string>, // 2026-09-23/24: the info panel is CLOSED on arrival at any of these labels via an ADVANCE (ArrowRight, click fallback, or a trash's own auto-advance) -- never the first tile opened -- see closeInfoPanelOnArrivalIfConfigured
  *   timelinePanelReopenFailuresBeforeSuccess?: number, // 2026-09-24 (round 4): the first N attempts to reopen a CLOSED panel (via 'i' or the "Open info" button, whichever worker.mjs tries) fail outright; the next one succeeds -- see attemptOpenInfoPanel
  *   timelineFocusLostAfterFallbackClick?: boolean, // 2026-09-23: a toolbar fallback click (trash control OR "View next photo") leaves keyboard focus off the viewer -- ArrowRight/'#' become no-ops until a real click (focusViewerCenter) restores it
+ *   timelineInitialLoadedCount?: number, // 2026-09-25 (round 5): how many of timelineTiles are "mounted" at the start -- Infinity (unbounded) when unset -- see loadedTimelineTiles
+ *   timelineLoadStep?: number, // 2026-09-25 (round 5): how many MORE tiles a grid-mode (no photo open) downward scroll mounts -- see the mouse.wheel timeline branch
+ *   confirmClickFailuresBeforeSuccess?: number, // 2026-09-25 (round 5): the first N clicks on the trash CONFIRM DIALOG's own button throw a detach-style error -- see isConfirmDialogButtonSelector
+ *   confirmClickAlreadyTrashedOnFailure?: boolean, // 2026-09-25 (round 5): when a confirm-dialog click is configured to fail (above), also model the FIRST such click having actually worked (performTrash runs, dialogOpen closes) before it throws -- the "gone with the photo already trashed" variant confirmDialog's recovery must recognize
+ *   throwOnKeyForLabel?: {label: string, key: string, message?: string}, // 2026-09-25 (round 5): the NEXT press of `key` while `label`'s photo is open throws a generic Error -- models an arbitrary unexpected failure walkTimeline's own per-photo try/catch must recover from, distinct from the confirm-dialog-specific detach above
  * }}
  */
 export function createFakePage(config = {}) {
@@ -734,6 +777,11 @@ export function createFakePage(config = {}) {
     // every pre-round-5 fixture that never sets timelineInitialLoadedCount
     // keeps behaving exactly as before; only grows via a grid-mode scroll.
     timelineLoadedCount: config.timelineInitialLoadedCount ?? Infinity,
+    // ROUND 5 (2026-09-25): how many leading clicks on the trash confirm
+    // DIALOG's own button throw a detach-style error before succeeding --
+    // see isConfirmDialogButtonSelector's header. 0 by default (no fixture
+    // that never sets confirmClickFailuresBeforeSuccess is affected).
+    _confirmClickFailuresRemaining: config.confirmClickFailuresBeforeSuccess ?? 0,
     recollectCount: {},
     escapePresses: 0,
     infoPressesSwallowed: 0, // count of "i" presses dropped so far, capped by config.swallowInfoPressesCount
@@ -753,6 +801,22 @@ export function createFakePage(config = {}) {
       async press(key) {
         page.guard();
         page.log.push(`key:${key}`);
+        // ROUND 5 (2026-09-25): models an arbitrary UNEXPECTED failure mid
+        // per-photo processing (distinct from the confirm-dialog-specific
+        // detach modelled in FakeLocator.click() above) -- e.g. a genuine
+        // '#' keypress failure while pressing Google Photos' own trash
+        // shortcut, well before any confirm-dialog button exists to click.
+        // Exists to prove walkTimeline's OWN try/catch (worker.mjs, "ROUND 5
+        // ... the whole per-photo match/trash/advance step below is now
+        // wrapped") recovers from a raw, unrelated exception, not just from
+        // the specific bug confirmDialog's own retry logic already handles.
+        if (
+          page.config.throwOnKeyForLabel &&
+          page.openedAriaLabel === page.config.throwOnKeyForLabel.label &&
+          key === page.config.throwOnKeyForLabel.key
+        ) {
+          throw new Error(page.config.throwOnKeyForLabel.message ?? 'simulated unexpected failure');
+        }
         if (key === 'Escape') {
           page.escapePresses += 1;
           page.openedAriaLabel = null;

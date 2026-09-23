@@ -893,17 +893,14 @@ export async function moveToTrash(page, panelTextBefore) {
     return null;
   };
 
-  const confirmDialog = async () => {
-    const confirm = await waitForConfirmButton();
-    if (!confirm) return false;
-    await stealthDelay(600, 1500); // pure mimicry, off unless --slow
-    await confirm.click();
-    return true;
-  };
-
   // Polls for the two POST-dialog signals (never authoritative on their own
   // -- see isTrashConfirmed) and reports which one (if either) fired, so the
-  // caller can feed both into the actual confirmation decision.
+  // caller can feed both into the actual confirmation decision. Declared
+  // before confirmDialog (2026-09-25) because confirmDialog's own detach
+  // recovery now needs it too -- both are plain const closures never called
+  // until moveToTrash's body runs further down, so this ordering is only
+  // about readability, not correctness (nothing here executes at
+  // declaration time either way).
   const settled = async () => {
     const deadline = Date.now() + (FAST_DELAYS ? 50 : 12000);
     while (Date.now() < deadline) {
@@ -915,6 +912,68 @@ export async function moveToTrash(page, panelTextBefore) {
       if (panelChanged) return { toastShown: false, panelChanged: true };
     }
     return { toastShown: false, panelChanged: false };
+  };
+
+  // LIVE FINDING 2026-09-25: `confirm.click()` with NO explicit timeout uses
+  // Playwright's 30s default -- a real run hung there for the full 30s then
+  // threw "element was detached from the DOM, retrying" straight out of
+  // moveToTrash, uncaught, which (via walkTimeline's old no-catch design)
+  // killed the ENTIRE walk and, through runTimelineWalk's catch-all, wrongly
+  // marked all 102 OTHER still-queued jobs 'error' too -- none of them had
+  // anything to do with this one photo's click failing.
+  //
+  // A detach mid-click has two genuinely different causes with an IDENTICAL
+  // symptom: (a) the button re-rendered/repositioned and a fresh
+  // resolve+click will succeed, or (b) the FIRST click actually WORKED and
+  // Google's own dialog-close animation is what detached the button out from
+  // under the click handler -- retrying a click on a dialog that's already
+  // gone because the trash already happened can only fail again, and forcing
+  // 3 more failed attempts before ever checking would just delay reaching
+  // the truth by ~3x this function's own timeout. So: on a failed click,
+  // check the CHEAP signal first (is the button still even there) before
+  // deciding which cause this is -- gone-with-real-photo-movement is (b),
+  // treated as confirmed; anything else re-resolves and retries as (a).
+  //
+  // `confirmDialog` must NEVER let a click failure escape as a thrown
+  // exception (see moveToTrash's own header: "Returns true only if the
+  // deletion was CONFIRMED" -- false is the correct way to report "I
+  // couldn't confirm this", not a throw) -- EXCEPT a genuine page-closed/CDP-
+  // gone failure (isPageClosedError), which is not a per-photo click quirk
+  // at all and must propagate all the way up so runTimelineWalk's own
+  // isPageClosedError branch (not the per-photo needs_review path
+  // walkTimeline's exception wrapper otherwise takes) can handle it.
+  const CONFIRM_CLICK_TIMEOUT_MS = FAST_DELAYS ? 20 : 4000; // short + explicit, never Playwright's 30s default
+  const CONFIRM_CLICK_RETRIES = 3;
+  const confirmDialog = async () => {
+    let confirm = await waitForConfirmButton();
+    if (!confirm) return false;
+    for (let attempt = 0; attempt < CONFIRM_CLICK_RETRIES; attempt++) {
+      await stealthDelay(600, 1500); // pure mimicry, off unless --slow
+      try {
+        await confirm.click({ timeout: CONFIRM_CLICK_TIMEOUT_MS });
+        return true;
+      } catch (err) {
+        if (isPageClosedError(page, err)) throw err; // never swallow a genuine infra failure -- see this block's header
+        if (VERBOSE) {
+          console.log(`    trash: confirm click failed (attempt ${attempt + 1}/${CONFIRM_CLICK_RETRIES}): ${err.message || err}`);
+        }
+        const stillThere = await confirm.isVisible().catch(() => false);
+        if (!stillThere) {
+          // The button is genuinely gone -- either the dialog closed because
+          // the click WORKED (cause b above) or it closed for some other
+          // reason entirely. `settled()`'s own toast/panel signals are the
+          // only evidence that actually distinguishes those, exactly the
+          // same signals isTrashConfirmed already requires alongside
+          // dialogConfirmed for the caller's final decision.
+          const outcome = await settled();
+          if (outcome.toastShown || outcome.panelChanged) return true;
+          return false; // gone with no evidence of a real trash -- don't guess
+        }
+        confirm = await waitForConfirmButton(); // re-resolve -- the OLD locator reference is stale once its element detached
+        if (!confirm) return false;
+      }
+    }
+    return false;
   };
 
   await stealthDelay(500, 2000); // pure mimicry, off unless --slow
@@ -2281,6 +2340,18 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
     const job = findMatchingJob(candidateJobs, parsed);
     let advancedByDelete = false;
 
+    // ROUND 5 (2026-09-25 live finding): the whole per-photo match/trash/
+    // advance step below is now wrapped -- a live run's confirm-dialog click
+    // (since fixed at the root, see confirmDialog's own header) threw straight
+    // out of here, uncaught, and killed the ENTIRE walk; runTimelineWalk's
+    // catch-all then marked all 102 OTHER still-queued jobs 'error' too, none
+    // of which had anything wrong with them at all. One photo's failure must
+    // never cost every OTHER job's correct outcome. See the catch block below
+    // for the recovery (needs_review the one job if there is one, resume the
+    // viewer, keep walking) and isPageClosedError's own carve-out (a genuine
+    // infra failure is NOT a per-photo quirk and must still propagate all the
+    // way up to runTimelineWalk's own dedicated branch for that).
+    try {
     if (job) {
       matchedCount += 1;
       const isDuplicateCopy = matchedJobs.has(job);
@@ -2398,6 +2469,52 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
       } else {
         text = next.text;
       }
+    }
+    } catch (err) {
+      // See the try block's own header above. A genuine infra failure (page
+      // closed / CDP gone) is not a per-photo quirk -- it must propagate all
+      // the way up to runTimelineWalk's dedicated isPageClosedError branch,
+      // never be treated as "just this one photo went wrong".
+      if (isPageClosedError(page, err)) throw err;
+      loud(`[timeline] BLOCKER: unexpected error on photo ${steps} -- ${err.stack || err}`);
+      if (job && !dryRun && queue.getById(job.id)?.status === 'queued') {
+        // Only touch it if it's STILL genuinely queued -- `job` can be a
+        // duplicate copy (from matchedJobs) whose FIRST copy already
+        // confirmed 'trashed' earlier in this same walk; overwriting that
+        // to needs_review here would be exactly the "rewrite a real trash
+        // back to error" bug runTimelineWalk's own top-level catch already
+        // guards against (see its comment) -- the same rule applies here,
+        // one level down.
+        queue.update(job.id, {
+          status: 'needs_review',
+          comparison: { reason: `unexpected error while matching/trashing this photo: ${err.message || err}` },
+          attempts: job.attempts + 1,
+        });
+        loud(`[needs_review] ${job.filename}: unexpected error, see the BLOCKER line above`);
+      }
+      if (job) {
+        // Whether or not the queue update above actually ran (a duplicate
+        // copy's needs_review is skipped, but it should still stop being
+        // hunted for further copies after an error this walk can't explain),
+        // drop it from further consideration this walk -- retrying the same
+        // broken photo/job pairing every iteration would just repeat the
+        // same failure forever.
+        remaining = remaining.filter((j) => j !== job);
+        matchedJobs.delete(job);
+      }
+      // The viewer's state after an arbitrary mid-step exception is unknown
+      // -- never assume `text`/the open photo are still trustworthy. Fall
+      // back to the SAME resumeTimelineAt the ArrowRight-advance branch
+      // already uses (shared bounded budget, MAX_TIMELINE_RESUMES) to
+      // re-find the last-known-good photo and re-read it fresh, rather than
+      // declaring the whole walk dead over one photo's failure.
+      const photoId = photoIdFromUrl(page.url());
+      if (photoId == null || resumeCount >= MAX_TIMELINE_RESUMES) break;
+      resumeCount += 1;
+      const resumed = await resumeTimelineAt(page, photoId, parsed.captureDateMs);
+      if (!resumed) break;
+      const reread = await readPanelText(page);
+      if (reread) text = reread;
     }
   }
 
