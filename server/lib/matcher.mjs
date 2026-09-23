@@ -33,33 +33,57 @@ const FILENAME_PATTERNS = [
 
 const DIMS_PATTERN = /(\d{3,5})\s*[×x]\s*(\d{3,5})/g;
 
-// Anchored on the literal "GMT" immediately after AM/PM (Google's own
-// UTC-offset suffix, run together with no space -- see parseCaptureDateMs'
-// header) rather than a bare H:MM AM/PM shape, which would be far more
-// likely to accidentally match some OTHER time-shaped substring elsewhere
-// in the panel (camera settings, file size, etc.). A year is OPTIONAL --
-// Google Photos commonly omits it for the current calendar year, showing
-// one only for a past year -- handled by parseCaptureDateMs' referenceYear
-// fallback. UNVERIFIED LIVE: see parseCaptureDateMs' header for why.
+// VERIFIED LIVE 2026-09-22 (Oliver's own probe of the real info panel's
+// innerText): the date/time block is THREE SEPARATE LINES, not the
+// run-together shape an earlier version of this pattern assumed --
 //
-// EXPLICIT month-name alternation, NOT a generic [A-Za-z]{3,9} class --
-// bitten by exactly the same failure this file's FILENAME_PATTERNS header
-// already documents for filenames: the run-together text has no space
-// between "...PeopleDetails" and "Aug" ("PeopleDetailsAug 5Wed..."), so a
-// generic letter-class quantifier greedily absorbed "etailsAug" as the
-// "month name" (9 chars, the max the class allowed) instead of just "Aug"
-// -- caught by testing against the established panelBlock fixture, not by
-// inspection. Built lazily (captureDatePattern()) because it needs
-// MONTH_NAMES, which this file defines further down; referencing it inside
-// a function body is safe (called only after the whole module has finished
-// loading), referencing it in this top-level const's initializer would not
-// be (temporal-dead-zone ReferenceError).
+//   Sep 22                  <- "<Month> <Day>" alone -- NO YEAR for the
+//                               current calendar year (confirmed live: both
+//                               real samples below omit it)
+//   Yesterday, 6:25 PM      <- a free-text label ("Yesterday", "Today", or
+//                               presumably a weekday name -- never itself
+//                               constrained) + ", " + "H:MM AM/PM"
+//   GMT-04:00               <- Google's UTC-offset suffix, own line
+//
+// real samples (Oliver, 2026-09-22):
+//   "Details\nSep 22\nYesterday, 6:25 PM\nGMT-04:00\nApple iPhone 13 Pro..."
+//   "Details\nSep 22\nYesterday, 2:34 PM\nGMT-04:00\nIMG_2929.JPG..."
+//
+// The "Mon D, YYYY" (older-year) shape and its accompanying label line are
+// UNVERIFIED LIVE -- no real past-year photo was in the live probe's first
+// few results -- this is a best-effort guess at the same three-line
+// structure with a year appended to the first line, per Google's common
+// "show the year only when it's not the current one" convention. If a live
+// run's stop condition misbehaves specifically on OLDER photos, this is the
+// first thing to re-probe.
+//
+// \s+ between fields matches real newlines fine (JS \s includes \n), so
+// this pattern works whether the true separator is a literal newline or
+// run together with no separator at all -- \s* also matches zero
+// characters. The label is a generic [A-Za-z]+ here (unlike a plain
+// [A-Za-z]{3,9} class, see the month-name story below) because a real
+// newline or space always separates it from the day-of-month before it, so
+// it cannot swallow a preceding merged word.
+//
+// EXPLICIT month-name alternation for the month itself, NOT a generic
+// [A-Za-z]{3,9} class -- bitten by exactly the same failure this file's
+// FILENAME_PATTERNS header documents for filenames: an EARLIER (now
+// corrected) version of this pattern assumed the month ran together with
+// whatever preceded it ("...PeopleDetailsAug 5Wed...") and a generic
+// letter-class quantifier greedily absorbed "etailsAug" as the "month name"
+// instead of just "Aug" -- caught by testing against a fixture, not by
+// inspection; kept as a defensive habit even now that the real text is
+// known to have a preceding newline. Built lazily (captureDatePattern())
+// because it needs MONTH_NAMES, which this file defines further down;
+// referencing it inside a function body is safe (called only after the
+// whole module has finished loading), referencing it in this top-level
+// const's initializer would not be (temporal-dead-zone ReferenceError).
 let capturedDatePatternCache = null;
 function captureDatePattern() {
   if (!capturedDatePatternCache) {
     const monthAlternation = MONTH_NAMES.map((n) => `${n}|${n.slice(0, 3)}`).join('|');
     capturedDatePatternCache = new RegExp(
-      `(${monthAlternation})\\s+(\\d{1,2})(?:,\\s*(\\d{4}))?[A-Za-z]{0,9},?\\s*(\\d{1,2}):(\\d{2})\\s*(AM|PM)GMT`,
+      `(${monthAlternation})\\s+(\\d{1,2})(?:,\\s*(\\d{4}))?\\s+[A-Za-z]+,\\s*(\\d{1,2}):(\\d{2})\\s*(AM|PM)\\s*GMT`,
       'i'
     );
   }
@@ -74,22 +98,24 @@ function captureDatePattern() {
  * this field only decides when to stop LOOKING, so a wrong estimate costs
  * walking too long or stopping a little early, never a wrong trash.
  *
- * UNVERIFIED LIVE: built from the same run-together date/time shape earlier
- * work in this file established for the panel ("Aug 5Wed, 6:54 PMGMT-06:00"
- * -- see panelBlock in test/worker.test.mjs, itself derived from an earlier
- * live capture), but that shape was only ever exercised for its DIMENSIONS
- * substring until now -- the date/weekday/GMT-offset portion around it was
- * never itself cross-checked against a real capture-date extraction. If a
- * live timeline run's stop condition never fires (walks to
- * MAX_TIMELINE_PHOTOS instead) or fires immediately, this pattern is the
- * first thing to re-probe.
+ * See captureDatePattern's own header for the exact shape this expects and
+ * what's still UNVERIFIED LIVE about it (the older-year "Mon D, YYYY" form).
+ *
+ * `nowMs` (real epoch ms, defaulting to Date.now() at the parsePanelText
+ * call site) is needed because the panel OMITS the year for the current
+ * calendar year (verified live) -- when no year is present in the text,
+ * this assumes the current calendar year first, and if that lands in the
+ * FUTURE relative to `nowMs` (e.g. today is Sep 23 and the photo reads
+ * "Dec 25" with no year -- Google would never show a genuinely future
+ * capture date with the year omitted), falls back to the PREVIOUS year
+ * instead. A year embedded in the text is always trusted as-is.
  *
  * Returns null (never throws, never guesses) when the pattern doesn't match
  * at all, or when the matched "month" text isn't a real month name --
  * refusing is always safe here since the caller just skips the stop-check
  * for that one photo.
  */
-function parseCaptureDateMs(text, referenceYear) {
+function parseCaptureDateMs(text, nowMs) {
   const m = captureDatePattern().exec(text);
   if (!m) return null;
   const [, monthName, day, year, hourStr, minute, ampm] = m;
@@ -97,7 +123,12 @@ function parseCaptureDateMs(text, referenceYear) {
   if (monthIdx == null) return null; // not a real month name -- a coincidental match, refuse rather than guess
   let hour = Number(hourStr) % 12;
   if (/PM/i.test(ampm)) hour += 12;
-  return Date.UTC(Number(year ?? referenceYear), monthIdx, Number(day), hour, Number(minute));
+  if (year != null) {
+    return Date.UTC(Number(year), monthIdx, Number(day), hour, Number(minute));
+  }
+  const currentYear = new Date(nowMs).getUTCFullYear();
+  const candidateMs = Date.UTC(currentYear, monthIdx, Number(day), hour, Number(minute));
+  return candidateMs > nowMs ? Date.UTC(currentYear - 1, monthIdx, Number(day), hour, Number(minute)) : candidateMs;
 }
 
 /**
@@ -114,18 +145,18 @@ function parseCaptureDateMs(text, referenceYear) {
  * filename in the observed field order: ...ISO, filename, megapixels,
  * W x H, "Uploaded from...").
  *
- * `referenceYear` feeds parseCaptureDateMs' fallback when the panel text
- * omits a year -- defaults to the real current UTC year so ordinary callers
- * (worker.mjs) get sensible behaviour with no extra argument, but stays
- * overridable so tests can be deterministic without mocking the system
- * clock. NOTE: this makes parsePanelText's return depend on wall-clock time
- * ONLY for a text sample with no year in it and no explicit override --
- * filename/pixelWidth/pixelHeight (and captureDateMs when a year IS
- * present) are unaffected either way.
+ * `nowMs` feeds parseCaptureDateMs' current-vs-future-year decision when the
+ * panel text omits a year -- defaults to the real Date.now() so ordinary
+ * callers (worker.mjs) get sensible behaviour with no extra argument, but
+ * stays overridable so tests can be deterministic without mocking the
+ * system clock. NOTE: this makes parsePanelText's return depend on
+ * wall-clock time ONLY for a text sample with no year in it and no explicit
+ * override -- filename/pixelWidth/pixelHeight (and captureDateMs when a
+ * year IS present) are unaffected either way.
  */
-export function parsePanelText(rawText, referenceYear = new Date().getUTCFullYear()) {
+export function parsePanelText(rawText, nowMs = Date.now()) {
   const text = rawText ?? '';
-  const captureDateMs = parseCaptureDateMs(text, referenceYear);
+  const captureDateMs = parseCaptureDateMs(text, nowMs);
   const filenameMatches = [];
   for (const pattern of FILENAME_PATTERNS) {
     pattern.lastIndex = 0;

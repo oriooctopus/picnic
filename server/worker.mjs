@@ -1677,6 +1677,131 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = '
 }
 
 /**
+ * Confirm a TIMELINE advance actually happened, returning the new
+ * `{ text, url }` or null if it didn't -- 2026-09-23, replacing bare panel
+ * text as the timeline walk's advance signal after a real run (commit
+ * 7565a5d) proved it unsound: photo 1 and photo 2 of that run both read
+ * back "IMG_2932.JPG", because the panel's content lags the actual
+ * navigation by a poll or two and a bare "text !== previousText" check
+ * accepted a transient, still-stale read as proof of having moved on.
+ * Live evidence (Oliver's own probe, same day) showed page.url() -- a
+ * distinct "/photo/<id>" per photo -- changes RELIABLY on every ArrowRight
+ * (6/6), so URL is now the PRIMARY signal; panel text is only trusted once
+ * the URL has already changed, and even then gets a confirmation pass
+ * against staleness:
+ *
+ *   1. Poll page.url() until it differs from `beforeUrl` (real-correctness
+ *      wait, bounded) -- no URL change at all means the advance genuinely
+ *      did not register; nothing else here matters.
+ *   2. Once the URL has moved, poll readPanelText() until it differs from
+ *      `previousText` (the photo just left) or a bounded settle window
+ *      elapses -- catching the exact live lag where the panel still shows
+ *      the OLD photo's content for a poll or two after the URL already
+ *      changed.
+ *   3. Record the FILENAME (not the raw text) per photo. If, once step 2
+ *      settles, the parsed filename equals the PREVIOUS photo's filename --
+ *      even though the raw text and the URL have both already changed --
+ *      that's ambiguous: a genuine same-filename duplicate sitting right
+ *      next to its twin (Oliver's real re-uploaded copies), vs. a filename
+ *      substring that's still stale even though something else on the
+ *      panel (camera info, a transitional re-render) happened to differ
+ *      first. Comparing FILENAMES rather than raw text catches this: the
+ *      exact live bug (photo 1 and 2 of a real run both reading
+ *      "IMG_2932.JPG") is exactly a same-filename case, and a raw-text
+ *      diff alone cannot distinguish "genuinely the same photo's filename
+ *      again" from "the surrounding text moved on but the filename field
+ *      specifically didn't". Never guess: take ONE more read, and only
+ *      accept it if its filename DISAGREES with the first (meaning the
+ *      first was stale, and this later one is authoritative). Two reads
+ *      agreeing on the filename is trusted as a genuine duplicate rather
+ *      than polled indefinitely.
+ */
+export async function waitForTimelineAdvanceConfirmed(page, beforeUrl, previousText) {
+  const urlDeadline = Date.now() + (FAST_DELAYS ? 20 : 5000);
+  let url = page.url();
+  while (url === beforeUrl && Date.now() < urlDeadline) {
+    await pollDelay();
+    url = page.url();
+  }
+  if (url === beforeUrl) return null; // advance never took at all
+
+  const previousFilename = parsePanelText(previousText).filename;
+  const textDeadline = Date.now() + (FAST_DELAYS ? 20 : 3000);
+  let text = await readPanelText(page);
+  while ((!text || text === previousText) && Date.now() < textDeadline) {
+    await pollDelay();
+    text = await readPanelText(page);
+  }
+  if (!text) return null; // URL moved but the panel never rendered anything at all -- not yet confirmed
+
+  const filename = parsePanelText(text).filename;
+  if (filename && previousFilename && filename === previousFilename) {
+    // Settle window elapsed with the SAME filename as before, on a
+    // DIFFERENT URL -- confirm with one more read rather than guessing
+    // either way (see this function's header, point 3).
+    await pollDelay();
+    const secondText = await readPanelText(page);
+    const secondFilename = parsePanelText(secondText).filename;
+    if (secondFilename && secondFilename !== filename) {
+      text = secondText; // disagreed -- the first read was stale, trust the later one
+    }
+    // else: both reads agree (or the second also came back empty) -- trust
+    // the original read as a genuine duplicate rather than looping forever.
+  }
+
+  return { text, url };
+}
+
+/**
+ * TIMELINE-ONLY advance (2026-09-23) -- pairs with
+ * waitForTimelineAdvanceConfirmed above. Tries ArrowRight FIRST across all
+ * its retries (swapped from advancePhotoView's click-first order): the
+ * live run that exposed the stale-read bug also logged "advance did not
+ * register via click" as its only failed advance, while Oliver's separate
+ * direct probe (ArrowRight x6, no click involved at all) succeeded every
+ * time. Clicking "View next photo" is kept only as a LAST-RESORT fallback
+ * if every ArrowRight attempt fails to move the URL at all.
+ */
+async function advanceTimelinePhotoView(page, currentText, logPrefix = '') {
+  const beforeUrl = page.url();
+  for (let attempt = 0; attempt < ARROW_RETRIES; attempt++) {
+    await releaseFocus(page);
+    await page.keyboard.press('ArrowRight');
+    const result = await waitForTimelineAdvanceConfirmed(page, beforeUrl, currentText);
+    if (result) return result;
+    // No next-photo control at all is the authoritative end-of-library
+    // signal (same convention as advancePhotoView) -- no point burning the
+    // rest of the retries or falling through to the click fallback below.
+    const candidates = await page.locator(NEXT_PHOTO_SELECTOR).all();
+    if (candidates.length === 0) return null;
+    if (VERBOSE) {
+      console.log(`  ${logPrefix} advance did not register via ArrowRight, retrying (${attempt + 1}/${ARROW_RETRIES})`);
+    }
+  }
+  // Last-resort click fallback -- see this function's header for why it's
+  // no longer tried first.
+  const candidates = await page.locator(NEXT_PHOTO_SELECTOR).all();
+  for (const candidate of candidates) {
+    if (await candidate.isVisible().catch(() => false)) {
+      await candidate.click().catch(() => {});
+      const result = await waitForTimelineAdvanceConfirmed(page, beforeUrl, currentText);
+      if (result) return result;
+      break;
+    }
+  }
+  if (VERBOSE) {
+    const focus = await page
+      .evaluate(() => {
+        const a = document.activeElement;
+        return a ? `${a.tagName}[${(a.getAttribute('aria-label') || a.className || '').toString().slice(0, 40)}]` : 'none';
+      })
+      .catch(() => 'unknown');
+    console.log(`  ${logPrefix} advance produced no confirmed change (end of library, or advancing was swallowed). activeElement=${focus}`);
+  }
+  return null;
+}
+
+/**
  * Walk the main Google Photos LIBRARY TIMELINE (no search at all) by
  * stepping through its PHOTO VIEWER, exactly like walkPhotoView already
  * does for a date's search results -- the `--walk=timeline` strategy,
@@ -1754,6 +1879,17 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
   let boundHit = false;
   let stoppedPastOldest = false;
   let text = await readPanelText(page);
+  // Live finding, 2026-09-22: a panel read can land EMPTY or STALE
+  // immediately after opening/advancing, before Google has actually
+  // rendered the new photo's content -- openInfoPanelOnce's own poll
+  // already guarantees SOME filename by the time it returns, but per the
+  // same "never trust an immediate read" rule this whole advance rewrite
+  // is built on (see waitForTimelineAdvanceConfirmed), give the FIRST photo
+  // one more short settle-and-reread pass too, rather than assuming its
+  // very first successful read is necessarily the final one.
+  await pollDelay();
+  const settledFirstRead = await readPanelText(page);
+  if (settledFirstRead) text = settledFirstRead;
 
   // See matchedJobs' header (walkPhotoView) -- once anything has matched, a
   // duplicate copy could be anywhere else in the library, so the loop keeps
@@ -1792,6 +1928,7 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
 
     if (job) {
       const isDuplicateCopy = matchedJobs.has(job);
+      const beforeTrashUrl = page.url(); // captured BEFORE confirmAndTrash -- see the advanced-read comment below
       const confirmed = await confirmAndTrash(page, job, parsed, text, 'timeline', queue, dryRun, isDuplicateCopy);
       if (!isDuplicateCopy) {
         remaining = remaining.filter((j) => j !== job);
@@ -1802,23 +1939,44 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
         // trash always removes the current photo from the results -- the
         // view HAS moved on, settled fact once confirmAndTrash reports it,
         // not something to re-derive from a text diff (which fails exactly
-        // for a duplicate copy with byte-identical panel text). Always take
-        // the fresh read either way.
-        const afterTrash = await readPanelText(page);
+        // for a duplicate copy with byte-identical panel text). BUT a
+        // trash-driven auto-advance is still an ADVANCE, subject to the
+        // exact same panel-lag risk ArrowRight/click advances are (see
+        // waitForTimelineAdvanceConfirmed's header) -- so this goes through
+        // the SAME URL-plus-staleness-confirmed read, using the URL from
+        // BEFORE the trash (not the current one, which may already reflect
+        // wherever the auto-advance already landed) as the baseline for
+        // detecting the move.
+        const advanced = await waitForTimelineAdvanceConfirmed(page, beforeTrashUrl, text);
         if (confirmed) {
-          text = afterTrash;
+          // A confirmed trash ALWAYS counts as having advanced, whether or
+          // not waitForTimelineAdvanceConfirmed managed to confirm a full
+          // (URL + fresh text) transition -- e.g. trashing the library's
+          // LAST photo closes the view entirely rather than landing on
+          // another one, which reads as "no confirmed advance" from that
+          // helper's perspective even though it's a perfectly normal
+          // outcome. The critical bit is `text` must NEVER be left
+          // pointing at the just-trashed photo's stale content in that
+          // case (an infinite re-trash loop caught by running the
+          // "duplicate copies" test, not by inspection: `advanced` came
+          // back null, `text` was left unchanged, and the SAME already-
+          // trashed photo matched and re-trashed itself forever) -- fall
+          // back to a raw read, which correctly comes back empty once the
+          // view has genuinely closed, so the next loop iteration finds no
+          // filename and moves on to actually advancing instead.
+          text = advanced ? advanced.text : await readPanelText(page);
           advancedByDelete = true;
-        } else if (afterTrash && afterTrash !== text) {
-          text = afterTrash;
+        } else if (advanced) {
+          text = advanced.text;
           advancedByDelete = true;
         }
       }
     }
 
     if (!advancedByDelete) {
-      const next = await advancePhotoView(page, text, `[timeline photo ${steps}]`);
+      const next = await advanceTimelinePhotoView(page, text, `[timeline photo ${steps}]`);
       if (next == null) break; // end of the library, or advancing genuinely failed
-      text = next;
+      text = next.text;
     }
   }
 

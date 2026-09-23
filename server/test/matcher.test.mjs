@@ -77,45 +77,59 @@ test('parsePanelText: empty/undefined text -> null fields', () => {
   assert.deepEqual(parsePanelText(undefined), { filename: null, pixelWidth: null, pixelHeight: null, captureDateMs: null });
 });
 
-// --- captureDateMs (2026-09-22, added for walkTimeline's stop condition) ---
+// --- captureDateMs (2026-09-22, added for walkTimeline's stop condition;
+// REWRITTEN 2026-09-23 against Oliver's own live probe of the real panel) ---
 
-test('parsePanelText: captureDateMs parses the run-together date/weekday/time/GMT block, year OMITTED -> falls back to referenceYear', () => {
-  const parsed = parsePanelText(IMG_1433_BLOCK, 2026);
-  // IMG_1433_BLOCK's timeLabel defaults to 'Aug 5Wed, 6:54 PMGMT-06:00' (see
-  // this file's own helper below) -- no year in the text at all.
-  assert.equal(parsed.captureDateMs, Date.UTC(2026, 7, 5, 18, 54));
+// Real innerText samples, verbatim from Oliver's live probe (2026-09-22):
+// the date/time block is three separate lines -- "<Month> <Day>" (no year
+// for the current calendar year), "<label>, H:MM AM/PM" (label = weekday,
+// "Yesterday", or "Today"), then "GMT<offset>" alone. See
+// captureDatePattern's header in matcher.mjs for the full story.
+const LIVE_SAMPLE_1 =
+  'Details\nSep 22\nYesterday, 6:25 PM\nGMT-04:00\nApple iPhone 13 Pro\n' +
+  'ƒ/1.5\n1/60\n5.7mm\nISO125\nIMG_2931.HEIC\n12.2MP\n3024 × 4032\n' +
+  'Uploaded from iOS device\nBacked up (6.6 MB)';
+const LIVE_SAMPLE_2 = 'Details\nSep 22\nYesterday, 2:34 PM\nGMT-04:00\nIMG_2929.JPG\n12.2MP\n3024 × 4032\nUploaded from iOS device';
+const NOW_2026_09_23 = Date.UTC(2026, 8, 23); // "today" per the live probe
+
+test('parsePanelText: captureDateMs parses the REAL live three-line date/label/GMT block, year OMITTED -> current year (nowMs Sep 23, photo Sep 22 -- not future)', () => {
+  const parsed = parsePanelText(LIVE_SAMPLE_1, NOW_2026_09_23);
+  assert.equal(parsed.filename, 'IMG_2931.HEIC');
+  assert.equal(parsed.captureDateMs, Date.UTC(2026, 8, 22, 18, 25));
 });
 
-test('parsePanelText: captureDateMs uses the YEAR embedded in the text when present, ignoring referenceYear', () => {
-  const block =
-    "InfoAdd a descriptionPeopleDetailsAug 5, 2024Wed, 6:54 PMGMT-06:00Apple iPhone 13 Pro" +
-    "ƒ/2.21/632.71mmISO40IMG_1433.HEIC7.2MP2316 × 3088Uploaded from iOS deviceBacked up (6 MB)Original quality. Learn moreWestminster, CO";
-  const parsed = parsePanelText(block, 2026);
-  assert.equal(parsed.captureDateMs, Date.UTC(2024, 7, 5, 18, 54));
+test('parsePanelText: captureDateMs on the SECOND real live sample (different photo, same day)', () => {
+  const parsed = parsePanelText(LIVE_SAMPLE_2, NOW_2026_09_23);
+  assert.equal(parsed.filename, 'IMG_2929.JPG');
+  assert.equal(parsed.captureDateMs, Date.UTC(2026, 8, 22, 14, 34));
+});
+
+test('parsePanelText: captureDateMs on an older-year photo ("Mon D, YYYY" + weekday label) -- UNVERIFIED LIVE, this exact shape was never seen in the live probe', () => {
+  const block = 'Details\nMar 17, 2026\nTue, 12:59 AM\nGMT-04:00\nIMG_1.HEIC\n100 × 100';
+  const parsed = parsePanelText(block, NOW_2026_09_23);
+  assert.equal(parsed.captureDateMs, Date.UTC(2026, 2, 17, 0, 59));
+});
+
+test('parsePanelText: captureDateMs with no year in the text rolls back to the PREVIOUS year when the current-year guess lands in the future', () => {
+  // nowMs is Sep 23, 2026 -- "Dec 25" with no year, assumed current year
+  // first, lands in the future (2026-12-25 > 2026-09-23), so this must
+  // fall back to 2025 instead. Google would never show a genuinely future
+  // capture with the year omitted.
+  const block = 'Details\nDec 25\nFri, 6:25 PM\nGMT-04:00\nIMG_1.HEIC\n100 × 100';
+  const parsed = parsePanelText(block, NOW_2026_09_23);
+  assert.equal(parsed.captureDateMs, Date.UTC(2025, 11, 25, 18, 25));
 });
 
 test('parsePanelText: captureDateMs is null when the text has no GMT-suffixed time at all (never guesses)', () => {
-  const parsed = parsePanelText('Info Add a description People Details Aug 5, 2026 no time here', 2026);
+  const parsed = parsePanelText('Info Add a description People Details Sep 22 no time here', NOW_2026_09_23);
   assert.equal(parsed.captureDateMs, null);
 });
 
-test('parsePanelText: captureDateMs does not false-match a run-together non-month word as a month (the "PeopleDetailsAug" trap)', () => {
-  // Regression case: an earlier version used a generic [A-Za-z]{3,9} class
-  // for the month name, which greedily matched "etailsAug" (the tail of
-  // "...PeopleDetailsAug 5Wed...", no space before the real month) and then
-  // correctly refused it as not-a-real-month -- but WITHOUT ever retrying
-  // to find the genuine "Aug" match right after, so captureDateMs came back
-  // null even though a perfectly good date WAS present in the text. Proven
-  // by mutation below (see the mutation-proof section of worker.test.mjs).
-  const parsed = parsePanelText(IMG_1433_BLOCK, 2026);
-  assert.notEqual(parsed.captureDateMs, null, 'a real date/time IS present in the text and must be found');
-});
-
 test('parsePanelText: captureDateMs handles noon/midnight (12 AM/PM) correctly', () => {
-  const noon = "InfoAdd a descriptionPeopleDetailsAug 5Wed, 12:00 PMGMT-06:00IMG_1433.HEIC100 × 100";
-  const midnight = "InfoAdd a descriptionPeopleDetailsAug 5Wed, 12:00 AMGMT-06:00IMG_1433.HEIC100 × 100";
-  assert.equal(parsePanelText(noon, 2026).captureDateMs, Date.UTC(2026, 7, 5, 12, 0));
-  assert.equal(parsePanelText(midnight, 2026).captureDateMs, Date.UTC(2026, 7, 5, 0, 0));
+  const noon = 'Details\nSep 22\nMon, 12:00 PM\nGMT-04:00\nIMG_1.HEIC\n100 × 100';
+  const midnight = 'Details\nSep 22\nMon, 12:00 AM\nGMT-04:00\nIMG_1.HEIC\n100 × 100';
+  assert.equal(parsePanelText(noon, NOW_2026_09_23).captureDateMs, Date.UTC(2026, 8, 22, 12, 0));
+  assert.equal(parsePanelText(midnight, NOW_2026_09_23).captureDateMs, Date.UTC(2026, 8, 22, 0, 0));
 });
 
 test('filenamesAgree: case-insensitive', () => {

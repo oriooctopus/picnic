@@ -203,6 +203,57 @@ function tilesInTimeline(page) {
 }
 
 /**
+ * Timeline panel text, with two LIVE-CONFIRMED lag effects modelled
+ * (2026-09-23, from a real run of worker.mjs 7565a5d): opening/advancing to
+ * a photo can read back EMPTY for the first few polls before the panel
+ * actually renders (`config.timelinePanelRenderDelayReads`), and after an
+ * ArrowRight/click advance the panel can keep showing the PREVIOUS photo's
+ * STALE text for the first few polls before catching up
+ * (`config.timelineStaleReadsAfterAdvance`) -- this is what produced the
+ * real bug: photo 1 and 2 of a live run both read back "IMG_2932.JPG"
+ * because the second read landed during exactly this lag window. Both
+ * counters are internally tracked per-photo (reset the moment
+ * `page.openedIdentity` changes, detected here rather than by hooking every
+ * site that mutates it) so a fixture opts in simply by setting the config
+ * key -- no caller needs to know when a transition happened.
+ */
+function timelinePanelTextFor(page) {
+  const currentIdentity = page.openedIdentity ?? page.openedAriaLabel;
+  if (page._timelinePanelIdentity !== currentIdentity) {
+    // A fresh transition (tile opened, or advanced to a new photo) since the
+    // last read -- remember what the PREVIOUS identity's real text was (for
+    // the stale-read simulation below) and reset both lag counters. The
+    // very first tile of a run has no previous identity, so its stale-read
+    // count is always 0 regardless of config (nothing to be stale WITH).
+    page._timelinePanelPrevText = page._timelinePanelRealText ?? '';
+    page._timelinePanelIdentity = currentIdentity;
+    page._timelinePendingRenderDelay = page.config.timelinePanelRenderDelayReads ?? 0;
+    page._timelinePendingStaleReads = page._timelinePanelPrevText ? page.config.timelineStaleReadsAfterAdvance ?? 0 : 0;
+    page._timelinePanelRealText = page.config.timelinePanelTextByLabel?.[page.openedAriaLabel] ?? '';
+  }
+  if (page._timelinePendingRenderDelay > 0) {
+    page._timelinePendingRenderDelay -= 1;
+    return '';
+  }
+  if (page._timelinePendingStaleReads > 0) {
+    // A trailing-space marker (not just the raw previous text verbatim)
+    // models the REAL live shape of this bug more precisely: the actual
+    // failure showed the FILENAME substring staying stale while something
+    // else about the read differed (2026-09-23) -- a byte-IDENTICAL stale
+    // read would already be caught by any bare "text !== previousText"
+    // check, so a mutation-proof against that alone would prove nothing.
+    // Appending whitespace (harmless to every FILENAME/DIMS/date regex,
+    // all of which tolerate trailing \s) keeps the raw string genuinely
+    // different each read while the PARSED filename stays the stale one,
+    // which is exactly what worker.mjs's waitForTimelineAdvanceConfirmed
+    // must catch by comparing parsed filenames, not raw text.
+    page._timelinePendingStaleReads -= 1;
+    return `${page._timelinePanelPrevText} `; // trailing space -- raw text differs, parsed filename does not
+  }
+  return page._timelinePanelRealText;
+}
+
+/**
  * True when `label` names a tile worker.mjs's collectResultTiles() can see
  * (it's on-screen, real, and in the positional `.all()` walk) but which the
  * identity-scoped selector (tileLocatorFor, what openTile() actually clicks)
@@ -502,6 +553,8 @@ function advanceToNextTile(page) {
  *   swallowInfoPressesCount?: number, // first N "i" keypresses across the whole run are silently lost (models the keystroke landing mid-transition, before the photo view existed)
  *   timelineTiles?: Array<{ariaLabel: string, href?: string}|string>, // 2026-09-22 (photo-viewer redesign): presence alone switches the fake into TIMELINE mode (worker.mjs's walkTimeline) -- the FULL flat underlying order (newest first), exactly like fullOrderedTiles' role for the grid's own ArrowRight traversal. No scroll/reveal/window modelling -- the redesigned walk opens only the first (newest) tile and never touches the grid again.
  *   timelinePanelTextByLabel?: Record<string, string>, // ariaLabel -> info-panel text, FLAT (no query nesting -- the timeline has no active query) -- timeline equivalent of panelTextByLabel
+ *   timelinePanelRenderDelayReads?: number, // 2026-09-23: first N reads after opening/advancing to a timeline photo return EMPTY before the real text renders -- see timelinePanelTextFor's header
+ *   timelineStaleReadsAfterAdvance?: number, // 2026-09-23: first N reads after an ArrowRight/click ADVANCE (never the first tile) return the PREVIOUS photo's text before catching up -- models the real lag bug that produced two consecutive stale "IMG_2932.JPG" reads in a live run
  * }}
  */
 export function createFakePage(config = {}) {
@@ -668,12 +721,24 @@ export function createFakePage(config = {}) {
       // (it's never reached via search) -- `timelinePanelTextByLabel` is a
       // flat ariaLabel->text map instead of the grid's query-nested shape.
       if (page.config.timelineTiles != null) {
-        return page.config.timelinePanelTextByLabel?.[page.openedAriaLabel] ?? '';
+        return timelinePanelTextFor(page);
       }
       const byLabel = page.config.panelTextByLabel[page.activeQuery] ?? {};
       return byLabel[page.openedAriaLabel] ?? '';
     },
     url() {
+      // 2026-09-22: LIVE-VERIFIED (Oliver's own probe) -- the main timeline
+      // gives each open photo its own distinct URL
+      // (".../photo/AF1QipMVKN..." -> ".../AF1QipPnpx..." etc, changing on
+      // EVERY ArrowRight), unlike the base library URL. Deriving it from
+      // `openedIdentity` means it automatically tracks every place that
+      // already mutates that field (openTileInFake, advanceToNextTile,
+      // performTrash's auto-advance) with no extra wiring -- exactly what
+      // walkTimeline's URL-based advance confirmation (worker.mjs,
+      // waitForTimelineAdvanceConfirmed) needs to observe changing.
+      if (page.config.timelineTiles != null && photoOpen(page)) {
+        return `https://photos.google.com/photo/${encodeURIComponent(page.openedIdentity ?? page.openedAriaLabel)}`;
+      }
       return page._url ?? 'https://photos.google.com';
     },
     countFor(selector) {

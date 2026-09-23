@@ -35,6 +35,7 @@ const {
   runTimelineWalk,
   MAX_TIMELINE_PHOTOS,
   TIMELINE_STOP_BUFFER_DAYS,
+  waitForTimelineAdvanceConfirmed,
 } = await import('../worker.mjs');
 
 async function withTempQueue(fn) {
@@ -1692,9 +1693,17 @@ function timelineTile(label, href) {
   return { ariaLabel: `Photo - Portrait - ${label}`, href: href ?? `./photo/${label}` };
 }
 
-/** Panel text with a real, GMT-suffixed capture date (matcher.mjs's captureDateMs) -- reuses panelBlock's dimensions block, only the date portion varies. */
-function timelinePanelText(filename, month, day, year = 2026, timeOfDay = '12:00 PMGMT-06:00') {
-  return panelBlock(filename, 100, 100, `${month} ${day}, ${year}Wed, ${timeOfDay}`);
+/**
+ * Panel text with a real, GMT-suffixed capture date (matcher.mjs's
+ * captureDateMs), in the VERIFIED LIVE three-line shape (Oliver's own probe,
+ * 2026-09-22): "<Month> <Day>[, <Year>]" on its own line, then
+ * "<label>, H:MM AM/PM" on the next, then "GMT<offset>" alone -- see
+ * captureDatePattern's header in matcher.mjs. `year` defaults to 2026 and
+ * is always included explicitly here (never omitted) so these fixtures
+ * never depend on the real wall-clock "now" the way an omitted year would.
+ */
+function timelinePanelText(filename, month, day, year = 2026, timeOfDay = '12:00 PM') {
+  return `Details\n${month} ${day}, ${year}\nMon, ${timeOfDay}\nGMT-06:00\n${filename}\n100 × 100`;
 }
 
 test('walkTimeline: finds a match deep in the sequence (past several non-matching photos) that date search would miss entirely', async () => {
@@ -1866,4 +1875,155 @@ test('runTimelineWalk: a job never matched by the timeline walk becomes needs_re
       'must be distinct from date search\'s own "no filename match for <date> (+/-1 day)" reason'
     );
   });
+});
+
+// ============================================================================
+// URL-based advance confirmation (2026-09-23) -- a real run of 7565a5d
+// (106 pending jobs) showed photo 1 and photo 2 both reading back
+// "IMG_2932.JPG": the panel's content lags the actual navigation, and the
+// old bare "text !== previousText" advance check accepted a transient,
+// still-stale read as proof of having moved on. Oliver's own live probe
+// showed page.url() (a distinct "/photo/<id>" per photo) changes reliably
+// on every ArrowRight, so it's now the PRIMARY advance signal --
+// waitForTimelineAdvanceConfirmed / advanceTimelinePhotoView in worker.mjs.
+// ============================================================================
+
+test('walkTimeline: page.url() is distinct per photo and changes on every advance (sanity check of the fake\'s own model)', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue({ filename: 'IMG_NEVER.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tiles = [timelineTile('u1'), timelineTile('u2'), timelineTile('u3')];
+    const panelText = Object.fromEntries(tiles.map((t, i) => [t.ariaLabel, timelinePanelText(`IMG_91${i}.HEIC`, 'Aug', 20 - i)]));
+    const page = createFakePage({ timelineTiles: tiles, timelinePanelTextByLabel: panelText });
+
+    const urlsSeen = new Set();
+    const originalUrl = page.url.bind(page);
+    page.url = () => {
+      const u = originalUrl();
+      urlsSeen.add(u);
+      return u;
+    };
+
+    await walkTimeline(page, [job], queue, { dryRun: false });
+
+    assert.ok(urlsSeen.size >= 3, `expected at least 3 distinct URLs (one per photo visited), saw ${urlsSeen.size}: ${[...urlsSeen].join(', ')}`);
+  });
+});
+
+test('walkTimeline: a panel that renders EMPTY for the first couple of reads (before settling) is still correctly matched, not treated as a non-match', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue({ filename: 'IMG_9600.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tiles = [timelineTile('slow1')];
+    const panelText = { [tiles[0].ariaLabel]: timelinePanelText('IMG_9600.HEIC', 'Aug', 20) };
+    // First 2 reads after opening return EMPTY, matching the live finding
+    // that the panel can render late.
+    const page = createFakePage({ timelineTiles: tiles, timelinePanelTextByLabel: panelText, timelinePanelRenderDelayReads: 2 });
+
+    const { stillUnmatched } = await walkTimeline(page, [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'the slow-rendering photo must still be found once it settles');
+    assert.equal(queue.getById(job.id).status, 'trashed');
+  });
+});
+
+test('walkTimeline: a STALE read right after advancing (still shows the previous photo) is not mistaken for the new photo, once it settles to the real text', async () => {
+  await withTempQueue(async (queue) => {
+    // tile1 (job1's real match) then tile2 (job2's real match, a DIFFERENT
+    // filename) -- exactly the live shape: after ArrowRight moves the URL
+    // to tile2, the first read still shows tile1's old content before
+    // catching up.
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_2932.JPG', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const { job: job2 } = queue.enqueue({ filename: 'IMG_2931.HEIC', creationDate: '2026-08-19T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = timelineTile('t1');
+    const tile2 = timelineTile('t2');
+    const panelText = {
+      [tile1.ariaLabel]: timelinePanelText('IMG_2932.JPG', 'Aug', 20),
+      [tile2.ariaLabel]: timelinePanelText('IMG_2931.HEIC', 'Aug', 19),
+    };
+    // 1 stale read of tile1's text immediately after advancing to tile2,
+    // before tile2's own real text takes over.
+    const page = createFakePage({
+      timelineTiles: [tile1, tile2],
+      timelinePanelTextByLabel: panelText,
+      timelineStaleReadsAfterAdvance: 1,
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, [job1, job2], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'both jobs must be found despite the stale intermediate read');
+    assert.equal(queue.getById(job1.id).status, 'trashed');
+    assert.equal(queue.getById(job2.id).status, 'trashed');
+    // job1 must be trashed exactly ONCE -- the stale read of tile1's OWN
+    // text on tile2's URL must never be mistaken for a second copy of job1.
+    assert.equal(queue.getById(job1.id).copiesTrashed, 1);
+  });
+});
+
+test('walkTimeline: URL-based advance confirmation -- MUTATION PROOF that reverting to text-only confirmation reintroduces the stale-duplicate-read bug', async () => {
+  // This test asserts the SAME scenario as the stale-read test above, but
+  // exists specifically so the mutation-proof step (mutating
+  // waitForTimelineAdvanceConfirmed to skip the page.url() check entirely,
+  // trusting text staleness resolution alone) has a single, clearly-named
+  // target to watch fail. See the report's mutation-proof section for the
+  // actual mutate/run/restore steps -- this test body is intentionally
+  // identical in spirit to the one above (kept separate so a reviewer can
+  // find "the URL-primacy test" by name alone).
+  await withTempQueue(async (queue) => {
+    const { job: job1 } = queue.enqueue({ filename: 'IMG_2932.JPG', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const { job: job2 } = queue.enqueue({ filename: 'IMG_2931.HEIC', creationDate: '2026-08-19T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const tile1 = timelineTile('m1');
+    const tile2 = timelineTile('m2');
+    const panelText = {
+      [tile1.ariaLabel]: timelinePanelText('IMG_2932.JPG', 'Aug', 20),
+      [tile2.ariaLabel]: timelinePanelText('IMG_2931.HEIC', 'Aug', 19),
+    };
+    // 1 stale read, raw text DIFFERENT from tile1's own (trailing-space
+    // marker -- see fakePage's timelinePanelTextFor) but its PARSED
+    // FILENAME still "IMG_2932.JPG" (tile1's) -- the precise live shape:
+    // the read visibly "changed" (defeating a bare text-diff check) while
+    // the filename field specifically had not caught up yet. This fixture
+    // is what the mutation-proof step below mutates against.
+    const page = createFakePage({
+      timelineTiles: [tile1, tile2],
+      timelinePanelTextByLabel: panelText,
+      timelineStaleReadsAfterAdvance: 1,
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, [job1, job2], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0);
+    assert.equal(queue.getById(job1.id).copiesTrashed, 1, 'job1 must be trashed exactly once, never re-trashed off a stale read on tile2\'s URL');
+  });
+});
+
+test('waitForTimelineAdvanceConfirmed: page.url() never changing means NOT confirmed, even when the panel text DOES change (URL is the PRIMARY gate)', async () => {
+  // Direct unit test against the real function, at the seam it actually
+  // makes its decision -- a minimal hand-built page mock (same pattern as
+  // moveToTrash's own direct seam tests) rather than the full
+  // createFakePage() harness, so page.url() staying constant is the ONE
+  // thing under the test's control. Models a transient panel re-render
+  // (some field flickers, filename included) that happens WITHOUT the
+  // photo actually having advanced at all -- url never moves.
+  const page = {
+    url: () => 'https://photos.google.com/photo/SAME',
+    evaluate: async () => 'Details\nSep 22\nMon, 1:00 PM\nGMT-04:00\nIMG_9700.HEIC\n100 × 100',
+  };
+  const previousText = 'Details\nSep 21\nMon, 1:00 PM\nGMT-04:00\nIMG_9701.HEIC\n100 × 100';
+
+  const result = await waitForTimelineAdvanceConfirmed(page, 'https://photos.google.com/photo/SAME', previousText);
+
+  assert.equal(result, null, 'a panel text change with no URL change must never read as a confirmed advance');
+});
+
+test('waitForTimelineAdvanceConfirmed: URL change + a settled, genuinely different filename -> confirmed', async () => {
+  const page = {
+    url: () => 'https://photos.google.com/photo/NEXT',
+    evaluate: async () => 'Details\nSep 22\nMon, 1:00 PM\nGMT-04:00\nIMG_9700.HEIC\n100 × 100',
+  };
+  const previousText = 'Details\nSep 21\nMon, 1:00 PM\nGMT-04:00\nIMG_9701.HEIC\n100 × 100';
+
+  const result = await waitForTimelineAdvanceConfirmed(page, 'https://photos.google.com/photo/PREV', previousText);
+
+  assert.ok(result, 'a real URL change with fresh, differing content must confirm');
+  assert.equal(result.url, 'https://photos.google.com/photo/NEXT');
+  assert.match(result.text, /IMG_9700\.HEIC/);
 });
