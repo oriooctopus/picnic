@@ -36,6 +36,7 @@ const {
   timelineTileWorthOpening,
   TIMELINE_TIME_TOLERANCE_SECONDS,
   MAX_TIMELINE_FRUITLESS_SCROLLS,
+  BROAD_CANDIDATE_OFFSETS_SECONDS,
 } = await import('../worker.mjs');
 
 async function withTempQueue(fn) {
@@ -1688,16 +1689,21 @@ function timelineTileLabel(monthAbbrev, day, year, hour12, minute, second, ampm,
   return `${kind} - Portrait - ${monthAbbrev} ${day}, ${year}, ${hour12}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')} ${ampm}`;
 }
 
-test('timelineTileWorthOpening: pure boundary + gating behaviour', () => {
+test('timelineTileWorthOpening: pure boundary + gating behaviour (single-offset list)', () => {
   const job = { filename: 'IMG_1.HEIC', creationDate: '2026-08-05T12:00:00.000Z', mediaType: null };
   const offsetSeconds = -21600; // -6h
   const predictedMs = new Date(job.creationDate).getTime() + offsetSeconds * 1000;
 
-  // No calibration yet -> never worth opening, regardless of how close a tile reads.
+  // No offsets at all -> never worth opening, regardless of how close a tile reads.
+  assert.equal(
+    timelineTileWorthOpening([job], { wallClockAsUtcMs: predictedMs, mediaType: 'photo' }, []),
+    false,
+    'an empty offsets list must never authorise opening a tile'
+  );
   assert.equal(
     timelineTileWorthOpening([job], { wallClockAsUtcMs: predictedMs, mediaType: 'photo' }, null),
     false,
-    'an uncalibrated offset must never authorise opening a tile'
+    'a null offsets list must never authorise opening a tile'
   );
 
   // Exactly at TIMELINE_TIME_TOLERANCE_SECONDS -- inclusive boundary.
@@ -1705,7 +1711,7 @@ test('timelineTileWorthOpening: pure boundary + gating behaviour', () => {
     timelineTileWorthOpening(
       [job],
       { wallClockAsUtcMs: predictedMs + TIMELINE_TIME_TOLERANCE_SECONDS * 1000, mediaType: 'photo' },
-      offsetSeconds
+      [offsetSeconds]
     ),
     true,
     'exactly at the tolerance boundary must still be worth opening'
@@ -1716,7 +1722,7 @@ test('timelineTileWorthOpening: pure boundary + gating behaviour', () => {
     timelineTileWorthOpening(
       [job],
       { wallClockAsUtcMs: predictedMs + (TIMELINE_TIME_TOLERANCE_SECONDS + 1) * 1000, mediaType: 'photo' },
-      offsetSeconds
+      [offsetSeconds]
     ),
     false,
     'one second past the tolerance boundary must not be worth opening'
@@ -1725,9 +1731,50 @@ test('timelineTileWorthOpening: pure boundary + gating behaviour', () => {
   // Media-type gating: a video job's predicted time must not flag a photo tile.
   const videoJob = { ...job, mediaType: 'video' };
   assert.equal(
-    timelineTileWorthOpening([videoJob], { wallClockAsUtcMs: predictedMs, mediaType: 'photo' }, offsetSeconds),
+    timelineTileWorthOpening([videoJob], { wallClockAsUtcMs: predictedMs, mediaType: 'photo' }, [offsetSeconds]),
     false,
     'a video job must not be worth opening for a Photo tile at the same predicted time'
+  );
+});
+
+test('timelineTileWorthOpening: matches on ANY offset in a multi-offset list, not just the first', () => {
+  const job = { filename: 'IMG_1.HEIC', creationDate: '2026-08-05T12:00:00.000Z', mediaType: null };
+  const jobMs = new Date(job.creationDate).getTime();
+  const trueOffsetSeconds = -14400; // -4h -- NOT the first entry in the list below
+  const predictedMs = jobMs + trueOffsetSeconds * 1000;
+
+  assert.equal(
+    timelineTileWorthOpening(
+      [job],
+      { wallClockAsUtcMs: predictedMs, mediaType: 'photo' },
+      [3600, -21600, trueOffsetSeconds, 7200] // -4h buried in the middle of an otherwise-wrong list
+    ),
+    true,
+    'must find a match anywhere in the offsets list, not only offsets[0]'
+  );
+
+  assert.equal(
+    timelineTileWorthOpening([job], { wallClockAsUtcMs: predictedMs, mediaType: 'photo' }, [3600, -21600, 7200]),
+    false,
+    'must NOT match when none of the offsets tried land the job within tolerance'
+  );
+});
+
+test('timelineTileWorthOpening: BROAD_CANDIDATE_OFFSETS_SECONDS alone (no calibration at all) finds a job at -4h and a job at -6h', () => {
+  const jobNY = { filename: 'IMG_NY.HEIC', creationDate: '2026-03-15T16:00:00.000Z', mediaType: null }; // -4h -> 12:00 local
+  const jobCO = { filename: 'IMG_CO.HEIC', creationDate: '2026-03-15T18:00:00.000Z', mediaType: null }; // -6h -> 12:00 local
+  const nyPredictedMs = new Date(jobNY.creationDate).getTime() - 4 * 3600 * 1000;
+  const coPredictedMs = new Date(jobCO.creationDate).getTime() - 6 * 3600 * 1000;
+
+  assert.equal(
+    timelineTileWorthOpening([jobNY], { wallClockAsUtcMs: nyPredictedMs, mediaType: 'photo' }, BROAD_CANDIDATE_OFFSETS_SECONDS),
+    true,
+    'the -4h (New York) job must be worth opening from the broad sweep alone'
+  );
+  assert.equal(
+    timelineTileWorthOpening([jobCO], { wallClockAsUtcMs: coPredictedMs, mediaType: 'photo' }, BROAD_CANDIDATE_OFFSETS_SECONDS),
+    true,
+    'the -6h (Colorado) job must ALSO be worth opening from the same broad sweep, in the same run'
   );
 });
 
@@ -1856,20 +1903,33 @@ test('walkTimeline: stops scrolling once the visible timeline is more than 1 day
     const job = queue.enqueue({ filename: 'IMG_NEVER_FOUND.HEIC', creationDate: '2026-08-05T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job;
 
     // 40 batches, one NEW tile each, dated one calendar day further back per
-    // batch (Aug 5, Aug 4, Aug 3, ... back to ~June 27) -- deliberately never
-    // matches `job`'s filename, and no calibration pair exists at all (offset
-    // stays null throughout), so this test isolates the STOP condition alone:
-    // nothing is ever opened (timelineTileWorthOpening always refuses a null
-    // offset -- see the pure-function test above), the only way the walk can
-    // end is either exhausting MAX_TIMELINE_FRUITLESS_SCROLLS (40 distinct
-    // batches means it never goes fruitless) or the 1-day stop check.
+    // batch (Aug 5, Aug 4, Aug 3, ... back to ~June 27), all at the SAME
+    // 12:00 PM wall-clock reading as `job`'s own UTC creationDate. Only the
+    // VERY FIRST batch (Aug 5, same calendar day+time as `job`) is ever
+    // flagged worth-opening -- it lands within tolerance under the broad
+    // sweep's offset=0 entry (a trivial "no shift needed" match against
+    // job's own literal UTC instant). Every other batch is exactly 24h (or
+    // a multiple of it) away from that instant, which is bigger than the
+    // broad sweep's +/-12h..+14h span by construction, so none of them are
+    // ever worth opening under ANY offset in the list -- this isolates the
+    // STOP condition from the multi-offset candidate search: after the one
+    // spurious-but-harmless open on batch 0 (confirmed non-match, since its
+    // panel text below carries a different filename), the only way the walk
+    // can end is either exhausting MAX_TIMELINE_FRUITLESS_SCROLLS (40
+    // distinct batches means it never goes fruitless) or the 1-day stop
+    // check.
+    const day0Label = timelineTileLabel('Aug', 5, 2026, 12, 0, 0, 'PM');
     const reveals = Array.from({ length: 40 }, (_, i) => {
       const day = 5 - i; // day 0 or negative is fine -- Date.UTC normalises month/day rollover
       const label = timelineTileLabel('Aug', day, 2026, 12, 0, 0, 'PM');
       return [{ ariaLabel: label, href: `./photo/day${i}` }];
     });
 
-    const page = createFakePage({ timelineTiles: [], timelineReveals: reveals });
+    const page = createFakePage({
+      timelineTiles: [],
+      timelineReveals: reveals,
+      timelinePanelTextByLabel: { [day0Label]: panelBlock('IMG_9999.HEIC', 100, 100) }, // IMG_#### -- must match matcher.mjs's FILENAME_PATTERNS, "IMG_DECOY..." would not parse as a filename at all
+    });
 
     const { stillUnmatched } = await walkTimeline(page, [job], queue, { dryRun: false });
 
@@ -1932,5 +1992,90 @@ test('walkTimeline: calibrates a DIFFERENT offset (-4h) correctly -- not hardcod
 
     assert.equal(stillUnmatched.length, 0);
     assert.equal(queue.getById(target.id).status, 'trashed');
+  });
+});
+
+
+test('walkTimeline: a -4h (New York) job and a -6h (Colorado) job in the SAME run are both matched and trashed -- the multi-offset fix', async () => {
+  await withTempQueue(async (queue) => {
+    // No calibration pairs at all -- deliberately proves the BROAD sweep
+    // alone (not calibrateOffsetSeconds) is what makes this work, since a
+    // single calibrated offset could only ever have picked ONE of these two
+    // trips' true offsets, never both in the same run (see
+    // BROAD_CANDIDATE_OFFSETS_SECONDS' header -- this is the exact live
+    // scenario it was added for: Oliver's March backlog mixing NY -4/-5h
+    // and Colorado -6/-7h photos).
+    const jobNY = queue.enqueue({ filename: 'IMG_9101.HEIC', creationDate: '2026-03-10T16:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job; // -4h -> Mar 10, 12:00 PM local
+    const jobCO = queue.enqueue({ filename: 'IMG_9201.HEIC', creationDate: '2026-03-15T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job; // -6h -> Mar 15, 12:00 PM local
+
+    const nyLabel = timelineTileLabel('Mar', 10, 2026, 12, 0, 0, 'PM');
+    const coLabel = timelineTileLabel('Mar', 15, 2026, 12, 0, 0, 'PM');
+
+    const page = createFakePage({
+      timelineTiles: [
+        { ariaLabel: nyLabel, href: './photo/ny' },
+        { ariaLabel: coLabel, href: './photo/co' },
+      ],
+      timelinePanelTextByLabel: {
+        [nyLabel]: panelBlock('IMG_9101.HEIC', 100, 100),
+        [coLabel]: panelBlock('IMG_9201.HEIC', 100, 100),
+      },
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, [jobNY, jobCO], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'both the -4h and -6h jobs must be found in the SAME run, with no calibration pair for either');
+    assert.equal(queue.getById(jobNY.id).status, 'trashed', 'the -4h (New York) job must be found and trashed');
+    assert.equal(queue.getById(jobCO.id).status, 'trashed', 'the -6h (Colorado) job must ALSO be found and trashed, in the same run');
+  });
+});
+
+test('walkTimeline: the multi-offset sweep stays bounded -- a day full of unrelated tiles does not blow up the open count', async () => {
+  await withTempQueue(async (queue) => {
+    const job = queue.enqueue({ filename: 'IMG_9301.HEIC', creationDate: '2026-05-01T18:00:00.000Z', pixelWidth: 100, pixelHeight: 100 }).job; // -6h -> May 1, 12:00 PM local
+
+    const realLabel = timelineTileLabel('May', 1, 2026, 12, 0, 0, 'PM'); // job's real tile
+    // 15 "background" tiles on the SAME calendar day, each 17 minutes past a
+    // distinct hour mark from the job's own predicted local time -- e.g. job
+    // predicts 12:00:00 PM; background tiles sit at 1:17:00 PM, 2:17:00 PM,
+    // etc. NOT 30 minutes past the hour: BROAD_CANDIDATE_OFFSETS_SECONDS
+    // includes three genuine half-hour zones (+5:30, +9:30, -3:30), and an
+    // earlier version of this fixture used a 30-minute offset that
+    // accidentally COLLIDED with exactly those three entries at h=2, 11, 15
+    // (caught by running this test, not by inspection -- see git history).
+    // 17 minutes clears every whole-hour AND half-hour boundary in the list
+    // by at least 13 minutes (780s), comfortably outside the +/-180s
+    // tolerance window around any of them, so NONE of these should ever be
+    // flagged worth opening.
+    const jobLocalMs = new Date(job.creationDate).getTime() - 6 * 3600 * 1000; // the job's own predicted local instant (as wall-clock-as-UTC)
+    const backgroundTiles = [];
+    const backgroundPanelText = {};
+    for (let h = 1; h <= 15; h++) {
+      const ms = jobLocalMs + h * 3600 * 1000 + 17 * 60 * 1000; // h hours + 17 minutes past the job's own instant
+      const d = new Date(ms);
+      const hour24 = d.getUTCHours();
+      const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+      const ampm = hour24 < 12 ? 'AM' : 'PM';
+      const label = timelineTileLabel('May', d.getUTCDate(), 2026, hour12, d.getUTCMinutes(), d.getUTCSeconds(), ampm);
+      const filename = `IMG_9${String(400 + h).padStart(3, '0')}.HEIC`; // IMG_9401..IMG_9415 -- valid IMG_\d+ shape
+      backgroundTiles.push({ ariaLabel: label, href: `./photo/bg${h}` });
+      backgroundPanelText[label] = panelBlock(filename, 100, 100);
+    }
+
+    const page = createFakePage({
+      timelineTiles: [{ ariaLabel: realLabel, href: './photo/real' }, ...backgroundTiles],
+      timelinePanelTextByLabel: { [realLabel]: panelBlock('IMG_9301.HEIC', 100, 100), ...backgroundPanelText },
+    });
+
+    const { stillUnmatched } = await walkTimeline(page, [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0, 'the real job must still be found');
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
+    assert.equal(
+      tileClicks.length,
+      1,
+      `expected exactly 1 tile opened (the real match) out of ${backgroundTiles.length + 1} tiles on this day, got ${tileClicks.length}: ${JSON.stringify(tileClicks)}`
+    );
   });
 });

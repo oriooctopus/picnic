@@ -211,6 +211,31 @@ export const MAX_TIMELINE_FRUITLESS_SCROLLS = 10;
 export const TIMELINE_TIME_TOLERANCE_SECONDS = 180;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
+// A single self-calibrated offset (calibrateOffsetSeconds) is not enough:
+// confirmed live 2026-09-22 (Oliver) -- this backlog's March jobs mix New
+// York (-4/-5h) and Colorado (-6/-7h) photos in the SAME run, so ONE global
+// offset structurally cannot fit both trips at once, and the minority
+// trip's jobs would never get a candidate tile opened at all (calibration
+// picks whichever offset the MOST (job, tile) pairs agree on -- see
+// matcher.mjs's calibrateOffsetSeconds -- so a smaller trip's true offset
+// can lose the vote entirely even though it's genuinely correct for its own
+// jobs). Rather than try to detect multiple trips, every tile near a
+// pending job's day is now checked against EVERY plausible offset, not just
+// the one(s) that happened to calibrate -- findMatchingJob's filename check
+// is still the only thing that ever authorises a trash, so trying more
+// offsets only costs a few extra opens on tiles that turn out to be
+// unrelated photos, never a wrong trash. See timelineTileWorthOpening.
+const WHOLE_HOUR_OFFSETS_SECONDS = [];
+for (let h = -12; h <= 14; h++) WHOLE_HOUR_OFFSETS_SECONDS.push(h * 3600);
+// The three notable non-whole-hour zones not already covered by the
+// whole-hour sweep above -- India/Sri Lanka (+5:30), Australian Central
+// (+9:30), Newfoundland (-3:30). Per the brief's explicit list; other
+// 15/45-minute zones (Nepal +5:45, Chatham +12:45, etc.) are left to
+// whatever calibrateOffsetSeconds itself derives (unioned in below) rather
+// than exhaustively enumerated here.
+const HALF_HOUR_OFFSETS_SECONDS = [5.5 * 3600, 9.5 * 3600, -3.5 * 3600];
+export const BROAD_CANDIDATE_OFFSETS_SECONDS = [...WHOLE_HOUR_OFFSETS_SECONDS, ...HALF_HOUR_OFFSETS_SECONDS];
+
 // CHANGE 2 (2026-09-01): Oliver has decided this worker does not need
 // bot-detection avoidance (he already bulk-deletes via a scripted browser
 // extension elsewhere), so human-mimicry pacing is OFF by default now.
@@ -1424,28 +1449,52 @@ async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun, 
 
 /**
  * Pure: does ANY job in `jobs` have a predicted local capture instant (its
- * UTC creationDate + `offsetSeconds`) within TIMELINE_TIME_TOLERANCE_SECONDS
- * of this parsed timeline tile's own aria-label reading? Exported for tests.
+ * UTC creationDate + one of `offsetsSeconds`) within
+ * TIMELINE_TIME_TOLERANCE_SECONDS of this parsed timeline tile's own
+ * aria-label reading? Exported for tests.
+ *
+ * `offsetsSeconds` is a LIST, not one calibrated value (2026-09-22) --
+ * see BROAD_CANDIDATE_OFFSETS_SECONDS' header for why a single global offset
+ * is unsound for a backlog spanning more than one trip/timezone. Every job
+ * is checked against every offset in the list; the first (job, offset) pair
+ * that lands within tolerance is enough.
  *
  * This only decides whether a tile is worth OPENING -- exactly like
  * planAriaMatches' role in the date-search fast path, it never authorises a
  * match by itself. Unlike planAriaMatches (which requires EXACTLY ONE
  * candidate or defers, because date search's per-date candidate pool is
  * small enough that ambiguity is a real signal worth respecting), this
- * returns true on ANY job within tolerance: the timeline pool is far larger
- * and openTimelineTile's own confirmation step (findMatchingJob against
- * filename) is what actually decides identity, so refusing an ambiguous
- * candidate here would just mean walking straight past a real match.
+ * returns true on ANY job within tolerance under ANY offset: the timeline
+ * pool is far larger and findMatchingJob's filename check is what actually
+ * decides identity, so refusing an ambiguous candidate here would just mean
+ * walking straight past a real match.
  */
-export function timelineTileWorthOpening(jobs, parsedTile, offsetSeconds) {
-  if (offsetSeconds == null) return false;
+export function timelineTileWorthOpening(jobs, parsedTile, offsetsSeconds) {
+  if (!offsetsSeconds || offsetsSeconds.length === 0) return false;
   for (const job of jobs) {
     if (!jobMediaTypeMatchesTile(job, parsedTile.mediaType)) continue;
     const jobMs = new Date(job.creationDate).getTime();
-    const predictedMs = jobMs + offsetSeconds * 1000;
-    if (Math.abs(parsedTile.wallClockAsUtcMs - predictedMs) <= TIMELINE_TIME_TOLERANCE_SECONDS * 1000) return true;
+    for (const offsetSeconds of offsetsSeconds) {
+      const predictedMs = jobMs + offsetSeconds * 1000;
+      if (Math.abs(parsedTile.wallClockAsUtcMs - predictedMs) <= TIMELINE_TIME_TOLERANCE_SECONDS * 1000) return true;
+    }
   }
   return false;
+}
+
+/**
+ * The full set of offsets (seconds) worth trying against a tile this walk --
+ * whatever calibrateOffsetSeconds derived from the accumulated (job, tile)
+ * pairs so far (if anything), UNIONED with the fixed BROAD_CANDIDATE_OFFSETS_SECONDS
+ * safety net (see that constant's header for why a single calibrated offset
+ * is not enough on its own). Deduped via Set only to avoid redundant tolerance
+ * checks in timelineTileWorthOpening's inner loop -- correctness doesn't
+ * depend on it, a duplicate offset would just get checked twice.
+ */
+function candidateOffsetsSeconds(calibratedOffsetSeconds) {
+  const offsets = new Set(BROAD_CANDIDATE_OFFSETS_SECONDS);
+  if (calibratedOffsetSeconds != null) offsets.add(calibratedOffsetSeconds);
+  return [...offsets];
 }
 
 /**
@@ -1481,20 +1530,29 @@ export function timelineTileWorthOpening(jobs, parsedTile, offsetSeconds) {
  *      (parseTileAriaLabel, unchanged) and the (job, tile) UTC offset
  *      self-calibrated from the accumulated set so far (calibrateOffsetSeconds,
  *      unchanged -- reused rather than writing new timezone logic, per the
- *      brief). Before the offset calibrates (fewer than
- *      matcher.mjs's MIN_AGREEING_PAIRS independent pairs seen so far),
- *      nothing is opened yet -- the walk just keeps scrolling to gather more
- *      calibration data.
- *   4. Once calibrated, any tile within TIMELINE_TIME_TOLERANCE_SECONDS of a
- *      still-relevant job's predicted capture instant
- *      (timelineTileWorthOpening) gets opened, its info panel read
- *      (openInfoPanelOnce/readPanelText/parsePanelText, unchanged), and
- *      findMatchingJob decides -- the ONLY thing that ever authorises a
- *      trash, exactly as in the date-search paths. A match runs through
- *      confirmAndTrash (which, as of the previous commit, requires the real
- *      "Move to trash" confirm dialog). A non-match closes the photo and
- *      moves on WITHOUT giving up on the job -- its tile might just not have
- *      loaded yet, or the candidate was a coincidental time-neighbour.
+ *      original brief).
+ *   4. MULTI-OFFSET (2026-09-22 amendment): a single calibrated offset
+ *      turned out to be unsound for a real backlog -- confirmed live by
+ *      Oliver, this March backlog mixes New York (-4/-5h) and Colorado
+ *      (-6/-7h) photos in ONE run, and calibrateOffsetSeconds can only ever
+ *      report the offset the MOST (job, tile) pairs agree on, so the
+ *      minority trip's jobs would never get a candidate tile opened at all
+ *      under the single-offset design. Every tile is now checked against
+ *      the calibrated offset (if any) UNIONED with a broad, fixed sweep of
+ *      every whole-hour offset from -12h to +14h plus the three notable
+ *      half-hour zones (see BROAD_CANDIDATE_OFFSETS_SECONDS) --
+ *      timelineTileWorthOpening returns true the moment ANY offset in that
+ *      list lands a job within TIMELINE_TIME_TOLERANCE_SECONDS of the
+ *      tile's reading. This no longer waits for calibration to gather
+ *      enough pairs before opening anything -- the broad sweep alone is
+ *      enough to start finding candidates from the very first batch.
+ *      Nothing here weakens the actual identity check: findMatchingJob's
+ *      filename comparison is unchanged and remains the ONLY thing that
+ *      ever authorises a trash, so a wider offset net just costs a few
+ *      extra opens on tiles that turn out to be unrelated photos (a match
+ *      runs through confirmAndTrash, which, as of the previous commit,
+ *      requires the real "Move to trash" confirm dialog; a non-match closes
+ *      the photo and moves on WITHOUT giving up on the job).
  *   5. Duplicate copies of an already-matched job (see confirmAndTrash's own
  *      `isDuplicateCopy` doc) are handled exactly like the date-search walks:
  *      `matchedJobs` keeps a job in the candidate pool even after its first
@@ -1558,7 +1616,14 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
       sawNewTile = true;
     }
 
-    const offsetSeconds = calibrateOffsetSeconds([...remaining, ...matchedJobs], [...seen.values()]);
+    // calibrateOffsetSeconds still runs (its own MIN_AGREEING_PAIRS refusal
+    // rule is unchanged), but its result is now just ONE contributor to the
+    // full candidate-offsets list below, not the sole gate on whether
+    // anything is worth opening at all -- see BROAD_CANDIDATE_OFFSETS_SECONDS'
+    // header for why a single global offset is unsound for a backlog
+    // spanning more than one trip/timezone.
+    const calibratedOffsetSeconds = calibrateOffsetSeconds([...remaining, ...matchedJobs], [...seen.values()]);
+    const offsetsSeconds = candidateOffsetsSeconds(calibratedOffsetSeconds);
 
     // Open every not-yet-opened tile worth opening, most-recently-seen-first
     // isn't required -- iteration order of `seen` (insertion order) is fine
@@ -1576,7 +1641,7 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
     for (const [key, { tile, parsed }] of seen) {
       if (opened.has(key)) continue;
       const candidateJobs = matchedJobs.size > 0 ? [...remaining, ...matchedJobs] : remaining;
-      if (!timelineTileWorthOpening(candidateJobs, parsed, offsetSeconds)) continue;
+      if (!timelineTileWorthOpening(candidateJobs, parsed, offsetsSeconds)) continue;
 
       opened.add(key);
       try {
@@ -1645,21 +1710,35 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
     // Stop condition: the oldest tile CURRENTLY MOUNTED (`freshTiles`, this
     // step's collectTimelineTiles() read -- everything revealed so far when
     // no virtualization window is modelled, or just the live window when one
-    // is) is more than a day older than the oldest pending job. Offset-corrected once calibrated; before that, the raw
-    // wall-clock-as-UTC reading is used directly as an approximation -- this
-    // can be off by up to the true UTC offset (at most 14h, per
-    // matcher.mjs's VALID_OFFSET_SECONDS), which only risks stopping up to
-    // ~14h early or late against a 24h threshold, never a wrong TRASH (that
-    // is still filename-gated). Accepted rather than blocking the stop
-    // condition entirely on calibration succeeding, which risked never
-    // stopping at all for a run whose jobs never accumulate enough
-    // agreeing pairs.
+    // is) is more than a day older than the oldest pending job.
+    //
+    // SOUND UNDER EVERY CANDIDATE OFFSET (2026-09-22, multi-timezone fix):
+    // converting the tile's wall-clock reading back to a "true UTC" estimate
+    // (jobMs = wallClock - offset*1000, the inverse of the predictedMs
+    // formula used for matching above) gives a DIFFERENT estimate for every
+    // candidate offset -- and a tile that's actually recent can look
+    // spuriously ancient under the wrong offset (e.g. treating a tile as
+    // +14h when its real offset is -12h subtracts 26 EXTRA hours). Stopping
+    // on any one offset's estimate risks cutting the walk off before a
+    // still-relevant tile under a DIFFERENT candidate offset is reached, so
+    // this uses the MINIMUM offset among every offset actually being tried
+    // this step (offsetsSeconds, see candidateOffsetsSeconds -- always
+    // includes the broad list's floor, -12h, so at worst this is only ever
+    // ~26h more conservative than a single-offset estimate, never less
+    // conservative): subtracting the smallest (most negative) offset always
+    // produces the LARGEST possible "true" estimate, i.e. the reading that
+    // makes the tile look YOUNGEST it could possibly be under any offset
+    // this walk would actually try. That can only delay stopping, never
+    // trigger it early, which is the correct direction to be wrong in here
+    // -- a late stop costs some wasted scrolling, an early one silently
+    // strands a still-findable job in needs_review.
     const oldestOfBatch = freshTiles
       .map((t) => parseTileAriaLabel(t.ariaLabel)?.wallClockAsUtcMs)
       .filter((ms) => ms != null)
       .reduce((min, ms) => (min == null || ms < min ? ms : min), null);
     if (oldestOfBatch != null) {
-      const oldestOfBatchTrueMs = offsetSeconds != null ? oldestOfBatch - offsetSeconds * 1000 : oldestOfBatch;
+      const mostConservativeOffsetSeconds = Math.min(...offsetsSeconds);
+      const oldestOfBatchTrueMs = oldestOfBatch - mostConservativeOffsetSeconds * 1000;
       if (oldestOfBatchTrueMs < oldestPendingMs - ONE_DAY_MS) {
         if (VERBOSE) console.log('[timeline] reached more than 1 day past the oldest pending job — stopping');
         break;
