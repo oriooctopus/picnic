@@ -2643,4 +2643,33 @@ final class WalkthroughUITests: XCTestCase {
             XCTAssertEqual(thumb.value as? String, "pending", "Unmarked photo \(i) should be cued for delete after an accept-only confirm")
         }
     }
+
+    /// The long-press "Mark as sorted / unsorted" items used to write the
+    /// month flag to SwiftData without publishing anything, so the card kept
+    /// whatever label it had — "Mark as unsorted" looked like a no-op. Drives
+    /// the real menu both ways and asserts the card's label flips each time.
+    func test47MonthContextMenuSortToggleRoundTrips() throws {
+        let seededMonth = openMyLifeGrid()
+        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertTrue(waitForElementByScrolling(seededMonth, initialTimeout: 10),
+                      "Month card should be reachable")
+        XCTAssertTrue(seededMonth.label.contains("remaining"),
+                      "Fresh seed month should start unsorted, got label: \(seededMonth.label)")
+
+        func toggle(_ buttonID: String, expect fragment: String) {
+            seededMonth.press(forDuration: 1.2)
+            let button = app.buttons[buttonID]
+            XCTAssertTrue(button.waitForExistence(timeout: 5), "\(buttonID) should appear in the context menu")
+            button.tap()
+            let flipped = NSPredicate(format: "label CONTAINS %@", fragment)
+            let result = XCTWaiter.wait(for: [expectation(for: flipped, evaluatedWith: seededMonth)], timeout: 5)
+            XCTAssertEqual(result, .completed,
+                           "After \(buttonID) the card label should contain '\(fragment)', got: \(seededMonth.label)")
+        }
+
+        toggle("month.markSorted", expect: "Sorted")
+        capture("47a-month-marked-sorted")
+        toggle("month.markUnsorted", expect: "remaining")
+        capture("47b-month-marked-unsorted")
+    }
 }
