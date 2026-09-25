@@ -2672,4 +2672,62 @@ final class WalkthroughUITests: XCTestCase {
         toggle("month.markUnsorted", expect: "remaining")
         capture("47b-month-marked-unsorted")
     }
+
+    /// Regression for the OTHER way a month reads "Sorted": once every
+    /// individual asset has been swiped through (state != .unsorted),
+    /// remainingCount hits 0 on its own and isSorted goes true regardless of
+    /// the manual flag — so "Mark as unsorted" (which only cleared the flag)
+    /// looked like a no-op. test47 never exercises this path because it
+    /// marks sorted on a FRESH month, where remainingCount was already the
+    /// true 0/N. This swipes every real asset in May's 5-photo month (burst
+    /// cluster A's 4 + the 5/18 standalone) via the actual per-card gesture,
+    /// confirms the card reads "Sorted" from that alone, then confirms
+    /// "Mark as unsorted" actually reopens it.
+    func test48MonthUnsortAfterFullSwipeReopensMonth() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-sort-state"])
+        let deckCard = openMayDeck()
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+        let total = totalCount(fromPosition: position.label)
+        XCTAssertEqual(total, 5, "May 2025 should seed 5 photos (burst cluster A's 4 + the 5/18 standalone)")
+
+        // Swipe right (keep) through every card: keeping, not X-ing, means
+        // nothing ends up pending-delete, so exiting the deck afterwards is
+        // a plain dismiss with no PhotoKit commit/confirm dialog in the way.
+        for _ in 0..<total {
+            deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+                .press(forDuration: 0.1,
+                       thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                       withVelocity: .default,
+                       thenHoldForDuration: 0.1)
+            Thread.sleep(forTimeInterval: 1.0)
+        }
+        capture("48a-deck-all-kept")
+
+        XCTAssertFalse(app.staticTexts["deck.pendingCount"].exists,
+                       "Keeping every card should leave nothing pending-delete")
+        app.buttons["deck.commit"].tap()
+
+        let seededMonth = app.descendants(matching: .any)["monthCard.2025-05"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(seededMonth, initialTimeout: 15),
+                      "Should be back at the My Life grid with the seeded month visible")
+        let sorted = NSPredicate(format: "label CONTAINS %@", "Sorted")
+        XCTAssertEqual(XCTWaiter.wait(for: [expectation(for: sorted, evaluatedWith: seededMonth)], timeout: 5), .completed,
+                       "Every asset addressed should read the card as Sorted even with no manual flag set, got: \(seededMonth.label)")
+        capture("48b-month-sorted-via-full-swipe")
+
+        // This is the actual bug: with remainingCount permanently 0, the old
+        // setMonthManuallySorted(false, ...) only cleared a flag that was
+        // never true, so the card stayed "Sorted" forever.
+        seededMonth.press(forDuration: 1.2)
+        let unsortButton = app.buttons["month.markUnsorted"]
+        XCTAssertTrue(unsortButton.waitForExistence(timeout: 5), "month.markUnsorted should appear in the context menu")
+        unsortButton.tap()
+        let remaining = NSPredicate(format: "label CONTAINS %@", "remaining")
+        let result = XCTWaiter.wait(for: [expectation(for: remaining, evaluatedWith: seededMonth)], timeout: 5)
+        XCTAssertEqual(result, .completed,
+                       "Mark as unsorted should reopen the month (label containing 'remaining'), got: \(seededMonth.label)")
+        capture("48c-month-unsorted-after-full-swipe")
+    }
 }
