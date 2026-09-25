@@ -18,6 +18,12 @@ final class SortStore: ObservableObject {
     private var stateCache: [String: SortState] = [:]
     private var resolvedGroupCache: Set<String> = []
 
+    /// Published, unlike the caches above: MonthCardView observes SortStore
+    /// and reads this in its body, so the long-press "Mark as sorted /
+    /// unsorted" menu has to trigger a redraw. Reading MonthSortMeta straight
+    /// from SwiftData published nothing, so the card kept its old label.
+    @Published private(set) var manuallySortedMonths: Set<String> = []
+
     /// UserDefaults, not SwiftData: this is a single "where was I" pointer,
     /// not sort-of-record data, so it doesn't need a model/migration. Read by
     /// AppState on cold launch to reopen the month the user was actually
@@ -37,6 +43,11 @@ final class SortStore: ObservableObject {
         )
         resolvedGroupCache = Set(
             ((try? context.fetch(FetchDescriptor<CompareGroupResolution>())) ?? []).map(\.groupKey)
+        )
+        manuallySortedMonths = Set(
+            ((try? context.fetch(FetchDescriptor<MonthSortMeta>())) ?? [])
+                .filter(\.manuallyMarkedSorted)
+                .map(\.monthKey)
         )
     }
 
@@ -115,8 +126,7 @@ final class SortStore: ObservableObject {
     // MARK: Per-month manual override
 
     func isMonthManuallySorted(_ monthKey: String) -> Bool {
-        let descriptor = FetchDescriptor<MonthSortMeta>(predicate: #Predicate { $0.monthKey == monthKey })
-        return (try? context.fetch(descriptor).first)?.manuallyMarkedSorted ?? false
+        manuallySortedMonths.contains(monthKey)
     }
 
     func setMonthManuallySorted(_ sorted: Bool, monthKey: String) {
@@ -128,6 +138,11 @@ final class SortStore: ObservableObject {
             context.insert(MonthSortMeta(monthKey: monthKey, manuallyMarkedSorted: sorted))
         }
         try? context.save()
+        if sorted {
+            manuallySortedMonths.insert(monthKey)
+        } else {
+            manuallySortedMonths.remove(monthKey)
+        }
     }
 
     // MARK: Compare group resolution

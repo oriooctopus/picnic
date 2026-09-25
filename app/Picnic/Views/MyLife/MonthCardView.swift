@@ -3,16 +3,19 @@ import Photos
 
 struct MonthCardView: View {
     @EnvironmentObject var appState: AppState
+    /// Observed directly: AppState doesn't forward SortStore's changes, so
+    /// without this the context-menu sort toggles never redrew the card.
+    @ObservedObject var sortStore: SortStore
     let month: MonthBucket
 
     @State private var coverImage: UIImage?
 
     private var remainingCount: Int {
-        max(0, month.assets.count - appState.sortStore.addressedCount(for: month.assets))
+        max(0, month.assets.count - sortStore.addressedCount(for: month.assets))
     }
 
     private var isSorted: Bool {
-        appState.sortStore.isMonthManuallySorted(month.key) || (month.assets.isEmpty == false && remainingCount == 0)
+        sortStore.isMonthManuallySorted(month.key) || (month.assets.isEmpty == false && remainingCount == 0)
     }
 
     // Portrait ~2:3 per PARITY.md.
@@ -71,13 +74,13 @@ struct MonthCardView: View {
             .accessibilityLabel("\(month.monthAbbreviation), \(isSorted ? "Sorted" : "\(remainingCount) remaining")")
             .contextMenu {
                 Button {
-                    appState.sortStore.setMonthManuallySorted(true, monthKey: month.key)
+                    sortStore.setMonthManuallySorted(true, monthKey: month.key)
                 } label: {
                     Label("Mark as sorted", systemImage: "hand.thumbsup.fill")
                 }
                 .accessibilityIdentifier("month.markSorted")
                 Button {
-                    appState.sortStore.setMonthManuallySorted(false, monthKey: month.key)
+                    sortStore.setMonthManuallySorted(false, monthKey: month.key)
                 } label: {
                     Label("Mark as unsorted", systemImage: "circle")
                 }

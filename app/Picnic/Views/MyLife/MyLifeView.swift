@@ -78,7 +78,7 @@ struct MyLifeView: View {
 
                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
                             ForEach(entry.months) { month in
-                                MonthCardView(month: month)
+                                MonthCardView(sortStore: appState.sortStore, month: month)
                                     .environmentObject(appState)
                                     .onTapGesture { selectedMonth = month }
                             }
