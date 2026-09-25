@@ -80,7 +80,7 @@ struct MonthCardView: View {
                 }
                 .accessibilityIdentifier("month.markSorted")
                 Button {
-                    sortStore.setMonthManuallySorted(false, monthKey: month.key)
+                    sortStore.markMonthUnsorted(monthKey: month.key, assets: month.assets)
                 } label: {
                     Label("Mark as unsorted", systemImage: "circle")
                 }

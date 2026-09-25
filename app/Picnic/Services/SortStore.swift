@@ -145,6 +145,32 @@ final class SortStore: ObservableObject {
         }
     }
 
+    /// "Mark as unsorted" needs more than clearing the manual flag: once
+    /// every asset in the month has been individually swiped
+    /// (.kept/.markedForDelete), MonthCardView's remainingCount is already 0
+    /// on its own, so the card kept reading "Sorted" even with the flag
+    /// cleared — clearing a flag that isn't what's holding it sorted is a
+    /// no-op. This resets every non-.unsorted, non-.deleted asset in the
+    /// month back to .unsorted so remainingCount becomes true again.
+    /// .deleted is left alone — those assets are actually gone from
+    /// PhotoKit, re-surfacing them as "to sort" would dangle.
+    func markMonthUnsorted(monthKey: String, assets: [PHAsset]) {
+        setMonthManuallySorted(false, monthKey: monthKey)
+        for asset in assets {
+            let state = stateCache[asset.localIdentifier] ?? .unsorted
+            guard state != .unsorted, state != .deleted else { continue }
+            setState(.unsorted, for: asset, monthKey: monthKey)
+        }
+        // setMonthManuallySorted only republishes manuallySortedMonths, and
+        // setState above doesn't touch any @Published property at all (see
+        // stateCache's own doc comment) — so without an explicit republish
+        // here, a month whose assets were all reset but whose manual flag
+        // was never set would show no observable change and the card would
+        // stay stuck on its stale "Sorted" label, same class of bug commit
+        // 3ebf330 fixed for the flag-only case.
+        objectWillChange.send()
+    }
+
     // MARK: Compare group resolution
 
     func isGroupResolved(_ groupKey: String) -> Bool {
