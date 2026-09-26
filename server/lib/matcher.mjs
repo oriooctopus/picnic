@@ -221,6 +221,30 @@ export function parsePanelText(rawText, nowMs = Date.now()) {
 }
 
 /**
+ * Parse the camera-model device string out of a Google Photos info-panel's
+ * raw text. Two live panel shapes (Oliver, 2026-09-22) matter here:
+ *
+ *   "...GMT-04:00\nApple iPhone 13 Proƒ/2.21/632.71mmISO40..."   // model PRESENT
+ *   "...GMT-04:00\nIMG_2929.JPG..."                               // model ABSENT
+ *
+ * WHY the lookahead: the panel runs fields together with no separator (see
+ * parsePanelText's header), so the model name is immediately followed by the
+ * lens/EXIF block -- the aperture "ƒ/" comes first in the field order
+ * ("Apple iPhone 13 Proƒ/2.2..."). A naive greedy `[^\n]{0,40}` (as first
+ * attempted) swallows "ƒ/2.21/632.71mmISO40..." into the "model" string, so
+ * the capture stops at the first lens token (the aperture "ƒ/"), a line end,
+ * or end of text instead. Returns null (never guesses) when the text has no
+ * "Apple iPhone" prefix at all -- the second shape above, plus WhatsApp
+ * saves, shared items, and non-iPhone cameras -- which callers then route to
+ * the "other" section.
+ */
+export function parseCameraModel(text) {
+  const m = /Apple\s+iPhone\b[^\n]{0,40}?(?=ƒ\/|\n|$)/i.exec(text ?? '');
+  if (!m) return null;
+  return m[0].trim();
+}
+
+/**
  * A bulk re-import into the local photo library can append "_Original"
  * immediately before the extension (e.g. IMG_6716_Original.HEIC), while
  * Google Photos keeps the bare original name for the same photo
