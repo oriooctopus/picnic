@@ -85,6 +85,17 @@ struct MonthCardView: View {
                     Label("Mark as unsorted", systemImage: "circle")
                 }
                 .accessibilityIdentifier("month.markUnsorted")
+                // Routes through AppState (not a local @State) because the
+                // card lives deep inside the LazyVGrid, where a per-card
+                // cover would have to be presented from a distant ancestor;
+                // AppState.reconcileMonth is the single presentation trigger
+                // MyLifeView's second fullScreenCover observes.
+                Button {
+                    appState.reconcileMonth = month
+                } label: {
+                    Label("Clean up Google", systemImage: "trash.circle")
+                }
+                .accessibilityIdentifier("month.cleanUpGoogle")
             }
             .task {
                 coverImage = await ThumbnailLoader.thumbnail(for: month.coverAsset, targetSize: CGSize(width: 240, height: 300))

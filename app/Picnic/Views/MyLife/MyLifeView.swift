@@ -131,6 +131,15 @@ struct MyLifeView: View {
             .environmentObject(appState)
             .onDisappear { appState.refreshMonths() }
         }
+        // Second, independent cover for the reconcile review screen — the
+        // deck cover above is bound to $selectedMonth, this one to
+        // AppState.reconcileMonth, so the two can't collide. Both are
+        // fullScreenCover(item:) on the same view; iOS 17 presents whichever
+        // binding becomes non-nil, and dismissing sets it back to nil.
+        .fullScreenCover(item: $appState.reconcileMonth) { month in
+            ReconcileReviewView(month: month)
+                .environmentObject(appState)
+        }
         .background(Color.black.ignoresSafeArea())
     }
 

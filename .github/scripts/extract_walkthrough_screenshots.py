@@ -51,6 +51,7 @@ REQUIRED = [
     "43-deck-first-member", "44-deck-tapped-member",
     "45-compare-opened-on-tapped-member",
     "46-filmstrip-hidden-before-unhide", "47-filmstrip-recentered-after-unhide",
+    "reconcile-review",
 ]
 
 # Best-effort: one per test method, captured in tearDown. See module

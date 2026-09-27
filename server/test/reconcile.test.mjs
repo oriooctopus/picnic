@@ -78,6 +78,22 @@ test('diff: Live Photo video half is not a candidate; unmatched video is', () =>
   assert.deepEqual(candidates.map((c) => c.photoId), ['g2']);
 });
 
+test('diff: Live-Photo negatives -- manifest video does not excuse a google video; ext mismatch on a non-video is still a candidate', () => {
+  // The video-half exemption only applies when the MANIFEST side is a still.
+  // Manifest is itself a video with a different name -> google video stays a candidate.
+  const m1 = [manifestAsset('IMG_1433.MOV')];
+  assert.deepEqual(diffGoogleVsManifest(m1, [googlePhoto('g1', 'IMG_1433.mp4')]).candidates.map((c) => c.photoId), ['g1']);
+  // google .jpg vs manifest .heic: same base but google is NOT a video -> no exemption, candidate.
+  const m2 = [manifestAsset('IMG_1433.HEIC')];
+  assert.deepEqual(diffGoogleVsManifest(m2, [googlePhoto('g2', 'IMG_1433.jpg')]).candidates.map((c) => c.photoId), ['g2']);
+});
+
+test('diff: _Original.MOV google video agrees with the bare manifest video name', () => {
+  const manifest = [manifestAsset('IMG_6716.MOV')];
+  const google = [googlePhoto('g1', 'IMG_6716_Original.MOV')];
+  assert.deepEqual(diffGoogleVsManifest(manifest, google).candidates, []);
+});
+
 test('diff: duplicate filenames -- both copies kept or both dropped, per agreement', () => {
   const manifest = [manifestAsset('IMG_1433.HEIC')];
   const google = [
@@ -104,6 +120,10 @@ test('diff: missing camera model -> candidate in "other"; iPhone model -> "iphon
   assert.equal(candidates.length, 2);
   assert.deepEqual(bySection.other.map((c) => c.photoId), ['g1']);
   assert.deepEqual(bySection.iphone.map((c) => c.photoId), ['g2']);
+});
+
+test('sectionForCameraModel: a look-alike "Not Apple iPhone" is other', () => {
+  assert.equal(sectionForCameraModel('Not Apple iPhone'), 'other');
 });
 
 test('sectionForCameraModel: only a non-null "Apple iPhone..." model is iphone', () => {

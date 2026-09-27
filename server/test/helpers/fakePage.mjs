@@ -1130,7 +1130,26 @@ export function createFakePage(config = {}) {
       if (page.config.timelineTiles != null && photoOpen(page)) {
         return `https://photos.google.com/photo/${encodeURIComponent(page.openedIdentity ?? page.openedAriaLabel)}`;
       }
+      // Reconcile SCAN (grid/search mode, no timelineTiles): an opened search
+      // tile carries a per-label photoId so worker.mjs's photoIdFromUrl() can
+      // read it off page.url() exactly like a real per-photo permalink. Only
+      // fires when the fixture pins one (config.photoIdByLabel); existing
+      // grid-mode tests never set it, so they keep the base-URL behaviour.
+      if (photoOpen(page) && page.config.photoIdByLabel?.[page.openedAriaLabel] != null) {
+        return `https://photos.google.com/photo/${page.config.photoIdByLabel[page.openedAriaLabel]}`;
+      }
       return page._url ?? 'https://photos.google.com';
+    },
+    /**
+     * Reconcile SCAN captures a JPEG thumbnail of the open candidate via
+     * page.screenshot({type:'jpeg', quality:50}). A real Playwright screenshot
+     * serializes to a Buffer; this returns the fixture's buffer (defaulting to
+     * a short constant) so the scan's saveThumb has real bytes to write.
+     */
+    async screenshot() {
+      page.guard();
+      page.log.push('screenshot');
+      return page.config.screenshotBuffer ?? Buffer.from('fake-jpeg-thumbnail');
     },
     countFor(selector) {
       if (isTileIdentitySelector(selector)) {

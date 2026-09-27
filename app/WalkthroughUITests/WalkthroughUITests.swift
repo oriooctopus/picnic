@@ -2730,4 +2730,41 @@ final class WalkthroughUITests: XCTestCase {
                        "Mark as unsorted should reopen the month (label containing 'remaining'), got: \(seededMonth.label)")
         capture("48c-month-unsorted-after-full-swipe")
     }
+
+    /// The "Clean up Google" review screen (Option A of the reconcile
+    /// feature): long-presses a month card, taps "Clean up Google", and
+    /// checks the two candidate sections + the confirm count. Launches with
+    /// `--reconcile-seed` so the review screen renders canned candidates
+    /// (3 "from this iPhone", 2 "other") with no mirror server.
+    func test49ReconcileReview() throws {
+        relaunch(withExtraArguments: ["--reconcile-seed"])
+        let seededMonth = openMyLifeGrid()
+        Thread.sleep(forTimeInterval: 1.0)
+
+        seededMonth.press(forDuration: 1.2)
+        let cleanUpButton = app.buttons["month.cleanUpGoogle"]
+        XCTAssertTrue(cleanUpButton.waitForExistence(timeout: 5),
+                      "Clean up Google should appear in the month context menu")
+        cleanUpButton.tap()
+
+        // The review screen's .task builds the manifest and loads candidates;
+        // the seeded path skips both network calls, so the iPhone section
+        // (the first thing rendered) should appear promptly.
+        let iphoneSection = app.descendants(matching: .any)["reconcile.section.iphone"].firstMatch
+        XCTAssertTrue(iphoneSection.waitForExistence(timeout: 15),
+                      "From this iPhone section should appear")
+
+        capture("reconcile-review")
+
+        let otherSection = app.descendants(matching: .any)["reconcile.section.other"].firstMatch
+        XCTAssertTrue(otherSection.waitForExistence(timeout: 5),
+                      "Other sources section should appear")
+
+        // 3 seeded iPhone candidates are pre-selected; the 2 other candidates
+        // are pre-kept, so the confirm button should count exactly 3.
+        let confirmButton = app.buttons["reconcile.confirmButton"]
+        XCTAssertTrue(confirmButton.waitForExistence(timeout: 5), "Confirm button should appear")
+        XCTAssertTrue(confirmButton.label.contains("Move 3 to Google trash"),
+                      "Confirm button should read 'Move 3 to Google trash' (3 iPhone candidates pre-selected), got: \(confirmButton.label)")
+    }
 }

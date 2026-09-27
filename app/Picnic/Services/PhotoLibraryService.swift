@@ -66,6 +66,42 @@ final class PhotoLibraryService: ObservableObject {
         PHAssetResource.assetResources(for: asset).first?.originalFilename ?? asset.localIdentifier
     }
 
+    // MARK: Reconcile manifest
+
+    /// Builds the POST /reconcile manifest for one month: one entry per
+    /// PHAsset with filename, ISO 8601 creation date, and pixel size.
+    ///
+    /// WHY no filtering: the bucket's assets already include iCloud-only and
+    /// hidden photos — PhotoKit's enumerateObjects returns them and this
+    /// method deliberately keeps them. The reconcile server needs to diff the
+    /// FULL on-phone set against Google Photos, so dropping any of them would
+    /// make a genuinely on-phone photo look like "only in Google".
+    ///
+    /// WHY the filename caveat below: `originalFilename(for:)` falls back to
+    /// the asset's `localIdentifier` when PhotoKit can't find a local
+    /// resource (typically an iCloud-only asset with "Optimize iPhone
+    /// Storage" on). The server can't match that identifier against Google's
+    /// own filename, so such photos may surface as false "only in Google"
+    /// candidates. That's reported, not papered over — the manifest still
+    /// lists the asset so the on-phone count stays honest.
+    func reconcileManifest(for bucket: MonthBucket) -> [ReconcileManifestAsset] {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withTimeZone]
+
+        return bucket.assets.map { asset in
+            ReconcileManifestAsset(
+                filename: originalFilename(for: asset),
+                // fetchMonthBuckets only keeps assets with a creationDate, so
+                // the `?? Date()` below is unreachable in practice — kept for
+                // parity with MirrorQueueStore.enqueue, which formats the same
+                // optional API the same way.
+                creationDate: formatter.string(from: asset.creationDate ?? Date()),
+                pixelWidth: asset.pixelWidth,
+                pixelHeight: asset.pixelHeight
+            )
+        }
+    }
+
     // MARK: Smart collections (Utilities tab)
 
     func count(for kind: SmartCollectionKind) -> Int {

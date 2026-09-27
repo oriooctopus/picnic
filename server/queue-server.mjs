@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -6,6 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { JobQueue, STATUSES } from './lib/queue.mjs';
 import { loadToken, checkBearerAuth, tokensMatch } from './lib/auth.mjs';
 import { createAutoDrain, createCdpProbe, createWorkerSpawn, isAutoDrainEnabled } from './lib/autodrain.mjs';
+import { ReconcileStore, sectionForCameraModel } from './lib/reconcile.mjs';
 
 // NOTE: SPEC.md / task instructions said 8306, but ~/.claude/rules/ports.md
 // already has 8306 assigned to another local service (verified live and
@@ -23,11 +25,15 @@ const THUMBS_DIR = process.env.PICNIC_THUMBS_DIR || join(homedir(), '.local/shar
 // (per the brief) -- this exists only to stop a malformed/huge body from
 // writing an unbounded file to disk, not to police normal thumbnail sizes.
 const MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024;
+// Overridable the same way as QUEUE_PATH so tests never touch the real
+// ~/.local/share/picnic/reconcile — see lib/reconcile.mjs's ReconcileStore.
+const RECONCILE_DIR = process.env.PICNIC_RECONCILE_DIR || join(homedir(), '.local', 'share', 'picnic', 'reconcile');
 
 const queue = new JobQueue(QUEUE_PATH);
 // Created eagerly (mirrors JobQueue's own directory bootstrap) so the first
 // POST /queue with a thumbnail never races a lazy mkdir.
 if (!existsSync(THUMBS_DIR)) mkdirSync(THUMBS_DIR, { recursive: true });
+const reconcile = new ReconcileStore(RECONCILE_DIR);
 
 function thumbPath(id) {
   return join(THUMBS_DIR, `${id}.jpg`);
@@ -254,7 +260,24 @@ const NOOP_AUTO_DRAIN = {
   getStatus: () => ({ enabled: false, running: false, lastRun: null }),
 };
 
-export function createApp({ autoDrain = NOOP_AUTO_DRAIN } = {}) {
+/**
+ * Fire-and-forget spawn of a reconcile worker run. Mirrors
+ * createWorkerSpawn's cwd resolution (worker.mjs lives next to this file) but
+ * detaches with stdio ignored — the reconcile endpoints never await the scan/
+ * trash (they are minutes-long browser runs), they just kick it off and return
+ * the status immediately. `mode` is 'scan' or 'trash'.
+ */
+function spawnReconcileWorker(mode, month) {
+  const child = spawn(process.execPath, ['worker.mjs', `--reconcile-${mode}=${month}`], {
+    cwd: dirname(fileURLToPath(import.meta.url)),
+    stdio: 'ignore',
+    detached: true,
+  });
+  child.unref();
+  return child;
+}
+
+export function createApp({ autoDrain = NOOP_AUTO_DRAIN, spawnReconcile = spawnReconcileWorker } = {}) {
   return createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host}`);
@@ -400,6 +423,114 @@ export function createApp({ autoDrain = NOOP_AUTO_DRAIN } = {}) {
           .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         return res.end(renderIssuesPage(jobs, token));
+      }
+
+      // ----- Reconcile ("Clean up Google") routes -------------------------
+      // A month's pipeline: POST /reconcile (phone uploads manifest, spawn the
+      // read-only scan) -> GET /reconcile/:month (browse candidates) -> POST
+      // /reconcile/:month/confirm (user picks ids, spawn the trash pass) ->
+      // GET /reconcile/:month/results (poll for done). Thumbnails are served
+      // to the browser via the query/header auth route so an <img> can load
+      // them.
+
+      // Ordered first: the thumb route is 4 path segments and must not be
+      // swallowed by the 2-segment GET /reconcile/:month match below (they
+      // don't overlap regex-wise, but keep the more specific one first).
+      const reconcileThumbMatch = /^\/reconcile\/thumb\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+      if (req.method === 'GET' && reconcileThumbMatch) {
+        if (!requireAuthQueryOrHeader(req, res, url)) return;
+        const [, month, id] = reconcileThumbMatch;
+        // Validate BOTH segments before touching the filesystem — a photoId is
+        // base64url (letters/digits/_/-), never arbitrary path text, so a
+        // traversal attempt (../, %2F, etc.) dies here as a 404, not at a
+        // filesystem join. Mirrors the existing /thumb/:id hex gate.
+        if (!/^\d{4}-\d{2}$/.test(month) || !/^[A-Za-z0-9_-]+$/.test(id)) {
+          return send(res, 404, { error: 'no thumbnail for that id' });
+        }
+        const p = reconcile.thumbPath(month, id);
+        if (!existsSync(p)) return send(res, 404, { error: 'no thumbnail for that id' });
+        res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+        return res.end(readFileSync(p));
+      }
+
+      if (req.method === 'POST' && url.pathname === '/reconcile') {
+        if (!requireAuth(req, res)) return;
+        const body = await readJsonBody(req);
+        const { month, assets } = body;
+        if (typeof month !== 'string' || !/^\d{4}-\d{2}$/.test(month)) {
+          return send(res, 400, { error: 'month must be a "YYYY-MM" string' });
+        }
+        if (!Array.isArray(assets)) {
+          return send(res, 400, { error: 'assets must be an array' });
+        }
+        reconcile.saveManifest(month, assets);
+        reconcile.saveStatus(month, 'scanning');
+        spawnReconcile('scan', month);
+        return send(res, 200, { month, status: 'scanning', assetCount: assets.length });
+      }
+
+      const reconcileMonthMatch = /^\/reconcile\/([^/]+)$/.exec(url.pathname);
+      if (req.method === 'GET' && reconcileMonthMatch) {
+        if (!requireAuth(req, res)) return;
+        const month = reconcileMonthMatch[1];
+        if (!/^\d{4}-\d{2}$/.test(month)) return send(res, 400, { error: 'month must be a "YYYY-MM" string' });
+        const candidates = reconcile.listCandidates(month);
+        const sections = { iphone: [], other: [] };
+        for (const c of candidates) {
+          const view = {
+            id: c.photoId,
+            filename: c.filename,
+            cameraModel: c.cameraModel,
+            captureDateMs: c.captureDateMs,
+            pixelWidth: c.pixelWidth,
+            pixelHeight: c.pixelHeight,
+            thumbUrl: `/reconcile/thumb/${month}/${c.photoId}`,
+            status: c.status,
+          };
+          sections[sectionForCameraModel(c.cameraModel)].push(view);
+        }
+        return send(res, 200, {
+          month,
+          status: reconcile.loadStatus(month) ?? 'scanning',
+          totalCandidates: candidates.length,
+          sections: {
+            iphone: { count: sections.iphone.length, candidates: sections.iphone },
+            other: { count: sections.other.length, candidates: sections.other },
+          },
+        });
+      }
+
+      const reconcileConfirmMatch = /^\/reconcile\/([^/]+)\/confirm$/.exec(url.pathname);
+      if (req.method === 'POST' && reconcileConfirmMatch) {
+        if (!requireAuth(req, res)) return;
+        const month = reconcileConfirmMatch[1];
+        if (!/^\d{4}-\d{2}$/.test(month)) return send(res, 400, { error: 'month must be a "YYYY-MM" string' });
+        const body = await readJsonBody(req);
+        const { ids } = body;
+        if (!Array.isArray(ids) || ids.length === 0) {
+          return send(res, 400, { error: 'ids must be a non-empty array' });
+        }
+        const known = new Set(reconcile.listCandidates(month).map((c) => c.photoId));
+        if (!ids.every((id) => known.has(id))) {
+          return send(res, 404, { error: 'one or more ids do not match an existing candidate' });
+        }
+        reconcile.confirm(month, ids);
+        reconcile.saveStatus(month, 'confirming');
+        spawnReconcile('trash', month);
+        return send(res, 200, { queued: ids.length });
+      }
+
+      const reconcileResultsMatch = /^\/reconcile\/([^/]+)\/results$/.exec(url.pathname);
+      if (req.method === 'GET' && reconcileResultsMatch) {
+        if (!requireAuth(req, res)) return;
+        const month = reconcileResultsMatch[1];
+        if (!/^\d{4}-\d{2}$/.test(month)) return send(res, 400, { error: 'month must be a "YYYY-MM" string' });
+        const candidates = reconcile.listCandidates(month);
+        return send(res, 200, {
+          month,
+          done: reconcile.loadStatus(month) === 'done',
+          results: candidates.map((c) => ({ id: c.photoId, status: c.status })),
+        });
       }
 
       send(res, 404, { error: 'not found' });

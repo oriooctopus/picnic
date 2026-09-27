@@ -138,6 +138,10 @@ export class ReconcileStore {
     return join(this.monthDir(month), 'manifest.json');
   }
 
+  statusPath(month) {
+    return join(this.monthDir(month), 'status.json');
+  }
+
   candidatesPath(month) {
     return join(this.monthDir(month), 'candidates.jsonl');
   }
@@ -159,6 +163,26 @@ export class ReconcileStore {
   /** null when no manifest has been saved for this month yet. */
   loadManifest(month) {
     const p = this.manifestPath(month);
+    if (!existsSync(p)) return null;
+    return JSON.parse(readFileSync(p, 'utf8'));
+  }
+
+  /**
+   * Persist the month's reconcile phase. Statuses are the finite lifecycle
+   * 'scanning' | 'ready' | 'confirming' | 'done'; the worker writes 'ready'
+   * after its read-only scan finishes and 'done' after its trash pass, the
+   * server writes 'scanning' on manifest receipt and 'confirming' on user
+   * confirmation. Plain overwrite (not the candidates.jsonl append idiom) --
+   * a month's phase is a single latest value, never a folded history.
+   */
+  saveStatus(month, status) {
+    mkdirSync(this.monthDir(month), { recursive: true });
+    writeFileSync(this.statusPath(month), JSON.stringify(status));
+  }
+
+  /** null when no status has been written for this month yet. */
+  loadStatus(month) {
+    const p = this.statusPath(month);
     if (!existsSync(p)) return null;
     return JSON.parse(readFileSync(p, 'utf8'));
   }

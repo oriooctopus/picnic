@@ -100,9 +100,15 @@ import {
   planAriaMatches,
   parseTileAriaLabel,
   filenamesAgree,
+  parseCameraModel,
 } from './lib/matcher.mjs';
+import { ReconcileStore, diffGoogleVsManifest } from './lib/reconcile.mjs';
 
 const QUEUE_PATH = process.env.PICNIC_QUEUE_PATH || join(homedir(), '.local/share/picnic/queue.jsonl');
+// The reconcile store (the "Clean up Google" feature) lives in its own tree,
+// separate from the mirror-job queue above. Overridable the same way so tests
+// and local runs never touch the real ~/.local/share/picnic/reconcile.
+const RECONCILE_DIR = process.env.PICNIC_RECONCILE_DIR || join(homedir(), '.local', 'share', 'picnic', 'reconcile');
 const DEFAULT_CAP = 50;
 const SEARCH_BOX_SELECTOR = 'input[aria-label*="Search" i], input[placeholder*="Search" i]';
 // Search-result tiles share this href prefix with non-photo chips (e.g.
@@ -241,7 +247,7 @@ let SLOW = false;
 // is now reliable, both are kept selectable so they can be A/B'd live --
 // `photo` (walkPhotoView) stays the default so nothing changes unless asked.
 export function parseArgs(argv) {
-  const args = { cap: DEFAULT_CAP, dryRun: false, slow: false, walk: 'photo', revisitFile: null };
+  const args = { cap: DEFAULT_CAP, dryRun: false, slow: false, walk: 'photo', revisitFile: null, reconcileScan: null, reconcileTrash: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--cap') args.cap = Number(argv[++i]);
     if (argv[i] === '--dry-run') args.dryRun = true;
@@ -252,6 +258,11 @@ export function parseArgs(argv) {
     // multi-thousand-photo walk just to re-collect the same URLs -- see
     // runRevisitFromFile's own header.
     if (argv[i] === '--revisit-file') args.revisitFile = argv[++i];
+    // Reconcile modes (the "Clean up Google" feature) — see runReconcileScan /
+    // runReconcileTrash. One month per flag, "YYYY-MM"; mutually exclusive
+    // with the normal mirror walk (checked in the main dispatch below).
+    if (argv[i].startsWith('--reconcile-scan=')) args.reconcileScan = argv[i].slice('--reconcile-scan='.length);
+    if (argv[i].startsWith('--reconcile-trash=')) args.reconcileTrash = argv[i].slice('--reconcile-trash='.length);
     if (argv[i].startsWith('--walk=')) {
       const value = argv[i].slice('--walk='.length);
       if (value !== 'photo' && value !== 'grid' && value !== 'timeline') {
@@ -262,6 +273,8 @@ export function parseArgs(argv) {
     if (argv[i] === '--help' || argv[i] === '-h') {
       console.log(
         'Usage: node worker.mjs [--dry-run] [--cap N] [--slow] [--walk=photo|grid|timeline] [--revisit-file PATH]\n' +
+          '       node worker.mjs --reconcile-scan=<YYYY-MM>\n' +
+          '       node worker.mjs --reconcile-trash=<YYYY-MM>\n' +
           '  --dry-run    Search + read candidate info + decide, but never trash. Safe default for a first run.\n' +
           '  --cap N      Max queued jobs to process this run (default 50).\n' +
           '  --slow       Restore human-scale pacing (inter-click jitter, dwell, per-character typing). Off by default.\n' +
@@ -270,7 +283,9 @@ export function parseArgs(argv) {
           '               search was measured badly incomplete live -- opens the main library\'s newest photo and\n' +
           '               walks the photo viewer with ArrowRight, checking every photo\'s filename; see walkTimeline).\n' +
           '  --revisit-file PATH  Skip the walk entirely -- run ONLY the revisit pass (revisitUnreadable), one URL per\n' +
-          '               line in PATH, against currently queued jobs. Ignores --walk when set.'
+          '               line in PATH, against currently queued jobs. Ignores --walk when set.\n' +
+          '  --reconcile-scan=<YYYY-MM>   Read-only reconcile scan of one month (never trashes). Writes candidates.\n' +
+          '  --reconcile-trash=<YYYY-MM>  Trash the user-confirmed candidates for one month (re-verifies filename first).'
       );
       process.exit(0);
     }
@@ -3245,6 +3260,261 @@ export async function runRevisitFromFile(page, filePath, jobs, queue, { dryRun }
   }
 }
 
+// ============================================================================
+// Reconcile ("Clean up Google") worker modes — see lib/reconcile.mjs's module
+// header for the feature-level contract. Two modes, dispatched from parseArgs:
+//
+//   --reconcile-scan=<YYYY-MM>  READ-ONLY. Searches each calendar day of the
+//                               month (±1 day) in Google Photos, reads every
+//                               photo whose capture time does NOT fast-path to
+//                               a manifest entry, and records the ones whose
+//                               filename is absent from the manifest (i.e.
+//                               only-in-Google) as candidates. NEVER trashes.
+//   --reconcile-trash=<YYYY-MM> For each candidate the user confirmed, re-open
+//                               the photo and MOVE IT TO GOOGLE TRASH (never
+//                               permanent-delete) — only after re-reading the
+//                               panel and re-confirming the filename still
+//                               agrees with the stored candidate.
+//
+// Unlike the mirror-job walk above, these modes take an explicit `store` (a
+// ReconcileStore) so tests can inject one on a temp dir and a fake page; the
+// CLI entry point (reconcileEntry) wires the real store + CDP page.
+// ============================================================================
+
+/**
+ * Every "YYYY-MM-DD" day in `month`, plus one day of margin on either side.
+ * WHY the margin: Google Photos displays LOCAL capture time, the manifest's
+ * creationDate is UTC, and the offset is not known ahead of time — a photo
+ * captured near a month boundary can legitimately appear under the adjacent
+ * day's search results. A wrong-day guess only costs a wasted read (the
+ * filename check remains authoritative), so widen by one day on each edge.
+ */
+function monthDayStrings(month) {
+  const [year, monthNum] = month.split('-').map(Number);
+  const daysInMonth = new Date(Date.UTC(year, monthNum, 0)).getUTCDate();
+  const days = [];
+  for (let d = 1; d <= daysInMonth; d++) {
+    days.push(`${month}-${String(d).padStart(2, '0')}`);
+  }
+  return [shiftDateDays(days[0], -1), ...days, shiftDateDays(days[days.length - 1], 1)];
+}
+
+/**
+ * Read-only scan of one month. NEVER calls moveToTrash (the whole point of
+ * this mode is to produce candidates for a human to review first). Loads the
+ * manifest once up front; if it is absent there is nothing to diff against,
+ * so log and return without writing any status.
+ */
+export async function runReconcileScan(page, month, store) {
+  const manifest = store.loadManifest(month);
+  if (manifest == null) {
+    console.log(`[reconcile-scan] no manifest for ${month} — nothing to diff against`);
+    return;
+  }
+
+  for (const day of monthDayStrings(month)) {
+    await searchByDate(page, day);
+    let tiles = await collectResultTiles(page);
+
+    // Realize the whole day's grid before deciding anything: a big day is
+    // virtualized, so tiles off-screen simply aren't collected yet (same
+    // pre-scroll the mirror walk uses — see processDateGroup's header).
+    const seen = new Map();
+    const mergeSeen = (fresh) => {
+      let added = false;
+      for (const t of fresh) {
+        const k = tileIdentity(t);
+        if (!seen.has(k)) {
+          seen.set(k, t);
+          added = true;
+        }
+      }
+      return added;
+    };
+    mergeSeen(tiles);
+    let scrollAttempts = 0;
+    while (scrollAttempts < MAX_SCROLL_ATTEMPTS_PER_DATE) {
+      await scrollResults(page);
+      scrollAttempts += 1;
+      if (!mergeSeen(await collectResultTiles(page))) break;
+    }
+    tiles = [...seen.values()];
+
+    // FAST PATH: if the tile's aria-label capture time predicts a manifest
+    // entry (to the second, via the same self-calibrating matcher the mirror
+    // walk uses), skip it — assume already on the phone. This is only an
+    // OPTIMIZATION to avoid opening every on-phone tile; a tile the plan
+    // can't place still gets opened and decided by filename below, which
+    // remains authoritative.
+    const plan = planAriaMatches(manifest, tiles);
+    const planned = plan ? new Set([...plan.values()].map(tileIdentity)) : new Set();
+
+    for (const tile of tiles) {
+      if (planned.has(tileIdentity(tile))) continue;
+      try {
+        await openTile(page, tile);
+      } catch (err) {
+        if (err instanceof StaleTileError) continue; // tile vanished under the cursor — move on
+        throw err;
+      }
+      const photoId = photoIdFromUrl(page.url());
+      if (photoId == null) {
+        await closeAnyOpenPhoto(page);
+        continue;
+      }
+      let text;
+      try {
+        await openInfoPanelOnce(page);
+        text = await readPanelText(page);
+      } catch (err) {
+        // openInfoPanelOnce THROWS (its documented "selector/UI drift" contract)
+        // when a photo's panel never yields a filename — a deleted-from-Google or
+        // otherwise unreadable photo. One dead photo must NOT abort the whole
+        // month's scan: skip it (no candidate, no thumbnail) and move on, exactly
+        // like the trash pass treats an unreadable candidate. Must close the
+        // photo first — an open viewer blocks the grid, so the NEXT tile's
+        // identity selector would count 0 and silently skip every tile after it.
+        console.log(`[reconcile-scan] skipping unreadable tile: ${err.message || err}`);
+        await closeAnyOpenPhoto(page);
+        continue;
+      }
+      const parsed = parsePanelText(text);
+      // Defense-in-depth (unreachable via a successfully-returning
+      // openInfoPanelOnce, which only returns on a non-null filename, but kept
+      // for the narrow race where the panel flickers between the two reads).
+      if (parsed.filename == null) {
+        await closeAnyOpenPhoto(page);
+        continue;
+      }
+      const googlePhoto = {
+        photoId,
+        filename: parsed.filename,
+        cameraModel: parseCameraModel(text),
+        captureDateMs: parsed.captureDateMs,
+        pixelWidth: parsed.pixelWidth,
+        pixelHeight: parsed.pixelHeight,
+      };
+      const { candidates } = diffGoogleVsManifest(manifest, [googlePhoto]);
+      if (candidates.length === 1) {
+        const buffer = await page.screenshot({ type: 'jpeg', quality: 50 });
+        store.saveThumb(month, photoId, buffer);
+        store.appendCandidate(month, { ...googlePhoto, status: 'candidate' });
+        console.log(`[reconcile-scan] candidate ${parsed.filename} (${photoId})`);
+      }
+      await closeAnyOpenPhoto(page);
+    }
+  }
+  store.saveStatus(month, 'ready');
+}
+
+/**
+ * Trash pass over the candidates the user confirmed (status 'queued'). The
+ * SAFETY GATE is the whole point: before any moveToTrash, re-open the photo
+ * and re-read its CURRENT filename, and only trash if it still agrees with the
+ * stored candidate. A mismatch means the photo changed (or the candidate was
+ * stale) — record needs_review and never touch it, rather than trashing
+ * whatever is now at that URL on an old snapshot's authority. NEVER
+ * permanent-deletes (moveToTrash only ever uses the trash dialog).
+ *
+ * `moveToTrash: trash` is a TEST SEAM only: moveToTrash has its own inner
+ * stillOnMatchedPhoto guard that would also refuse a mismatched photo, so a
+ * test can't tell which layer stopped it. Injecting a spy lets the tests prove
+ * THIS gate keeps moveToTrash from ever being called. Production omits it.
+ */
+export async function runReconcileTrash(page, month, store, { moveToTrash: trash = moveToTrash } = {}) {
+  const candidates = store.listCandidates(month).filter((c) => c.status === 'queued');
+  for (const candidate of candidates) {
+    const photoId = candidate.photoId;
+    // Absolute permalink (the same shape verifyTrashByUrl/resumeTimelineAt
+    // navigate to) rather than a relative './photo/<id>': a fresh page can
+    // resolve it without a prior openPhotosHome, and the fake page's direct
+    // photo-URL open models the exact live behaviour this depends on.
+    const matchedUrl = `https://photos.google.com/photo/${photoId}`;
+    await page.goto(matchedUrl, { waitUntil: 'domcontentloaded' });
+
+    // openInfoPanelOnce THROWS (its documented "selector/UI drift" contract)
+    // when a photo's panel never yields a filename — a deleted-from-Google or
+    // otherwise unreadable photo. For a trash pass that is not an abort-worthy
+    // error, it is exactly the "current filename is null" case the safety gate
+    // below exists to record as needs_review: never trash on an unreadable
+    // photo, and never let one dead photo kill the rest of the month.
+    let panelTextBefore;
+    try {
+      await openInfoPanelOnce(page);
+      panelTextBefore = await readPanelText(page);
+    } catch (err) {
+      loud(`[reconcile-trash] SAFETY: candidate ${candidate.filename} unreadable — ${err.message || err} — marking needs_review instead of trashing`);
+      store.updateCandidateStatus(month, photoId, 'needs_review');
+      continue;
+    }
+    const currentFilename = parsePanelText(panelTextBefore).filename;
+
+    // SAFETY GATE — re-verify identity before acting. Load-bearing: this is
+    // what stops a stale candidate from trashing a DIFFERENT photo that now
+    // lives at the same URL.
+    if (currentFilename == null || !filenamesAgree(currentFilename, candidate.filename)) {
+      loud(`[reconcile-trash] SAFETY: candidate ${candidate.filename} re-read as "${currentFilename ?? '(none)'}" — identity changed, marking needs_review instead of trashing`);
+      store.updateCandidateStatus(month, photoId, 'needs_review');
+      continue;
+    }
+
+    const { confirmed } = await trash(page, panelTextBefore, {
+      matchedUrl,
+      expectedFilename: candidate.filename,
+      verifyByUrl: true,
+    });
+    store.updateCandidateStatus(month, photoId, confirmed ? 'trashed' : 'needs_review');
+    console.log(`[reconcile-trash] ${photoId} → ${confirmed ? 'trashed' : 'needs_review'}`);
+  }
+  store.saveStatus(month, 'done');
+}
+
+/**
+ * CLI entry point for either reconcile mode: connect to the CDP Chrome, open
+ * a fresh tab, and dispatch. Mirrors runWorker's connection setup (gateway IP,
+ * CDP relay, never browser.close()) but is a separate entry because reconcile
+ * never touches the JobQueue and never groups by date.
+ */
+async function reconcileEntry(month, mode) {
+  let gw;
+  try {
+    gw = getGatewayIp();
+  } catch (err) {
+    loud(`Could not determine WSL2 gateway IP: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  const cdpUrl = `http://${gw}:9251`;
+  const { chromium } = await import('playwright-core');
+  let browser;
+  try {
+    browser = await chromium.connectOverCDP(cdpUrl);
+  } catch (err) {
+    loud(`BLOCKER: could not connect to CDP Chrome at ${cdpUrl} — ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  let page;
+  try {
+    const context = browser.contexts()[0] ?? (await browser.newContext());
+    page = await context.newPage();
+    const store = new ReconcileStore(RECONCILE_DIR);
+    if (mode === 'scan') {
+      await openPhotosHome(page); // the search box must be reachable before searchByDate
+      await runReconcileScan(page, month, store);
+    } else {
+      // Trash navigates by absolute permalink, so no openPhotosHome needed —
+      // the first goto lands directly on the photo.
+      await runReconcileTrash(page, month, store);
+    }
+  } catch (err) {
+    loud(`BLOCKER: worker error: ${err.stack || err}`);
+    process.exitCode = 1;
+  } finally {
+    await page?.close().catch(() => {});
+  }
+}
+
 export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'photo', revisitFile = null } = {}) {
   const queue = new JobQueue(QUEUE_PATH);
   const jobs = queue.loadAll().filter((j) => j.status === 'queued').slice(0, cap);
@@ -3347,5 +3617,7 @@ export async function exitAfterSettled(work) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = parseArgs(process.argv.slice(2));
   if (args.slow) SLOW = true;
-  exitAfterSettled(() => runWorker(args));
+  if (args.reconcileScan) exitAfterSettled(() => reconcileEntry(args.reconcileScan, 'scan'));
+  else if (args.reconcileTrash) exitAfterSettled(() => reconcileEntry(args.reconcileTrash, 'trash'));
+  else exitAfterSettled(() => runWorker(args));
 }

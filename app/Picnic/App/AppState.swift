@@ -11,6 +11,10 @@ final class AppState: ObservableObject {
     let mirrorQueue: MirrorQueueStore
 
     @Published var monthBuckets: [MonthBucket] = []
+    // Set by MonthCardView's "Clean up Google" context-menu button; MyLifeView
+    // observes it and presents ReconcileReviewView via a second
+    // fullScreenCover(item:). Dismissing that cover sets it back to nil.
+    @Published var reconcileMonth: MonthBucket?
     // v1 placeholder profile tab always shows the red-dot badge seen in the
     // reference screenshots; there is no real notification model yet.
     @Published var hasUnviewedProfileBadge = true

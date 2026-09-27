@@ -13,4 +13,11 @@ enum Config {
     static var mirrorQueueURL: URL {
         URL(string: "http://\(mirrorHost):\(mirrorPort)/queue")!
     }
+
+    /// Full URL for a route under the mirror server's `/reconcile` namespace.
+    /// The reconcile routes share the mirror's host/port and bearer token
+    /// (see ReconcileClient.swift) — only the path differs from /queue.
+    static func reconcileURL(for path: String) -> URL {
+        URL(string: "http://\(mirrorHost):\(mirrorPort)\(path)")!
+    }
 }
