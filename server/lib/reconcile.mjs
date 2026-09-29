@@ -16,6 +16,7 @@ import {
   writeFileSync,
   readFileSync,
   existsSync,
+  rmSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -142,6 +143,11 @@ export class ReconcileStore {
     return join(this.monthDir(month), 'status.json');
   }
 
+  /** Where a failed scan/trash run's error message is stored (see saveError). */
+  errorPath(month) {
+    return join(this.monthDir(month), 'error.json');
+  }
+
   candidatesPath(month) {
     return join(this.monthDir(month), 'candidates.jsonl');
   }
@@ -236,5 +242,39 @@ export class ReconcileStore {
     mkdirSync(this.thumbsDir(month), { recursive: true });
     writeFileSync(this.thumbPath(month, photoId), buffer);
     return this.thumbPath(month, photoId);
+  }
+
+  /**
+   * Record a scan/trash run's failure so GET /reconcile/:month can surface
+   * WHY the month is stuck, instead of the phone silently polling a status
+   * that never leaves "scanning" (the March 2026 bug report: a worker crash
+   * with stdio:'ignore' vanished without a trace). Plain overwrite, like
+   * saveStatus -- only the latest run's error matters.
+   */
+  saveError(month, message) {
+    mkdirSync(this.monthDir(month), { recursive: true });
+    writeFileSync(this.errorPath(month), JSON.stringify({ message }));
+  }
+
+  /** null when the month has no recorded error (never failed, or was reset by a rescan). */
+  loadError(month) {
+    const p = this.errorPath(month);
+    if (!existsSync(p)) return null;
+    return JSON.parse(readFileSync(p, 'utf8')).message;
+  }
+
+  /**
+   * Clear a month's candidates/thumbs/error before a rescan. Without this, a
+   * re-POSTed manifest (user retries after a failure, or just re-runs the
+   * month) would append its new candidates on top of the OLD candidates.jsonl
+   * -- listCandidates folds by photoId, but a Google photo the new scan no
+   * longer sees (deleted, or the old diff was simply wrong) would never be
+   * pruned, so stale "only in Google" rows accumulate forever. Does NOT touch
+   * status.json/manifest.json -- the caller overwrites those right after.
+   */
+  resetForRescan(month) {
+    rmSync(this.candidatesPath(month), { force: true });
+    rmSync(this.thumbsDir(month), { recursive: true, force: true });
+    rmSync(this.errorPath(month), { force: true });
   }
 }

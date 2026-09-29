@@ -18,6 +18,28 @@ enum ReconcileSeed {
         ProcessInfo.processInfo.arguments.contains("--reconcile-seed")
     }
 
+    /// The `--reconcile-seed-scanning` UI-test launch argument: the provider
+    /// always returns status "scanning" with a fixed found-so-far count and
+    /// empty sections, so the review screen renders (and stays on) the
+    /// scanning state -- proving load() no longer treats an in-progress scan
+    /// as "loaded, nothing found" (see ReconcileViewModel.State.scanning's
+    /// doc comment for the bug this covers).
+    static var isScanningEnabled: Bool {
+        ProcessInfo.processInfo.arguments.contains("--reconcile-seed-scanning")
+    }
+
+    static func scanningResponse(for month: String) -> ReconcileResponse {
+        ReconcileResponse(
+            month: month,
+            status: "scanning",
+            totalCandidates: 7,
+            sections: ReconcileSections(
+                iphone: ReconcileSection(count: 0, candidates: []),
+                other: ReconcileSection(count: 0, candidates: [])
+            )
+        )
+    }
+
     static func response(for month: String) -> ReconcileResponse {
         ReconcileResponse(
             month: month,

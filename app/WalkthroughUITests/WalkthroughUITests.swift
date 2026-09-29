@@ -2767,4 +2767,37 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(confirmButton.label.contains("Move 3 to Google trash"),
                       "Confirm button should read 'Move 3 to Google trash' (3 iPhone candidates pre-selected), got: \(confirmButton.label)")
     }
+
+    /// Regression test for the March 2026 bug report: a scan still in
+    /// progress (server status "scanning") must render the scanning state,
+    /// never the empty/"everything matches" loaded state. Launches with
+    /// `--reconcile-seed-scanning`, whose canned provider always reports
+    /// "scanning" with 7 found-so-far and empty sections -- the exact shape
+    /// the old load() would have misread as "0 candidates, done".
+    func test50ReconcileScanning() throws {
+        relaunch(withExtraArguments: ["--reconcile-seed-scanning"])
+        let seededMonth = openMyLifeGrid()
+        Thread.sleep(forTimeInterval: 1.0)
+
+        seededMonth.press(forDuration: 1.2)
+        let cleanUpButton = app.buttons["month.cleanUpGoogle"]
+        XCTAssertTrue(cleanUpButton.waitForExistence(timeout: 5),
+                      "Clean up Google should appear in the month context menu")
+        cleanUpButton.tap()
+
+        let scanningView = app.descendants(matching: .any)["reconcile.scanning"].firstMatch
+        XCTAssertTrue(scanningView.waitForExistence(timeout: 15),
+                      "Scanning state should appear while status is still \"scanning\"")
+
+        capture("reconcile-scanning")
+
+        // The bug: the old code rendered whatever the first response held
+        // even while scanning, so the (still-empty) candidate grid appeared
+        // as if the scan had finished with nothing to review.
+        let iphoneSection = app.descendants(matching: .any)["reconcile.section.iphone"].firstMatch
+        XCTAssertFalse(iphoneSection.exists,
+                       "Must not render the loaded candidate grid while status is still \"scanning\"")
+        XCTAssertFalse(app.buttons["reconcile.confirmButton"].exists,
+                       "Must not render the confirm bar while status is still \"scanning\"")
+    }
 }

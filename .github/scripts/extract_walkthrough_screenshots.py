@@ -52,6 +52,7 @@ REQUIRED = [
     "45-compare-opened-on-tapped-member",
     "46-filmstrip-hidden-before-unhide", "47-filmstrip-recentered-after-unhide",
     "reconcile-review",
+    "reconcile-scanning",
 ]
 
 # Best-effort: one per test method, captured in tearDown. See module

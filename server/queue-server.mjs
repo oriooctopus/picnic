@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, openSync, closeSync } from 'node:fs';
 import { JobQueue, STATUSES } from './lib/queue.mjs';
 import { loadToken, checkBearerAuth, tokensMatch } from './lib/auth.mjs';
 import { createAutoDrain, createCdpProbe, createWorkerSpawn, isAutoDrainEnabled } from './lib/autodrain.mjs';
@@ -260,24 +260,82 @@ const NOOP_AUTO_DRAIN = {
   getStatus: () => ({ enabled: false, running: false, lastRun: null }),
 };
 
+// Where a spawned reconcile worker's stdout+stderr are logged (see
+// spawnReconcileWorker). Was previously stdio:'ignore', which is how the
+// March 2026 bug report happened: the worker crashed (a CDP disconnect
+// mid-scan, going by candidates.jsonl's last-write timestamp) with its exit
+// reason discarded, leaving status.json stuck on "scanning" forever with no
+// trace of why.
+const WORKER_LOG_DIR = process.env.PICNIC_WORKER_LOG_DIR || join(homedir(), '.local', 'share', 'picnic', 'worker-runs');
+
+// Scan children currently in flight, keyed by month. Populated/cleared only
+// by the real spawnReconcileWorker below (never by a test's injected
+// `spawnReconcile` stub) — isReconcileScanRunningDefault reads it to refuse a
+// second concurrent scan for the same month via POST /reconcile.
+const runningReconcileScans = new Map();
+
+/**
+ * Wires a spawned reconcile worker's crash reporting: on a non-zero exit (or
+ * a signal kill), marks the month "failed" and records why, so GET
+ * /reconcile/:month's `error` field tells the phone what happened instead of
+ * status.json sitting on "scanning" indefinitely. Split out from
+ * spawnReconcileWorker so a test can attach it to a small fake child (e.g.
+ * `spawn(process.execPath, ['-e', 'process.exit(1)'])`) instead of needing a
+ * real worker.mjs/CDP/browser crash. Exported for that test.
+ */
+export function attachReconcileExitHandler(child, mode, month, logPath) {
+  child.on('exit', (code, signal) => {
+    if (code === 0) return;
+    const reason = signal ? `killed by signal ${signal}` : `exited with code ${code}`;
+    reconcile.saveStatus(month, 'failed');
+    reconcile.saveError(month, `reconcile ${mode} worker ${reason} — see ${logPath}`);
+  });
+}
+
 /**
  * Fire-and-forget spawn of a reconcile worker run. Mirrors
- * createWorkerSpawn's cwd resolution (worker.mjs lives next to this file) but
- * detaches with stdio ignored — the reconcile endpoints never await the scan/
- * trash (they are minutes-long browser runs), they just kick it off and return
- * the status immediately. `mode` is 'scan' or 'trash'.
+ * createWorkerSpawn's cwd resolution (worker.mjs lives next to this file);
+ * detaches (the reconcile endpoints never await the scan/trash, they are
+ * minutes-long browser runs) but no longer discards its output — stdout+
+ * stderr go to a per-run log file so a crash is diagnosable after the fact.
+ * `mode` is 'scan' or 'trash'.
  */
 function spawnReconcileWorker(mode, month) {
+  mkdirSync(WORKER_LOG_DIR, { recursive: true });
+  // Timestamp in the filename (not just relying on mtime) so a rerun's log
+  // never overwrites the previous failed run's -- that history is the whole
+  // point of logging in the first place.
+  const logPath = join(WORKER_LOG_DIR, `reconcile-${mode}-${month}-${Date.now()}.log`);
+  const logFd = openSync(logPath, 'a');
   const child = spawn(process.execPath, ['worker.mjs', `--reconcile-${mode}=${month}`], {
     cwd: dirname(fileURLToPath(import.meta.url)),
-    stdio: 'ignore',
+    stdio: ['ignore', logFd, logFd],
     detached: true,
   });
+  // The child inherited its own copy of the fd when spawned; our copy in
+  // this process can (must) be closed right away or it leaks a descriptor
+  // per reconcile run.
+  closeSync(logFd);
   child.unref();
+  if (mode === 'scan') {
+    runningReconcileScans.set(month, child);
+    child.on('exit', () => runningReconcileScans.delete(month));
+  }
+  attachReconcileExitHandler(child, mode, month, logPath);
   return child;
 }
 
-export function createApp({ autoDrain = NOOP_AUTO_DRAIN, spawnReconcile = spawnReconcileWorker } = {}) {
+/** Default isReconcileScanRunning: true only while a scan CHILD PROCESS is actually alive for that month. */
+function isReconcileScanRunningDefault(month) {
+  const child = runningReconcileScans.get(month);
+  return !!child && child.exitCode === null && child.signalCode === null;
+}
+
+export function createApp({
+  autoDrain = NOOP_AUTO_DRAIN,
+  spawnReconcile = spawnReconcileWorker,
+  isReconcileScanRunning = isReconcileScanRunningDefault,
+} = {}) {
   return createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host}`);
@@ -463,6 +521,17 @@ export function createApp({ autoDrain = NOOP_AUTO_DRAIN, spawnReconcile = spawnR
         if (!Array.isArray(assets)) {
           return send(res, 400, { error: 'assets must be an array' });
         }
+        // Refuse rather than race: spawning a second scan while one is still
+        // appending to this month's candidates.jsonl would corrupt it, and
+        // resetForRescan below would wipe candidates the live scan hasn't
+        // finished writing yet.
+        if (isReconcileScanRunning(month)) {
+          return send(res, 409, { error: 'a scan is already running for this month', status: 'scanning' });
+        }
+        // A re-run must start clean -- see resetForRescan's doc comment for
+        // why leaving the old candidates.jsonl/thumbs/error in place would
+        // silently accumulate stale "only in Google" rows across reruns.
+        reconcile.resetForRescan(month);
         reconcile.saveManifest(month, assets);
         reconcile.saveStatus(month, 'scanning');
         spawnReconcile('scan', month);
@@ -492,6 +561,9 @@ export function createApp({ autoDrain = NOOP_AUTO_DRAIN, spawnReconcile = spawnR
         return send(res, 200, {
           month,
           status: reconcile.loadStatus(month) ?? 'scanning',
+          // Non-null only after a worker crash (see attachReconcileExitHandler);
+          // the app shows this instead of polling "scanning" forever.
+          error: reconcile.loadError(month),
           totalCandidates: candidates.length,
           sections: {
             iphone: { count: sections.iphone.length, candidates: sections.iphone },

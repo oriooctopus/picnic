@@ -20,6 +20,16 @@ enum ReconcileSectionKind {
 final class ReconcileViewModel: ObservableObject {
     enum State: Equatable {
         case loading
+        /// The server's read-only Google Photos scan is still running (status
+        /// "scanning" -- 33 day-searches, can take many minutes). `foundSoFar`
+        /// is the candidate count the server has appended to candidates.jsonl
+        /// so far, so the screen can show live progress instead of a bare
+        /// spinner. MUST NOT be confused with `.loaded`'s empty state: before
+        /// this fix, load() rendered whatever the first response held even
+        /// while still "scanning", so a scan interrupted early looked
+        /// identical to "everything already matches" (the March 2026 bug
+        /// report).
+        case scanning(foundSoFar: Int)
         case loaded
         case confirming
         case results
@@ -64,7 +74,7 @@ final class ReconcileViewModel: ObservableObject {
             #if DEBUG
             // The seeded UI-test path has no server: skip the manifest POST
             // and let the injected canned provider stand in for both steps.
-            let skipManifestPost = ReconcileSeed.isEnabled
+            let skipManifestPost = ReconcileSeed.isEnabled || ReconcileSeed.isScanningEnabled
             #else
             let skipManifestPost = false
             #endif
@@ -72,17 +82,42 @@ final class ReconcileViewModel: ObservableObject {
                 try await ReconcileClient.postManifest(month: monthKey, assets: manifestAssets)
             }
 
-            let fetched = try await candidateProvider(monthKey)
-            response = fetched
             phoneAssetCount = manifestAssets.count
-            // iPhone section pre-selected: those match photos still on this
-            // phone, so trashing them is the safe default. Other section
-            // pre-kept: probably not from this iPhone, don't trash without
-            // review. Mirrors the design's Option A copy.
-            selectedIds = Set(fetched.sections.iphone.candidates.map(\.id))
-            state = .loaded
+            try await pollUntilReady()
         } catch {
             state = .failed("\(error)")
+        }
+    }
+
+    /// Polls GET /reconcile/:month until the scan reaches a terminal status.
+    /// No timeout/cap on this one (unlike pollResults' 30-iteration cap for
+    /// the trash pass): a scan does 33 day-searches and can legitimately run
+    /// many minutes, and there's no safe "give up" value to show instead of
+    /// the real result -- the bug this fixes was exactly the old code
+    /// treating "haven't heard back yet" as "done, nothing found".
+    private func pollUntilReady() async throws {
+        while true {
+            let fetched = try await candidateProvider(monthKey)
+            switch fetched.status {
+            case "ready":
+                response = fetched
+                // iPhone section pre-selected: those match photos still on
+                // this phone, so trashing them is the safe default. Other
+                // section pre-kept: probably not from this iPhone, don't
+                // trash without review. Mirrors the design's Option A copy.
+                selectedIds = Set(fetched.sections.iphone.candidates.map(\.id))
+                state = .loaded
+                return
+            case "failed":
+                state = .failed(fetched.error ?? "The Google Photos scan failed for an unknown reason.")
+                return
+            default:
+                // "scanning", or any value this client doesn't recognize --
+                // degrade to the scanning UI rather than silently rendering
+                // the (possibly still-empty) candidate lists as final.
+                state = .scanning(foundSoFar: fetched.totalCandidates)
+                try await Task.sleep(nanoseconds: 3_000_000_000)
+            }
         }
     }
 

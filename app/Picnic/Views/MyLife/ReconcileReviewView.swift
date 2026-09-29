@@ -21,13 +21,23 @@ struct ReconcileReviewView: View {
         #if DEBUG
         // The seeded UI-test path injects canned candidates so the screen
         // renders with no server; production injects the network fetch.
-        let provider: ReconcileCandidateProvider = ReconcileSeed.isEnabled
-            ? { (month: String) async throws -> ReconcileResponse in
+        // Checked in this order because both flags could theoretically be
+        // passed together -- scanning wins, matching "scanning" always
+        // beating "ready" in the real server's status lifecycle.
+        let provider: ReconcileCandidateProvider
+        if ReconcileSeed.isScanningEnabled {
+            provider = { (month: String) async throws -> ReconcileResponse in
+                ReconcileSeed.scanningResponse(for: month)
+            }
+        } else if ReconcileSeed.isEnabled {
+            provider = { (month: String) async throws -> ReconcileResponse in
                 ReconcileSeed.response(for: month)
             }
-            : { (month: String) async throws -> ReconcileResponse in
+        } else {
+            provider = { (month: String) async throws -> ReconcileResponse in
                 try await ReconcileClient.fetchCandidates(month: month)
             }
+        }
         #else
         let provider: ReconcileCandidateProvider = { (month: String) async throws -> ReconcileResponse in
             try await ReconcileClient.fetchCandidates(month: month)
@@ -43,6 +53,8 @@ struct ReconcileReviewView: View {
             switch viewModel.state {
             case .loading:
                 ProgressView().tint(.white)
+            case .scanning(let foundSoFar):
+                scanningView(foundSoFar: foundSoFar)
             case .failed(let message):
                 errorView(message)
             case .results:
@@ -67,6 +79,30 @@ struct ReconcileReviewView: View {
                 enlargedOverlay(enlarged)
             }
         }
+    }
+
+    // MARK: Scanning
+
+    /// Shown for the whole time status == "scanning" (a scan is 33
+    /// day-searches and can run many minutes -- see
+    /// ReconcileViewModel.pollUntilReady). Must never look like the empty
+    /// "loaded" state (0 candidates, nothing to review): that conflation was
+    /// the March 2026 bug -- an interrupted scan read as "everything already
+    /// matches" when it had in fact barely started.
+    private func scanningView(foundSoFar: Int) -> some View {
+        VStack(spacing: 16) {
+            ProgressView().tint(.white)
+            Text("Scanning Google Photos… \(foundSoFar) found so far")
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.85))
+                .multilineTextAlignment(.center)
+            Text("This can take several minutes for a big month.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.6))
+        }
+        .padding()
+        .accessibilityIdentifier("reconcile.scanning")
+        .accessibilityLabel("Scanning Google Photos, \(foundSoFar) found so far")
     }
 
     // MARK: Loaded / confirming content

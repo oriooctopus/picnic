@@ -28,7 +28,19 @@ struct ReconcileManifestAsset {
 /// on the phone (the "only in Google" set).
 struct ReconcileResponse: Decodable {
     let month: String
+    /// "scanning" | "ready" | "failed" (the finite lifecycle ReconcileStore's
+    /// doc comment describes; "confirming"/"done" only ever appear on the
+    /// separate GET /results shape). Decoded as a plain String, not an enum,
+    /// so an unrecognized future value degrades to the scanning UI rather
+    /// than a decode failure -- see ReconcileViewModel.pollUntilReady's
+    /// `default:` case.
     let status: String
+    /// Set only when status == "failed" (a worker crash -- see
+    /// attachReconcileExitHandler on the server). nil otherwise; missing
+    /// entirely from the JSON decodes fine since this is Optional, and the
+    /// default lets ReconcileSeed's memberwise-init call sites (never
+    /// failed) skip passing it.
+    let error: String? = nil
     let totalCandidates: Int
     let sections: ReconcileSections
 }
