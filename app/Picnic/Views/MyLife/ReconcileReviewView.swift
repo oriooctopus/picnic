@@ -446,7 +446,7 @@ struct ReconcileReviewView: View {
             Image(systemName: "wifi.exclamationmark")
                 .font(.system(size: 40))
                 .foregroundStyle(.white.opacity(0.6))
-            Text("Couldn't reach the mirror server")
+            Text("Clean up Google failed")
                 .font(.headline)
                 .foregroundStyle(.white)
             Text(message)
