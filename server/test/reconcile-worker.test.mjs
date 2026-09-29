@@ -171,6 +171,51 @@ test('runReconcileScan: two tiles resolving to the same photoId produce ONE cand
   });
 });
 
+// REGRESSION TEST for the exact bug the seenPhotoIds.add() reordering fixes
+// (live 2026-09-29): a photo's FIRST tile fails to read a filename (here,
+// openInfoPanelOnce throws outright -- the brief's "or" alternative to a
+// successful-open-but-null-filename race, which is simpler to model here and
+// exercises the same seenPhotoIds ordering). If seenPhotoIds.add(photoId) ran
+// right after the dup check (the OLD position, before the panel read), the
+// photoId would already be marked "seen" by the time label1's failure
+// unwinds -- so label2, the SAME photo's other grid-size tile, would be
+// skipped as a duplicate and the photo would never be recorded at all. Only
+// adding it AFTER parsePanelText yields a real filename keeps the id
+// retryable until a read actually succeeds.
+test('runReconcileScan: a photo whose first tile fails to read a filename is still recorded when a later tile of the same photo succeeds', async () => {
+  await withTempStore(async (store) => {
+    const month = '2026-08';
+    // Timestamp far from either tile's capture time -- the fast path must
+    // never plan this photo away, or the seenPhotoIds ordering this test
+    // targets would never be exercised.
+    store.saveManifest(month, [manifestAsset('IMG_9999.HEIC', '2026-08-05T20:00:00.000Z')]);
+
+    const label1 = 'Photo - Portrait - Aug 5, 2026, 3:00:00 PM'; // first tile of the photo -- no panel text configured, so openInfoPanelOnce throws
+    const label2 = 'Photo - Portrait - Aug 5, 2026, 3:00:01 PM'; // second tile, same underlying photo -- panel reads fine
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [label1, label2] },
+      panelTextByLabel: {
+        'August 5, 2026': { [label2]: panelBlock('IMG_7777.HEIC') }, // label1 deliberately has NO entry
+      },
+      // Google's two grid sizes render the SAME underlying photo under two
+      // different tile labels/hrefs -- pinning both to one photoId is what
+      // makes this the exact live scenario (a second, later-loaded tile of a
+      // photo whose first read failed).
+      photoIdByLabel: { [label1]: 'samePhoto', [label2]: 'samePhoto' },
+    });
+
+    await runReconcileScan(page, month, store); // must not throw
+
+    const candidates = store.listCandidates(month);
+    assert.deepEqual(
+      candidates.map((c) => c.photoId),
+      ['samePhoto'],
+      "the photo must still be recorded via label2 even though label1 (same photoId) failed to read a filename first"
+    );
+    assert.equal(candidates[0].filename, 'IMG_7777.HEIC');
+  });
+});
+
 test("runReconcileScan: a tile whose viewer opens late is still read, not skipped, and the next day's search still runs", async () => {
   await withTempStore(async (store) => {
     const month = '2026-08';
@@ -257,6 +302,91 @@ test("runReconcileScan: closeAnyOpenPhoto presses Escape and reaches the grid ev
     // late-rendering tile rather than short-circuiting on a falsely-"at the
     // grid" read (which would leave this at 1, only the next-day tile's).
     assert.equal(page.escapePresses, 2, 'closeAnyOpenPhoto must press Escape for both tiles, including the late-rendering one');
+  });
+});
+
+test("runReconcileScan: searchByDate waits for the new day's tiles to actually render instead of trusting the old grid still being on screen", async () => {
+  await withTempStore(async (store) => {
+    const month = '2026-08';
+    store.saveManifest(month, [manifestAsset('IMG_9999.HEIC', '2026-08-06T20:00:00.000Z')]);
+
+    const dayOneLabel = 'Photo - Portrait - Aug 5, 2026, 3:00:00 PM';
+    const dayTwoLabel = 'Photo - Portrait - Aug 6, 2026, 3:00:00 PM';
+    const page = createFakePage({
+      searchResults: {
+        'August 5, 2026': [dayOneLabel],
+        'August 6, 2026': [dayTwoLabel],
+      },
+      panelTextByLabel: {
+        'August 5, 2026': { [dayOneLabel]: panelBlock('IMG_7777.HEIC') },
+        'August 6, 2026': { [dayTwoLabel]: panelBlock('IMG_8888.HEIC') },
+      },
+      photoIdByLabel: { [dayOneLabel]: 'dayOnePhoto', [dayTwoLabel]: 'dayTwoPhoto' },
+      // 2026-09-29 live evidence (see searchByDate's own header comment): the
+      // grid still shows the PREVIOUS day's tiles for a beat after Enter.
+      // Two reads' worth of delay here -- with the old
+      // `waitFor({state:'visible'}).catch()` code, that single immediate read
+      // sees day one's still-mounted tile, opens IT again instead of day
+      // two's, and dayTwoPhoto never becomes a candidate.
+      searchRevealDelay: { 'August 6, 2026': 2 },
+    });
+
+    await runReconcileScan(page, month, store);
+
+    const candidates = store.listCandidates(month);
+    assert.deepEqual(
+      candidates.map((c) => c.photoId).sort(),
+      ['dayOnePhoto', 'dayTwoPhoto'],
+      "searchByDate must poll until August 6's own tile actually renders, not settle for August 5's stale grid"
+    );
+  });
+});
+
+// REGRESSION TEST for the exact bug runReconcileScan's own header comment
+// documents (2026-09-29 live evidence): the pre-scroll that builds `tiles`
+// for planAriaMatches walks a VIRTUALIZED grid all the way to the bottom,
+// which unmounts the early tiles it passed over on the way down. The OLD
+// code then opened `tiles` in that same top-to-bottom order and hit
+// StaleTileError on every early one -- gone forever, never revisited.
+//
+// windowSize: 2 against 5 total tiles means the pre-scroll (which snaps the
+// window to the tail on every downward scroll, per fakePage's
+// windowedTiles()) ends with only the LAST 2 tiles mounted -- the first 3
+// are exactly the tiles the old code would silently drop. No manifest entry
+// matches any tile's capture time, so every tile is unplanned and must be
+// opened for this test to mean anything.
+test('runReconcileScan: every tile on a big, virtualized day is recovered, not just the ones still mounted after the pre-scroll', async () => {
+  await withTempStore(async (store) => {
+    const month = '2026-08';
+    // Timestamp far from any tile below -- the fast path must never plan
+    // any of them away, or this test would not prove the walk recovers them.
+    store.saveManifest(month, [manifestAsset('IMG_9999.HEIC', '2026-08-05T02:00:00.000Z')]);
+
+    const TILE_COUNT = 5;
+    const labels = Array.from({ length: TILE_COUNT }, (_, i) => `Photo - Portrait - Aug 5, 2026, ${i + 3}:00:00 PM`);
+    const panelTextByLabel = { 'August 5, 2026': {} };
+    const photoIdByLabel = {};
+    labels.forEach((label, i) => {
+      panelTextByLabel['August 5, 2026'][label] = panelBlock(`IMG_7${String(i).padStart(3, '0')}.HEIC`);
+      photoIdByLabel[label] = `photo${i}`;
+    });
+
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [labels[0]] },
+      scrollReveals: { 'August 5, 2026': labels.slice(1).map((l) => [{ ariaLabel: l }]) },
+      panelTextByLabel,
+      photoIdByLabel,
+      windowSize: 2, // only the last 2 of 5 tiles are mounted once the pre-scroll reaches the bottom
+    });
+
+    await runReconcileScan(page, month, store);
+
+    const candidates = store.listCandidates(month);
+    assert.deepEqual(
+      candidates.map((c) => c.photoId).sort(),
+      labels.map((_, i) => `photo${i}`).sort(),
+      `every one of the ${TILE_COUNT} tiles must become a candidate, including the ones unmounted by the pre-scroll`
+    );
   });
 });
 

@@ -145,6 +145,17 @@ function isConfirmDialogButtonSelector(selector) {
  * .all(), by identity via tileLocatorFor) see the same grid.
  */
 function tilesInGrid(page) {
+  // ROUND 13 (2026-09-29, searchRevealDelay): activeQuery already flipped to
+  // the new query on Enter (below), but the live grid doesn't -- Google keeps
+  // the OLD day's tiles on screen for a beat. Each read here while the
+  // countdown is still positive returns that frozen snapshot instead of the
+  // new query's tiles, and ticks the countdown down by one -- decoupled from
+  // wall-clock time so tests stay fast under FAST_DELAYS, exactly like every
+  // other poll-count-based fixture in this file.
+  if (page._staleGridCountdown > 0) {
+    page._staleGridCountdown -= 1;
+    return page._staleGridTiles.filter((tile) => !page.trashedIdentities.has(identityOf(tile)));
+  }
   const query = page.activeQuery;
   const base = page.config.searchResults[query] ?? [];
   const reveals = page.config.scrollReveals[query] ?? [];
@@ -809,6 +820,7 @@ function advanceToNextTile(page) {
  *   throwOnKeyForLabel?: {label: string, key: string, message?: string}, // 2026-09-25 (round 5): the NEXT press of `key` while `label`'s photo is open throws a generic Error -- models an arbitrary unexpected failure walkTimeline's own per-photo try/catch must recover from, distinct from the confirm-dialog-specific detach above
  *   gotoFailsForUrls?: string[]|Set<string>, // 2026-09-25 (round 9): page.goto() throws (timeout-shaped) for these exact URLs -- see revisitUnreadable's own try/catch in worker.mjs
  *   revisitPanelTextByLabel?: Record<string, string>, // 2026-09-25 (round 9): panel text seen ONLY via a direct page.goto(url) open (the timeline photo URL shape), distinct from timelinePanelTextByLabel -- models a photo reading reliably via direct navigation where the in-viewer walk never resolved it
+ *   searchRevealDelay?: Record<string, number>, // 2026-09-29 (round 13, searchByDate's poll-for-new-identity fix): query -> number of grid reads (tilesInGrid calls, i.e. collectResultTiles polls) after Enter for which the grid keeps showing the PREVIOUS query's tiles rather than this query's -- models the live gap where Google swaps the DOM a beat after Enter (see searchByDate's own header comment for the 1s-sampled probe evidence). Absent/0 means the grid switches instantly, the pre-existing default every other fixture relies on.
  * }}
  */
 export function createFakePage(config = {}) {
@@ -824,6 +836,8 @@ export function createFakePage(config = {}) {
     log: [],
     searchLog: [], // every date-search query actually submitted, in order
     activeQuery: null,
+    _staleGridTiles: [], // ROUND 13: frozen pre-Enter grid snapshot, served while _staleGridCountdown > 0
+    _staleGridCountdown: 0,
     openedAriaLabel: null,
     openedIdentity: null, // href, falling back to aria-label -- see openTileInFake()'s header
     openedTileCount: 0,
@@ -928,7 +942,15 @@ export function createFakePage(config = {}) {
         if (key === '#' && !page.config.swallowTrashShortcut && !page.focusLost) page.dialogOpen = true;
         if (key === 'ArrowRight' && !page.focusLost) advanceToNextTile(page);
         if (key === 'Enter') {
-          page.activeQuery = page.pendingTypedText ?? null;
+          const newQuery = page.pendingTypedText ?? null;
+          // ROUND 13: snapshot the CURRENT (pre-switch) grid before flipping
+          // activeQuery, so tilesInGrid can keep serving it for the
+          // configured delay -- must be read here, before the reset below,
+          // or it would already reflect the new (empty-until-populated) query.
+          const delay = newQuery != null ? (page.config.searchRevealDelay?.[newQuery] ?? 0) : 0;
+          page._staleGridTiles = delay > 0 ? tilesInGrid(page) : [];
+          page._staleGridCountdown = delay;
+          page.activeQuery = newQuery;
           page.openedAriaLabel = null;
           page.openedIdentity = null;
           page.revealedCount = 0;
@@ -1297,7 +1319,15 @@ export function createFakePage(config = {}) {
 
       // Simulates the grid re-rendering tiles in a different order between
       // collections -- worker.mjs must dedupe/track by aria-label, not index.
-      if (page.config.reorderOnRecollect?.[query] && page.recollectCount[query] % 2 === 0) {
+      // ROUND 13 (2026-09-29): flips on ODD counts, not even. searchByDate's
+      // own new poll-until-a-new-identity-appears check (see its header
+      // comment) now issues ONE real collectResultTiles() call of its own
+      // before the caller ever sees a tile, shifting every later call's
+      // parity by one -- flipping which parity reverses keeps this fixture's
+      // "the caller's FIRST read is the real, unrendered order" assumption
+      // true (recollectCount[query]===1 is now searchByDate's internal
+      // settle-check, not the caller's own first read).
+      if (page.config.reorderOnRecollect?.[query] && page.recollectCount[query] % 2 === 1) {
         all = [...all].reverse();
       }
 

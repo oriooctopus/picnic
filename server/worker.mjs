@@ -491,8 +491,46 @@ async function searchByDate(page, dateStr) {
   const typeOptions = !FAST_DELAYS && SLOW ? { delay: 80 + Math.random() * 70 } : undefined; // 80-150ms/char only under --slow
   await page.keyboard.type(query, typeOptions);
   await stealthDelay(2000, 6000); // pre-submit dwell — pure mimicry, off unless --slow
+  // LIVE EVIDENCE 2026-09-29 (1s-sampled probe, main session): the old
+  // `RESULT_LINK_SELECTOR.first().waitFor({state:'visible'})` below was
+  // satisfied IMMEDIATELY after Enter, either by one of Google's own decoy
+  // chips (e.g. a "Favorites" shortcut, also `a[href^="./search/"]`) or by
+  // the PREVIOUS search's grid, which stays on-screen for ~1-1.5s before
+  // Google swaps it for the new day's results. Probing "Feb 28" then "Mar
+  // 1, 2026": at 0.2s/0.3s after Enter the only matches were decoys/the
+  // stale prior grid; the real new-day tiles didn't appear until ~1.5-1.7s.
+  // Because the wait resolved before that swap, collectResultTiles() ran
+  // against the WRONG day and whole days silently scanned as empty (server
+  // run: 45 candidates vs. an earlier run's 59, log showed "2026-02-28: 0
+  // tiles", "2026-03-01: 0 tiles"). Fix: snapshot which tile IDENTITIES
+  // (href, matcher.mjs's tileIdentity) are on screen BEFORE Enter, then
+  // poll after Enter until collectResultTiles reports an identity NOT in
+  // that snapshot — a decoy chip or the stale grid can't produce a new
+  // identity, only the actual new day's render can.
+  const priorIdentities = new Set((await collectResultTiles(page)).map(tileIdentity));
   await page.keyboard.press('Enter');
-  await page.locator(RESULT_LINK_SELECTOR).first().waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
+  // 20s matches the old waitFor's timeout. Shortened under FAST_DELAYS (tests)
+  // the same way closeAnyOpenPhoto's retry-loop deadline above is -- a real
+  // 20s wall-clock cap would make every "empty day" test take 20 real seconds.
+  const searchDeadline = Date.now() + (FAST_DELAYS ? 200 : 20000);
+  let sawNewTiles = false;
+  while (Date.now() < searchDeadline) {
+    const tiles = await collectResultTiles(page);
+    if (tiles.some((tile) => !priorIdentities.has(tileIdentity(tile)))) {
+      sawNewTiles = true;
+      break;
+    }
+    await pollDelay();
+  }
+  if (!sawNewTiles) {
+    // Genuinely empty day (no photos taken) looks identical, from in here, to
+    // "still stuck on stale/decoy tiles" -- both never produce a new
+    // identity. Treat the cap as "empty" rather than throwing: the old
+    // code's `.catch(() => {})` already tolerated a day with zero results,
+    // and a hard failure here would abort the whole month's scan over one
+    // day Google genuinely has nothing for.
+    console.log(`[reconcile-scan] no new results for "${query}" after 20s — treating as an empty day`);
+  }
   await assertNoFriction(page);
   await stealthDelay(1500, 3500); // dwell on the results before acting on them — pure mimicry, off unless --slow
   return query;
@@ -3365,76 +3403,185 @@ export async function runReconcileScan(page, month, store) {
     // remains authoritative.
     const plan = planAriaMatches(manifest, tiles);
     const planned = plan ? new Set([...plan.values()].map(tileIdentity)) : new Set();
+    // Per-day counts in the log: a day that silently yields nothing (search
+    // results not rendered, every tile stale) was otherwise invisible — the
+    // 2026-09-28 server run lost 16 photos with no trace of why.
+    console.log(`[reconcile-scan] ${day}: ${tiles.length} tiles, ${planned.size} planned as on-phone`);
 
-    for (const tile of tiles) {
-      if (planned.has(tileIdentity(tile))) continue;
-      try {
-        await openTile(page, tile);
-      } catch (err) {
-        if (err instanceof StaleTileError) continue; // tile vanished under the cursor — move on
-        throw err;
-      }
-      // Wait for the viewer to actually open. Google sometimes opens the photo
-      // a beat after the click: reading the URL immediately saw the grid, the
-      // tile was skipped, and the late-opening viewer then hid the search box
-      // so the NEXT day's search timed out and killed the whole scan (live
-      // 2026-09-28, March 2026 died on the 7th in one run and the 11th in
-      // another).
-      await page.waitForURL(/\/photo\//, { timeout: 10000 }).catch(() => {});
-      const photoId = photoIdFromUrl(page.url());
-      if (photoId == null) {
+    // LIVE EVIDENCE 2026-09-29 (full March 2026 scan, with the searchByDate
+    // fix already live): "2026-03-13" had 69 tiles / 15 planned, but ~40
+    // "skipping stale tile" lines covered 34 distinct photoIds, and 20 of
+    // those NEVER became candidates at all. Cause: the pre-scroll above just
+    // walked the ENTIRE day's grid down to the bottom to build `tiles` for
+    // planAriaMatches -- by the time the OLD code opened `tiles` in that same
+    // (top-to-bottom) order, the grid's virtualization window had long since
+    // unmounted the early tiles the scroll passed over. tileLocatorFor's
+    // count was 0 for every one of them -> StaleTileError -> "continue",
+    // forever (the old loop never revisited a tile once skipped).
+    //
+    // Fix: open whatever's on-screen, then walk the window UP (scrollResultsUp)
+    // and DOWN (scrollResults) around it, opening every unvisited/unplanned
+    // tile at EVERY step along the way -- not just at the top or bottom.
+    // Earlier draft of this fix scrolled all the way to the top FIRST (no
+    // opening in transit) and only opened tiles once stationary there, on
+    // the theory that a subsequent walk back down would pick up whatever the
+    // ascent passed over. That's wrong for a virtualized grid: once the
+    // pre-scroll has already loaded every tile (as it always has by this
+    // point), a further downward scroll has nothing new to REVEAL, so it
+    // snaps straight back to the tail instead of stepping through the
+    // window positions in between -- exactly the middle tiles the ascent
+    // passed through are the ones that would go unopened. Opening at every
+    // step, in both directions, is what actually guarantees every mounted
+    // window gets visited regardless of which direction the grid's own
+    // scroll implementation jumps by.
+    const visitedIdentities = new Set(); // this day's tiles actually opened (or given up on) THIS pass
+    const staleCounts = new Map(); // identity -> consecutive stale-open count
+    // A tile that fails to open gets retried the NEXT time it's back on
+    // screen (a later collectResultTiles() call, possibly after another
+    // scroll) rather than being given up on immediately -- the whole bug
+    // being fixed here was exactly "seen once, marked skipped forever" for a
+    // tile that would have opened fine a screen-height later. Only after
+    // RECONCILE_STALE_RETRY_LIMIT consecutive failures do we stop retrying it
+    // and count it as reached-but-unreachable (see the "never reached" tally
+    // below).
+    const RECONCILE_STALE_RETRY_LIMIT = 2;
+
+    // Opens every tile currently on-screen that isn't planned or already
+    // visited. Returns whether anything was actually opened, which the
+    // up/down walk below uses (together with whether the window moved at
+    // all) to decide when a direction has nothing left to give.
+    const openOnScreenTiles = async () => {
+      const onScreen = await collectResultTiles(page);
+      let openedAny = false;
+      for (const tile of onScreen) {
+        const key = tileIdentity(tile);
+        if (planned.has(key) || visitedIdentities.has(key)) continue;
+        try {
+          await openTile(page, tile);
+        } catch (err) {
+          if (!(err instanceof StaleTileError)) throw err;
+          const attempts = (staleCounts.get(key) ?? 0) + 1;
+          staleCounts.set(key, attempts);
+          if (attempts >= RECONCILE_STALE_RETRY_LIMIT) {
+            visitedIdentities.add(key); // give up -- counts as "reached" for the tally below, not silently dropped
+            console.log(`[reconcile-scan] giving up on stale tile after ${attempts} attempts: ${err.message}`);
+          } else {
+            console.log(`[reconcile-scan] stale tile, will retry if seen again: ${err.message}`);
+          }
+          continue;
+        }
+        visitedIdentities.add(key);
+        openedAny = true;
+        // Wait for the viewer to actually open. Google sometimes opens the photo
+        // a beat after the click: reading the URL immediately saw the grid, the
+        // tile was skipped, and the late-opening viewer then hid the search box
+        // so the NEXT day's search timed out and killed the whole scan (live
+        // 2026-09-28, March 2026 died on the 7th in one run and the 11th in
+        // another).
+        await page.waitForURL(/\/photo\//, { timeout: 10000 }).catch(() => {});
+        const photoId = photoIdFromUrl(page.url());
+        // One line per opened tile, so a photo missing from candidates can be
+        // traced (never opened / opened a different photo / on phone / dup).
+        // A tile href ending in a different id than the viewer URL means the
+        // click opened a neighbour -- the flaky run-to-run misses of 2026-09-29
+        // had no trace to tell these apart.
+        const tileId = photoIdFromUrl(tile.href ?? '');
+        console.log(`[reconcile-scan] opened tile ${tileId} -> ${photoId}${tileId && photoId && tileId !== photoId ? ' MISMATCH' : ''}`);
+        if (photoId == null) {
+          await closeAnyOpenPhoto(page);
+          continue;
+        }
+        // The same photo renders as more than one tile in a day's grid (two grid
+        // sizes with different hrefs), so tile dedupe alone let every candidate
+        // be recorded twice. photoId is the real identity.
+        if (seenPhotoIds.has(photoId)) {
+          await closeAnyOpenPhoto(page);
+          continue;
+        }
+        // seenPhotoIds.add happens only AFTER a filename is read (below): a
+        // failed panel read must stay retryable when the photo's other tile
+        // (or a margin day) opens it again. Adding it here dropped
+        // EDAABD02-...jpg live 2026-09-29: first read came back with no
+        // filename, both later opens were then skipped as duplicates.
+        let text;
+        try {
+          await openInfoPanelOnce(page);
+          text = await readPanelText(page);
+        } catch (err) {
+          // openInfoPanelOnce THROWS (its documented "selector/UI drift" contract)
+          // when a photo's panel never yields a filename -- a deleted-from-Google or
+          // otherwise unreadable photo. One dead photo must NOT abort the whole
+          // month's scan: skip it (no candidate, no thumbnail) and move on, exactly
+          // like the trash pass treats an unreadable candidate. Must close the
+          // photo first -- an open viewer blocks the grid, so the NEXT tile's
+          // identity selector would count 0 and silently skip every tile after it.
+          console.log(`[reconcile-scan] skipping unreadable tile: ${err.message || err}`);
+          await closeAnyOpenPhoto(page);
+          continue;
+        }
+        const parsed = parsePanelText(text);
+        // openInfoPanelOnce only returns on a non-null filename, but the panel
+        // can change between its read and readPanelText's -- REACHED live
+        // 2026-09-29 (EDAABD02-...jpg), not just theoretical.
+        if (parsed.filename == null) {
+          console.log(`[reconcile-scan] no filename in info panel for ${photoId}, will retry if reopened`);
+          await closeAnyOpenPhoto(page);
+          continue;
+        }
+        seenPhotoIds.add(photoId);
+        const googlePhoto = {
+          photoId,
+          filename: parsed.filename,
+          cameraModel: parseCameraModel(text),
+          captureDateMs: parsed.captureDateMs,
+          pixelWidth: parsed.pixelWidth,
+          pixelHeight: parsed.pixelHeight,
+        };
+        const { candidates } = diffGoogleVsManifest(manifest, [googlePhoto]);
+        if (candidates.length === 1) {
+          const buffer = await page.screenshot({ type: 'jpeg', quality: 50 });
+          store.saveThumb(month, photoId, buffer);
+          store.appendCandidate(month, { ...googlePhoto, status: 'candidate' });
+          console.log(`[reconcile-scan] candidate ${parsed.filename} (${photoId})`);
+        } else {
+          console.log(`[reconcile-scan] on phone ${parsed.filename} (${photoId})`);
+        }
         await closeAnyOpenPhoto(page);
-        continue;
       }
-      // The same photo renders as more than one tile in a day's grid (two grid
-      // sizes with different hrefs), so tile dedupe alone let every candidate
-      // be recorded twice. photoId is the real identity.
-      if (seenPhotoIds.has(photoId)) {
-        await closeAnyOpenPhoto(page);
-        continue;
+      return openedAny;
+    };
+
+    // Walks one direction (scrollResultsUp or scrollResults) repeatedly,
+    // opening on-screen tiles at every step, until a step both opens nothing
+    // AND leaves the on-screen identity set unchanged -- i.e. this direction
+    // has genuinely run out of new ground to cover. Capped at
+    // MAX_SCROLL_ATTEMPTS_PER_DATE the same way the pre-scroll above is.
+    const walkDirection = async (scrollFn) => {
+      for (let attempts = 0; attempts < MAX_SCROLL_ATTEMPTS_PER_DATE; attempts++) {
+        const before = new Set((await collectResultTiles(page)).map(tileIdentity));
+        await scrollFn(page);
+        const openedNow = await openOnScreenTiles();
+        const after = new Set((await collectResultTiles(page)).map(tileIdentity));
+        const windowMoved = after.size !== before.size || [...after].some((id) => !before.has(id));
+        if (!openedNow && !windowMoved) break;
       }
-      seenPhotoIds.add(photoId);
-      let text;
-      try {
-        await openInfoPanelOnce(page);
-        text = await readPanelText(page);
-      } catch (err) {
-        // openInfoPanelOnce THROWS (its documented "selector/UI drift" contract)
-        // when a photo's panel never yields a filename — a deleted-from-Google or
-        // otherwise unreadable photo. One dead photo must NOT abort the whole
-        // month's scan: skip it (no candidate, no thumbnail) and move on, exactly
-        // like the trash pass treats an unreadable candidate. Must close the
-        // photo first — an open viewer blocks the grid, so the NEXT tile's
-        // identity selector would count 0 and silently skip every tile after it.
-        console.log(`[reconcile-scan] skipping unreadable tile: ${err.message || err}`);
-        await closeAnyOpenPhoto(page);
-        continue;
-      }
-      const parsed = parsePanelText(text);
-      // Defense-in-depth (unreachable via a successfully-returning
-      // openInfoPanelOnce, which only returns on a non-null filename, but kept
-      // for the narrow race where the panel flickers between the two reads).
-      if (parsed.filename == null) {
-        await closeAnyOpenPhoto(page);
-        continue;
-      }
-      const googlePhoto = {
-        photoId,
-        filename: parsed.filename,
-        cameraModel: parseCameraModel(text),
-        captureDateMs: parsed.captureDateMs,
-        pixelWidth: parsed.pixelWidth,
-        pixelHeight: parsed.pixelHeight,
-      };
-      const { candidates } = diffGoogleVsManifest(manifest, [googlePhoto]);
-      if (candidates.length === 1) {
-        const buffer = await page.screenshot({ type: 'jpeg', quality: 50 });
-        store.saveThumb(month, photoId, buffer);
-        store.appendCandidate(month, { ...googlePhoto, status: 'candidate' });
-        console.log(`[reconcile-scan] candidate ${parsed.filename} (${photoId})`);
-      }
-      await closeAnyOpenPhoto(page);
-    }
+    };
+
+    await openOnScreenTiles(); // whatever's on-screen right where the pre-scroll above left off (the tail)
+    await walkDirection(scrollResultsUp); // recover everything the pre-scroll's descent unmounted
+    await walkDirection(scrollResults); // then sweep back down in case anything new surfaced going up
+
+    // Every identity planAriaMatches saw (`tiles`, the full pre-scroll set)
+    // must end up either planned (fast-pathed) or visited (opened, or given
+    // up on after RECONCILE_STALE_RETRY_LIMIT stale attempts) -- this should
+    // always print 0. A nonzero count here is the exact silent-loss failure
+    // mode this fix targets (see the 2026-09-29 evidence above): a day whose
+    // grid never gave the walk a route back to every tile it once saw.
+    const neverReached = tiles.filter((t) => {
+      const id = tileIdentity(t);
+      return !planned.has(id) && !visitedIdentities.has(id);
+    }).length;
+    console.log(`[reconcile-scan] ${day}: ${neverReached} tiles never reached`);
   }
   store.saveStatus(month, 'ready');
 }
