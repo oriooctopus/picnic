@@ -3312,7 +3312,11 @@ export async function runReconcileScan(page, month, store) {
     return;
   }
 
+  // Photos already opened this scan, across all days (the ±1-day margin days
+  // and multi-size grids both surface the same photo more than once).
+  const seenPhotoIds = new Set();
   for (const day of monthDayStrings(month)) {
+    console.log(`[reconcile-scan] searching ${day}`);
     await searchByDate(page, day);
     let tiles = await collectResultTiles(page);
 
@@ -3357,11 +3361,26 @@ export async function runReconcileScan(page, month, store) {
         if (err instanceof StaleTileError) continue; // tile vanished under the cursor — move on
         throw err;
       }
+      // Wait for the viewer to actually open. Google sometimes opens the photo
+      // a beat after the click: reading the URL immediately saw the grid, the
+      // tile was skipped, and the late-opening viewer then hid the search box
+      // so the NEXT day's search timed out and killed the whole scan (live
+      // 2026-09-28, March 2026 died on the 7th in one run and the 11th in
+      // another).
+      await page.waitForURL(/\/photo\//, { timeout: 10000 }).catch(() => {});
       const photoId = photoIdFromUrl(page.url());
       if (photoId == null) {
         await closeAnyOpenPhoto(page);
         continue;
       }
+      // The same photo renders as more than one tile in a day's grid (two grid
+      // sizes with different hrefs), so tile dedupe alone let every candidate
+      // be recorded twice. photoId is the real identity.
+      if (seenPhotoIds.has(photoId)) {
+        await closeAnyOpenPhoto(page);
+        continue;
+      }
+      seenPhotoIds.add(photoId);
       let text;
       try {
         await openInfoPanelOnce(page);

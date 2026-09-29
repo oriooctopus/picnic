@@ -127,6 +127,87 @@ test('runReconcileScan: no manifest -> logs and writes no status', async () => {
   });
 });
 
+test('runReconcileScan: two tiles resolving to the same photoId produce ONE candidate', async () => {
+  await withTempStore(async (store) => {
+    const month = '2026-08';
+    // Timestamp far from either tile's capture time so the fast path never
+    // plans them away -- both must actually be opened for this test to mean
+    // anything.
+    store.saveManifest(month, [manifestAsset('IMG_9999.HEIC', '2026-08-05T20:00:00.000Z')]);
+
+    const label1 = 'Photo - Portrait - Aug 5, 2026, 3:00:00 PM';
+    const label2 = 'Photo - Portrait - Aug 5, 2026, 3:00:01 PM';
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [label1, label2] },
+      // Both tiles have REAL, DIFFERENT panel text on purpose: if the
+      // seenPhotoIds dedupe were missing, label2 would still be fully read
+      // (not merely rejected as "unreadable"), and the store's fold-latest-
+      // record-per-id behaviour would let its filename silently overwrite
+      // label1's -- a same-count-but-wrong-content bug a same-photoId-with-
+      // no-second-panel-text fixture couldn't distinguish from the fix.
+      panelTextByLabel: {
+        'August 5, 2026': {
+          [label1]: panelBlock('IMG_7777.HEIC'),
+          [label2]: panelBlock('IMG_6666.HEIC'),
+        },
+      },
+      // Google's two grid sizes render the SAME underlying photo under two
+      // different tile labels/hrefs -- pinning both to one photoId is exactly
+      // the live bug (every candidate recorded twice) this test proves fixed.
+      photoIdByLabel: { [label1]: 'dupPhoto', [label2]: 'dupPhoto' },
+    });
+
+    await runReconcileScan(page, month, store);
+
+    const candidates = store.listCandidates(month);
+    assert.deepEqual(candidates.map((c) => c.photoId), ['dupPhoto'], 'the second tile (same photoId) produced no extra candidate');
+    assert.equal(candidates[0].filename, 'IMG_7777.HEIC', 'label2 (same photoId, seen second) was never opened/read at all -- its filename never overwrote label1\'s');
+    assert.equal(page.log.filter((l) => l === 'screenshot').length, 1, 'only ONE screenshot was taken -- label2 never reached the thumbnail step');
+    assert.equal(
+      page.log.filter((l) => l.startsWith('tile-click:')).length,
+      2,
+      'both tiles were still opened -- dedupe happens after open, on photoId, not before'
+    );
+  });
+});
+
+test("runReconcileScan: a tile whose viewer opens late is still read, not skipped, and the next day's search still runs", async () => {
+  await withTempStore(async (store) => {
+    const month = '2026-08';
+    store.saveManifest(month, [manifestAsset('IMG_9999.HEIC', '2026-08-05T20:00:00.000Z')]);
+
+    const lateLabel = 'Photo - Portrait - Aug 5, 2026, 3:00:00 PM';
+    const nextDayLabel = 'Photo - Portrait - Aug 6, 2026, 3:00:00 PM';
+    const page = createFakePage({
+      searchResults: {
+        'August 5, 2026': [lateLabel],
+        'August 6, 2026': [nextDayLabel],
+      },
+      panelTextByLabel: {
+        'August 5, 2026': { [lateLabel]: panelBlock('IMG_7777.HEIC') },
+        'August 6, 2026': { [nextDayLabel]: panelBlock('IMG_8888.HEIC') },
+      },
+      photoIdByLabel: { [lateLabel]: 'latePhoto', [nextDayLabel]: 'nextDayPhoto' },
+      // Models Google opening the viewer a beat after the click: page.url()
+      // keeps reporting the pre-click (grid) URL until runReconcileScan's own
+      // page.waitForURL() call resolves it (see fakePage.mjs openTileInFake's
+      // lateOpeningLabels comment for the live bug this reproduces -- without
+      // the waitForURL fix, photoIdFromUrl(page.url()) reads null here and the
+      // tile is silently skipped).
+      lateOpeningLabels: new Set([lateLabel]),
+    });
+
+    await runReconcileScan(page, month, store);
+
+    const candidates = store.listCandidates(month);
+    assert.deepEqual(
+      candidates.map((c) => c.photoId).sort(),
+      ['latePhoto', 'nextDayPhoto'],
+      'the late-opening tile was not skipped, and the following day was still scanned'
+    );
+  });
+});
+
 /** Three-photo-agnostic helper: queued candidate row. */
 function cand(photoId, filename, status) {
   return { photoId, filename, cameraModel: 'Apple iPhone 13 Pro', captureDateMs: 1, pixelWidth: 2316, pixelHeight: 3088, status };

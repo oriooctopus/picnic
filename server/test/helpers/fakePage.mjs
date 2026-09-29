@@ -423,6 +423,16 @@ function openTileInFake(page, ariaLabel, href) {
   // order, not both.
   page.openedIdentity = href ?? ariaLabel;
   page.openedTileCount += 1;
+  // ROUND 11 (2026-09-28, runReconcileScan's waitForURL): `lateOpeningLabels`
+  // models Google occasionally opening the viewer a beat after the click --
+  // url() keeps reporting the OLD (non-photo) URL until waitForURL "resolves"
+  // it below, exactly like the live scan that read the grid URL right after
+  // click, skipped the tile, then hit a hidden search box on the next day's
+  // search. Only fires for a fixture-listed label; every pre-existing test
+  // (no lateOpeningLabels configured) keeps the old synchronous-open url().
+  if (page.config.lateOpeningLabels?.has(ariaLabel)) {
+    page._pendingLateOpen = true;
+  }
   // Simulates the browser tab disappearing right after this tile finished
   // opening -- the NEXT guarded interaction (info panel, trash, escape...)
   // is what throws, same shape as the live failure this models.
@@ -1127,6 +1137,14 @@ export function createFakePage(config = {}) {
       // performTrash's auto-advance) with no extra wiring -- exactly what
       // walkTimeline's URL-based advance confirmation (worker.mjs,
       // waitForTimelineAdvanceConfirmed) needs to observe changing.
+      // ROUND 11: a fixture-flagged late-opening tile keeps reporting the
+      // pre-click URL until waitForURL() below clears the pending flag --
+      // see openTileInFake's lateOpeningLabels comment for the live bug this
+      // reproduces. Checked before EITHER photo-open branch so it applies to
+      // both the timeline and the grid/search shapes.
+      if (page._pendingLateOpen) {
+        return page._url ?? 'https://photos.google.com';
+      }
       if (page.config.timelineTiles != null && photoOpen(page)) {
         return `https://photos.google.com/photo/${encodeURIComponent(page.openedIdentity ?? page.openedAriaLabel)}`;
       }
@@ -1139,6 +1157,30 @@ export function createFakePage(config = {}) {
         return `https://photos.google.com/photo/${page.config.photoIdByLabel[page.openedAriaLabel]}`;
       }
       return page._url ?? 'https://photos.google.com';
+    },
+    /**
+     * ROUND 11 (2026-09-28): models Playwright's page.waitForURL, which
+     * runReconcileScan now awaits (with a .catch(()=>{})) right after
+     * openTile so a viewer that opens a beat late still gets read, instead
+     * of the click's immediate url() read seeing the grid and skipping the
+     * tile -- see openTileInFake's lateOpeningLabels comment for the live
+     * bug. A real Playwright call polls; this fake only needs to resolve the
+     * one pending-late-open flag set by openTileInFake, since nothing else
+     * in the fake ever makes url() change asynchronously.
+     */
+    async waitForURL(urlPattern, { timeout } = {}) {
+      page.guard();
+      if (page._pendingLateOpen) {
+        page._pendingLateOpen = false;
+      }
+      const current = page.url();
+      const matches = urlPattern instanceof RegExp ? urlPattern.test(current) : current.includes(urlPattern);
+      if (!matches) {
+        // Real Playwright throws a TimeoutError here; worker.mjs's call site
+        // swallows it with .catch(()=>{}), so any Error shape is fine -- the
+        // message is just for a failing test's diagnostic output.
+        throw new Error(`waitForURL: ${current} did not match ${urlPattern} within ${timeout ?? 'default'}ms`);
+      }
     },
     /**
      * Reconcile SCAN captures a JPEG thumbnail of the open candidate via
