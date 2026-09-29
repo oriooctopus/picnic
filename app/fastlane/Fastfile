@@ -13,15 +13,16 @@ platform :ios do
 
     # First run for this brand-new bundle id: no ad hoc profile exists yet,
     # so get_provisioning_profile (sigh) creates one against the App ID
-    # registered above. readonly stays false so a newly registered device
-    # gets folded in by regenerating the profile on later runs too.
+    # registered above. force regenerates it every run so a newly registered
+    # device is always included; sigh's reuse check kept serving a stale
+    # profile without it (same fix as Overland-iOS).
     get_provisioning_profile(
       api_key: api_key,
       adhoc: true,
       app_identifier: APP_ID,
       provisioning_name: ADHOC_PROFILE_NAME,
       team_id: TEAM_ID,
-      readonly: false,
+      force: true,
     )
 
     stamp_build_number
