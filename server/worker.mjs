@@ -437,11 +437,24 @@ async function closeAnyOpenPhoto(page) {
   //     trash control not visible -- which is also true, correctly, for a
   //     zero-result date where no photo was ever opened, so this returns
   //     immediately there without pressing anything.
+  //  3. The URL gets /photo/<id> the moment a tile is clicked, but the viewer
+  //     draws a beat later; in that gap the grid's search box is still visible
+  //     and the trash control is not, so the two checks above said "at the
+  //     grid", nothing was pressed, and the viewer then opened over the next
+  //     date's search box (live 2026-09-28, reconcile scan died mid-month).
+  //     So a /photo/ URL is never "at the grid", and we wait for the viewer to
+  //     finish drawing before pressing Escape, so the Escape reaches the viewer
+  //     and not the grid behind it (an Escape at the grid leaves the results).
+  const photoUrl = () => /\/photo\//.test(page.url());
   const atGrid = async () => {
+    if (photoUrl()) return false;
     const searchVisible = await page.locator(SEARCH_BOX_SELECTOR).first().isVisible().catch(() => false);
     if (!searchVisible) return false;
     return !(await page.locator(TRASH_SELECTOR).first().isVisible().catch(() => false));
   };
+  if (photoUrl()) {
+    await page.locator(TRASH_SELECTOR).first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+  }
 
   // Deliberately few attempts: an extra Escape is not harmless here.
   for (let attempt = 0; attempt < 2; attempt++) {

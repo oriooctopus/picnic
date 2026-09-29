@@ -433,6 +433,14 @@ function openTileInFake(page, ariaLabel, href) {
   if (page.config.lateOpeningLabels?.has(ariaLabel)) {
     page._pendingLateOpen = true;
   }
+  // ROUND 12 (2026-09-29): `viewerRendersLateLabels` models the OTHER live
+  // gap (closeAnyOpenPhoto's fix, distinct from lateOpeningLabels above) --
+  // here url() reports /photo/<id> immediately, exactly like a real click,
+  // but the trash control (visibleFor) stays hidden until a caller's
+  // page.locator(TRASH_SELECTOR).waitFor() clears it below.
+  if (page.config.viewerRendersLateLabels?.has(ariaLabel)) {
+    page._pendingViewerRender = true;
+  }
   // Simulates the browser tab disappearing right after this tile finished
   // opening -- the NEXT guarded interaction (info panel, trash, escape...)
   // is what throws, same shape as the live failure this models.
@@ -521,9 +529,20 @@ class FakeLocator {
   async getAttribute(name) {
     return this.page.attrFor(this.selector, name);
   }
-  async waitFor() {
+  async waitFor(opts = {}) {
     if (this.page.shouldTimeout(this.selector)) {
       throw new Error(`fakePage: configured timeout for selector ${this.selector}`);
+    }
+    // ROUND 12: closeAnyOpenPhoto's fix waits for TRASH_SELECTOR to become
+    // VISIBLE specifically, to let a late-drawing viewer finish before
+    // pressing Escape -- see visibleFor's trashButtonVisible branch for the
+    // matching gate. Gated on `state: 'visible'` (not just the selector)
+    // because openInfoPanelOnce ALSO waits on TRASH_SELECTOR, but for
+    // `state: 'attached'` -- an unrelated, pre-existing wait that must NOT
+    // clear this flag, or it would resolve the late-render gap before
+    // closeAnyOpenPhoto ever runs and the fixture would test nothing.
+    if (/aria-label="Move to trash"/i.test(this.selector) && opts.state === 'visible' && this.page._pendingViewerRender) {
+      this.page._pendingViewerRender = false;
     }
   }
   async scrollIntoViewIfNeeded() {
@@ -1354,6 +1373,14 @@ export function createFakePage(config = {}) {
         // stays available as an AND-ed override for a fixture that wants to
         // force it hidden even while a photo is open (e.g. a confirmation
         // dialog covering the toolbar).
+        // ROUND 12 (2026-09-29, closeAnyOpenPhoto's atGrid/photoUrl fix): a
+        // fixture-flagged `viewerRendersLateLabels` tile models the live gap
+        // where page.url() is already /photo/<id> but the viewer hasn't
+        // actually drawn yet -- the trash control stays hidden (this branch)
+        // until the page.locator(TRASH_SELECTOR).waitFor() below "renders" it,
+        // exactly like the search-box-still-visible/trash-still-hidden window
+        // that made the OLD atGrid() (URL-blind) wrongly say "at the grid".
+        if (page._pendingViewerRender) return false;
         return photoOpen(page) && page.config.trashButtonVisible !== false;
       }
       if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) {

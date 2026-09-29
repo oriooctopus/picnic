@@ -208,6 +208,58 @@ test("runReconcileScan: a tile whose viewer opens late is still read, not skippe
   });
 });
 
+test("runReconcileScan: closeAnyOpenPhoto presses Escape and reaches the grid even when the viewer draws late, so the next day's search still finds its tile", async () => {
+  await withTempStore(async (store) => {
+    const month = '2026-08';
+    store.saveManifest(month, [manifestAsset('IMG_9999.HEIC', '2026-08-05T20:00:00.000Z')]);
+
+    const lateLabel = 'Photo - Portrait - Aug 5, 2026, 3:00:00 PM';
+    const nextDayLabel = 'Photo - Portrait - Aug 6, 2026, 3:00:00 PM';
+    const page = createFakePage({
+      searchResults: {
+        'August 5, 2026': [lateLabel],
+        'August 6, 2026': [nextDayLabel],
+      },
+      panelTextByLabel: {
+        'August 5, 2026': { [lateLabel]: panelBlock('IMG_7777.HEIC') },
+        'August 6, 2026': { [nextDayLabel]: panelBlock('IMG_8888.HEIC') },
+      },
+      photoIdByLabel: { [lateLabel]: 'latePhoto', [nextDayLabel]: 'nextDayPhoto' },
+      // Models the OTHER live gap (distinct from lateOpeningLabels, which
+      // delays the URL itself): here page.url() is /photo/<id> the instant
+      // the tile is clicked, exactly like Google, but the trash control
+      // (closeAnyOpenPhoto's "is a photo really showing" signal) stays
+      // hidden until closeAnyOpenPhoto's own TRASH_SELECTOR.waitFor()
+      // resolves it -- see fakePage.mjs's viewerRendersLateLabels comment.
+      viewerRendersLateLabels: new Set([lateLabel]),
+    });
+
+    await runReconcileScan(page, month, store);
+
+    // Without the fix, atGrid() (URL-blind) sees "search box visible, trash
+    // not yet visible" during the render gap and wrongly calls that "at the
+    // grid" -- so closeAnyOpenPhoto returns WITHOUT pressing Escape, and
+    // openedAriaLabel/openedIdentity are never cleared. The next tile's
+    // identity-scoped locator then counts 0 (fakePage's countFor treats "a
+    // photo is open" as "grid unreachable", exactly like the live viewer
+    // covering the grid) and openTile() throws StaleTileError, silently
+    // dropping the next day's candidate -- this is the "next searchByDate
+    // still works" half of the bug, reproduced without needing to model the
+    // real search-box-hidden-behind-the-viewer visual overlap.
+    const candidates = store.listCandidates(month);
+    assert.deepEqual(
+      candidates.map((c) => c.photoId).sort(),
+      ['latePhoto', 'nextDayPhoto'],
+      'the late-rendering tile was closed properly, so the next day\'s tile was still reachable and became a candidate'
+    );
+    // One Escape per tile closed (late-rendering AND the normal next-day
+    // tile) -- proves closeAnyOpenPhoto actually pressed Escape for the
+    // late-rendering tile rather than short-circuiting on a falsely-"at the
+    // grid" read (which would leave this at 1, only the next-day tile's).
+    assert.equal(page.escapePresses, 2, 'closeAnyOpenPhoto must press Escape for both tiles, including the late-rendering one');
+  });
+});
+
 /** Three-photo-agnostic helper: queued candidate row. */
 function cand(photoId, filename, status) {
   return { photoId, filename, cameraModel: 'Apple iPhone 13 Pro', captureDateMs: 1, pixelWidth: 2316, pixelHeight: 3088, status };
