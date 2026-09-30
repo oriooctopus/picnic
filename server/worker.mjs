@@ -142,6 +142,11 @@ const INFO_PANEL_OPEN_SELECTOR = 'button[aria-label="Close info"]';
 // fails to register, and treating that as end-of-day silently abandoned most
 // of a date's photos.
 const NEXT_PHOTO_SELECTOR = '[aria-label="View next photo" i]';
+// Attaching over CDP attaches to EVERY target in Oliver's shared Chrome (tabs,
+// iframes, workers from other sessions), so it takes 8-19s live 2026-09-29 and
+// Playwright's 30s default failed scans outright. A truly frozen tab still
+// hangs forever -- this only stops a slow-but-healthy attach from failing.
+const CDP_CONNECT_TIMEOUT_MS = 120000;
 const TRASH_SELECTOR = '[aria-label="Move to trash" i]';
 // Only meaningful under --slow (see stealthDelay below) -- the pacing
 // between date-group attempts and between jobs, restored for anyone who
@@ -3669,7 +3674,7 @@ async function reconcileEntry(month, mode) {
   const { chromium } = await import('playwright-core');
   let browser;
   try {
-    browser = await chromium.connectOverCDP(cdpUrl);
+    browser = await chromium.connectOverCDP(cdpUrl, { timeout: CDP_CONNECT_TIMEOUT_MS });
   } catch (err) {
     loud(`BLOCKER: could not connect to CDP Chrome at ${cdpUrl} — ${err.message}`);
     process.exitCode = 1;
@@ -3738,7 +3743,7 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'pho
 
   let browser;
   try {
-    browser = await chromium.connectOverCDP(cdpUrl);
+    browser = await chromium.connectOverCDP(cdpUrl, { timeout: CDP_CONNECT_TIMEOUT_MS });
   } catch (err) {
     loud(`BLOCKER: could not connect to CDP Chrome at ${cdpUrl} — ${err.message}`);
     process.exitCode = 1;
