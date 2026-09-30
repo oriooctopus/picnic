@@ -378,7 +378,10 @@ const FRICTION_PATTERNS = [
  * existing loud() BLOCKER path in runWorker and stops the whole run.
  */
 export async function assertNoFriction(page) {
-  const bodyText = await page.locator('body').textContent().catch(() => '');
+  // .first(): an extension injects a second <body> (browser-mcp-container), so
+  // a bare locator('body') throws a strict-mode error -- which the old
+  // .catch(() => '') swallowed, silently disabling this guard (live 2026-09-29).
+  const bodyText = await page.locator('body').first().textContent();
   for (const pattern of FRICTION_PATTERNS) {
     if (pattern.test(bodyText)) {
       throw new Error(`FRICTION DETECTED (matched ${pattern}) — stopping run, not retrying. Page: ${page.url()}`);
@@ -450,10 +453,14 @@ async function closeAnyOpenPhoto(page) {
     if (photoUrl()) return false;
     const searchVisible = await page.locator(SEARCH_BOX_SELECTOR).first().isVisible().catch(() => false);
     if (!searchVisible) return false;
-    return !(await page.locator(TRASH_SELECTOR).first().isVisible().catch(() => false));
+    // :visible -- the viewer renders 3-4 "Move to trash" buttons and the first
+    // is a hidden duplicate, so .first() never reports visible (live 2026-09-29).
+    return (await page.locator(`${TRASH_SELECTOR}:visible`).count()) === 0;
   };
   if (photoUrl()) {
-    await page.locator(TRASH_SELECTOR).first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+    // :visible, same hidden-duplicate reason as atGrid: waiting on .first() timed
+    // out the full 5s on EVERY photo, ~5 of the ~6s each scanned photo took.
+    await page.locator(`${TRASH_SELECTOR}:visible`).first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
   }
 
   // Deliberately few attempts: an extra Escape is not harmless here.
@@ -695,7 +702,7 @@ async function openInfoPanelOnce(page) {
   const already = await readPanelText(page);
   if (parsePanelText(already).filename) {
     await stealthDelay(400, 1200); // pure mimicry, off unless --slow
-    return;
+    return already;
   }
   // Wait for the photo view to actually exist before pressing anything. With
   // the mimicry delays removed, 'i' was being pressed while the view was still
@@ -729,7 +736,7 @@ async function openInfoPanelOnce(page) {
     const text = selectPanelText(candidateSets);
     if (parsePanelText(text).filename) {
       await stealthDelay(800, 2000); // "dwell reading the panel" — pure mimicry, off unless --slow
-      return;
+      return text;
     }
     attempts += 1;
     // ROUND 8 (2026-09-25 live finding): a visible "Details" heading with NO
@@ -3505,8 +3512,11 @@ export async function runReconcileScan(page, month, store) {
         // filename, both later opens were then skipped as duplicates.
         let text;
         try {
-          await openInfoPanelOnce(page);
-          text = await readPanelText(page);
+          // Use the text openInfoPanelOnce validated, never a second read: the
+          // panel can go blank between two reads, which dropped
+          // 92de8d96-...jpg live 2026-09-29 (a single-tile photo is never
+          // reopened, so "retry if reopened" never came).
+          text = await openInfoPanelOnce(page);
         } catch (err) {
           // openInfoPanelOnce THROWS (its documented "selector/UI drift" contract)
           // when a photo's panel never yields a filename -- a deleted-from-Google or
@@ -3520,14 +3530,6 @@ export async function runReconcileScan(page, month, store) {
           continue;
         }
         const parsed = parsePanelText(text);
-        // openInfoPanelOnce only returns on a non-null filename, but the panel
-        // can change between its read and readPanelText's -- REACHED live
-        // 2026-09-29 (EDAABD02-...jpg), not just theoretical.
-        if (parsed.filename == null) {
-          console.log(`[reconcile-scan] no filename in info panel for ${photoId}, will retry if reopened`);
-          await closeAnyOpenPhoto(page);
-          continue;
-        }
         seenPhotoIds.add(photoId);
         const googlePhoto = {
           photoId,

@@ -552,6 +552,13 @@ class FakeLocator {
     // `state: 'attached'` -- an unrelated, pre-existing wait that must NOT
     // clear this flag, or it would resolve the late-render gap before
     // closeAnyOpenPhoto ever runs and the fixture would test nothing.
+    // Live 2026-09-29: the first of the viewer's several trash buttons is a
+    // hidden duplicate, so a `visible` wait on the bare selector's .first()
+    // always runs out its full timeout (5s per photo). Count those waits.
+    if (this.page.config.trashFirstIsHiddenDuplicate && /aria-label="Move to trash"/i.test(this.selector) && !/:visible\b/.test(this.selector) && opts.state === 'visible') {
+      this.page.hiddenTrashWaits = (this.page.hiddenTrashWaits ?? 0) + 1;
+      throw new Error(`fakePage: waited ${opts.timeout}ms for a hidden duplicate trash button`);
+    }
     if (/aria-label="Move to trash"/i.test(this.selector) && opts.state === 'visible' && this.page._pendingViewerRender) {
       this.page._pendingViewerRender = false;
     }
@@ -1265,6 +1272,10 @@ export function createFakePage(config = {}) {
         return page.config.infoButtonFound ? 1 : 0;
       }
       if (/aria-label="Move to trash"/i.test(selector)) {
+        // Live, the viewer renders several trash buttons (the first a hidden
+        // duplicate), so a bare count is always >0; `:visible` narrows it to
+        // the one real button, present only while a photo is open.
+        if (/:visible\b/.test(selector)) return page.visibleFor(selector) ? 1 : 0;
         return 1;
       }
       if (/aria-label="View next photo"/i.test(selector)) {

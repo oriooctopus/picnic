@@ -390,6 +390,60 @@ test('runReconcileScan: every tile on a big, virtualized day is recovered, not j
   });
 });
 
+test('runReconcileScan: a single-tile photo whose panel blanks right after it validated is still recorded (no second read)', async () => {
+  await withTempStore(async (store) => {
+    const month = '2026-08';
+    store.saveManifest(month, [manifestAsset('IMG_9999.HEIC', '2026-08-05T02:00:00.000Z')]);
+    const label = 'Photo - Portrait - Aug 5, 2026, 3:00:00 PM';
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [label] },
+      panelTextByLabel: { 'August 5, 2026': { [label]: panelBlock('IMG_8888.HEIC') } },
+      photoIdByLabel: { [label]: 'photoX' },
+    });
+    // Live 2026-09-29: the panel validated a filename, then the very next panel
+    // read came back blank. Blank exactly ONE panel read after the first
+    // filename-bearing one; every other evaluate() passes through untouched.
+    const realEvaluate = page.evaluate.bind(page);
+    let sawFilename = false;
+    let blanked = false;
+    page.evaluate = async (...args) => {
+      const r = await realEvaluate(...args);
+      const isPanelRead = r && typeof r === 'object' && 'detailsAndFile' in r;
+      if (!isPanelRead) return r;
+      if (sawFilename && !blanked) {
+        blanked = true;
+        return { detailsAndFile: [], dimsAndFile: [], fileOnly: [], detailsHeadingOnly: [] };
+      }
+      if (r.detailsAndFile?.length || r.dimsAndFile?.length || r.fileOnly?.length) sawFilename = true;
+      return r;
+    };
+
+    await runReconcileScan(page, month, store);
+
+    assert.ok(sawFilename, 'fixture really did let the panel validate a filename first');
+    assert.deepEqual(store.listCandidates(month).map((c) => c.photoId), ['photoX']);
+  });
+});
+
+test('runReconcileScan: closing a photo never waits on the hidden duplicate trash button (was 5s per photo)', async () => {
+  await withTempStore(async (store) => {
+    const month = '2026-08';
+    store.saveManifest(month, [manifestAsset('IMG_9999.HEIC', '2026-08-05T02:00:00.000Z')]);
+    const labels = ['Photo - Portrait - Aug 5, 2026, 3:00:00 PM', 'Photo - Portrait - Aug 5, 2026, 4:00:00 PM'];
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': labels },
+      panelTextByLabel: { 'August 5, 2026': { [labels[0]]: panelBlock('IMG_8001.HEIC'), [labels[1]]: panelBlock('IMG_8002.HEIC') } },
+      photoIdByLabel: { [labels[0]]: 'p1', [labels[1]]: 'p2' },
+      trashFirstIsHiddenDuplicate: true,
+    });
+
+    await runReconcileScan(page, month, store);
+
+    assert.equal(store.listCandidates(month).length, 2, 'both photos were opened and recorded');
+    assert.equal(page.hiddenTrashWaits ?? 0, 0, 'no visible-wait on the bare trash selector');
+  });
+});
+
 /** Three-photo-agnostic helper: queued candidate row. */
 function cand(photoId, filename, status) {
   return { photoId, filename, cameraModel: 'Apple iPhone 13 Pro', captureDateMs: 1, pixelWidth: 2316, pixelHeight: 3088, status };
