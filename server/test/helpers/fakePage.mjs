@@ -580,9 +580,11 @@ class FakeTileLink {
     this.href = href; // undefined for fixtures that never set one -- see identityOf()'s fallback to aria-label
   }
   async isVisible() {
+    this.page.perLinkReads = (this.page.perLinkReads ?? 0) + 1;
     return this.hidden !== true;
   }
   async getAttribute(name) {
+    this.page.perLinkReads = (this.page.perLinkReads ?? 0) + 1;
     if (name === 'aria-label') return this.ariaLabel;
     if (name === 'href') return this.href ?? null;
     return null;
@@ -1150,7 +1152,18 @@ export function createFakePage(config = {}) {
       page.guard();
       page.log.push('bringToFront');
     },
-    async evaluate() {
+    async evaluate(fn, arg) {
+      // collectTilesBySelector's ONE-round-trip collection (selector string
+      // passed as the argument): answer [ariaLabel, href, visible] for every
+      // match from the SAME modelled grid allFor() exposes (windowing,
+      // reorderOnRecollect, hidden tiles), so behaviour is identical to the
+      // old per-link .all()/getAttribute/isVisible path. Per-link reads on
+      // tiles are counted in page.perLinkReads to prove it is unused.
+      if (typeof arg === 'string' && (isTimelineSelector(arg) || arg.includes('./search/'))) {
+        page.log.push('evaluate:collectTiles');
+        page.collectEvaluates = (page.collectEvaluates ?? 0) + 1;
+        return page.allFor(arg).map((link) => [link.ariaLabel, link.href ?? null, link.hidden !== true]);
+      }
       // Mirrors readPanelText(): returns the current tile's info-panel
       // CANDIDATE SETS (see panelTextCandidateSets' header), but only once
       // the (sticky) info panel is actually open. NOTE: worker.mjs also

@@ -171,6 +171,44 @@ test('runReconcileScan: two tiles resolving to the same photoId produce ONE cand
   });
 });
 
+test('runReconcileScan: a tile whose href carries an already-read photo id is not opened again', async () => {
+  await withTempStore(async (store) => {
+    const month = '2026-08';
+    store.saveManifest(month, [manifestAsset('IMG_9999.HEIC', '2026-08-05T20:00:00.000Z')]);
+    const label1 = 'Photo - Portrait - Aug 5, 2026, 3:00:00 PM';
+    const label2 = 'Photo - Portrait - Aug 5, 2026, 3:00:01 PM';
+    const page = createFakePage({
+      searchResults: {
+        'August 5, 2026': [
+          { ariaLabel: label1, href: './search/q1/photo/dupPhoto' },
+          { ariaLabel: label2, href: './search/q2/photo/dupPhoto' },
+        ],
+      },
+      panelTextByLabel: { 'August 5, 2026': { [label1]: panelBlock('IMG_7777.HEIC'), [label2]: panelBlock('IMG_7777.HEIC') } },
+      photoIdByLabel: { [label1]: 'dupPhoto', [label2]: 'dupPhoto' },
+    });
+    await runReconcileScan(page, month, store);
+    assert.deepEqual(store.listCandidates(month).map((c) => c.photoId), ['dupPhoto']);
+    assert.equal(page.log.filter((l) => l.startsWith('tile-click:')).length, 1, 'the second tile (same photo id in its href) was never opened');
+  });
+});
+
+test('runReconcileScan: tiles are collected in one evaluate round trip, never per-link getAttribute/isVisible', async () => {
+  await withTempStore(async (store) => {
+    const month = '2026-08';
+    store.saveManifest(month, [manifestAsset('IMG_9999.HEIC', '2026-08-05T20:00:00.000Z')]);
+    const label1 = 'Photo - Portrait - Aug 5, 2026, 3:00:00 PM';
+    const page = createFakePage({
+      searchResults: { 'August 5, 2026': [label1] },
+      panelTextByLabel: { 'August 5, 2026': { [label1]: panelBlock('IMG_7777.HEIC') } },
+      photoIdByLabel: { [label1]: 'onePhoto' },
+    });
+    await runReconcileScan(page, month, store);
+    assert.ok(page.collectEvaluates > 0, 'collection went through page.evaluate');
+    assert.equal(page.perLinkReads ?? 0, 0, 'no per-link getAttribute/isVisible round trips');
+  });
+});
+
 // REGRESSION TEST for the exact bug the seenPhotoIds.add() reordering fixes
 // (live 2026-09-29): a photo's FIRST tile fails to read a filename (here,
 // openInfoPanelOnce throws outright -- the brief's "or" alternative to a

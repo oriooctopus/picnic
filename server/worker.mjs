@@ -571,22 +571,25 @@ async function searchByDate(page, dateStr) {
  * photo/video tiles only, visible only) and dedup are identical.
  */
 async function collectTilesBySelector(page, selector) {
-  const links = await page.locator(selector).all();
+  // ONE round trip for every match: Playwright's locator.all() plus per-link
+  // getAttribute/isVisible measured ~5.8s per call live on a 55-link grid vs
+  // ~38ms for this evaluate, and this runs many times per day. Visibility
+  // mirrors Playwright's isVisible() (non-empty box AND visibility !== hidden);
+  // Element.checkVisibility() is NOT equivalent (measured live: 25 vs 22) --
+  // a previous search's grid stays in the DOM collapsed to a 0x0 box, and
+  // openTile() dies on such a stale hidden tile.
+  const raw = await page.evaluate((sel) => {
+    return Array.from(document.querySelectorAll(sel)).map((el) => {
+      const r = el.getBoundingClientRect();
+      const visible = r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden';
+      return [el.getAttribute('aria-label'), el.getAttribute('href'), visible];
+    });
+  }, selector);
   const withLabels = [];
-  for (const link of links) {
-    const ariaLabel = await link.getAttribute('aria-label').catch(() => null);
+  for (const [ariaLabel, href, visible] of raw) {
     if (!isRealPhotoTile(ariaLabel)) continue;
-    // VERIFIED LIVE 2026-09-01 (date search): a previous search's result grid
-    // stays in the DOM after the next search, collapsed to a 0x0 box. Its
-    // tiles still match the selector and still carry aria-labels, so without
-    // a visibility filter the walk picks a stale hidden tile and openTile()
-    // dies in scrollIntoViewIfNeeded with "element is not visible". Kept for
-    // the timeline too even though it's unverified there -- a virtualized
-    // list unmounting old tiles rather than hiding them would make this a
-    // no-op, never a correctness problem.
-    if (!(await link.isVisible().catch(() => false))) continue;
-    const href = await link.getAttribute('href').catch(() => null);
-    withLabels.push({ locator: link, ariaLabel, href });
+    if (!visible) continue;
+    withLabels.push({ ariaLabel, href });
   }
   return dedupeTilesByIdentity(withLabels);
 }
@@ -3468,6 +3471,14 @@ export async function runReconcileScan(page, month, store) {
       for (const tile of onScreen) {
         const key = tileIdentity(tile);
         if (planned.has(key) || visitedIdentities.has(key)) continue;
+        // The same photo renders as two tiles with different hrefs/identities
+        // but the same photo id (live: 222 opens for 99 photos). Skip a tile
+        // whose photo was already read; mark it visited for the tally.
+        const preId = photoIdFromUrl(tile.href ?? '');
+        if (preId != null && seenPhotoIds.has(preId)) {
+          visitedIdentities.add(key);
+          continue;
+        }
         try {
           await openTile(page, tile);
         } catch (err) {
