@@ -91,3 +91,51 @@ test('POST /reconcile refuses a second scan while one is already running for tha
     scanRunning = false;
   }
 });
+
+const ASSET_A = { filename: 'A.HEIC', creationDate: '2026-10-01T00:00:00Z', pixelWidth: 1, pixelHeight: 1 };
+const ASSET_B = { filename: 'B.HEIC', creationDate: '2026-10-02T00:00:00Z', pixelWidth: 1, pixelHeight: 1 };
+
+test('re-POST with an unchanged manifest reuses a ready result instead of rescanning', async () => {
+  const month = '2026-10';
+  store.saveManifest(month, [ASSET_A, ASSET_B]);
+  store.saveStatus(month, 'ready');
+  store.appendCandidate(month, { photoId: 'keep1', filename: 'G.HEIC', cameraModel: null, captureDateMs: 1, pixelWidth: 1, pixelHeight: 1, status: 'candidate' });
+  const before = spawnCalls.length;
+
+  const res = await post('/reconcile', { month, assets: [ASSET_B, ASSET_A] }); // same set, different order
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).status, 'ready');
+  assert.equal(spawnCalls.length, before, 'must not spawn a rescan for an unchanged manifest');
+  assert.equal(store.listCandidates(month).length, 1, 'the finished result must survive');
+
+  const changed = await post('/reconcile', { month, assets: [ASSET_A] });
+  assert.equal(changed.status, 200);
+  assert.equal(spawnCalls.length, before + 1, 'a changed manifest rescans');
+  assert.equal(store.listCandidates(month).length, 0);
+});
+
+test('re-POST with the same manifest while its scan is running joins it (200), not 409', async () => {
+  const month = '2027-01';
+  store.saveManifest(month, [ASSET_A]);
+  store.saveStatus(month, 'scanning');
+  const before = spawnCalls.length;
+  scanRunning = true;
+  try {
+    const res = await post('/reconcile', { month, assets: [ASSET_A] });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).status, 'scanning');
+    assert.equal(spawnCalls.length, before);
+  } finally {
+    scanRunning = false;
+  }
+});
+
+test('a month whose trash pass finished (done) rescans even with the same manifest', async () => {
+  const month = '2027-02';
+  store.saveManifest(month, [ASSET_A]);
+  store.saveStatus(month, 'done');
+  const before = spawnCalls.length;
+  const res = await post('/reconcile', { month, assets: [ASSET_A] });
+  assert.equal(res.status, 200);
+  assert.equal(spawnCalls.length, before + 1);
+});
