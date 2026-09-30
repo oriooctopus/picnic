@@ -117,6 +117,16 @@ test('GET /reconcile/:month partitions candidates into iphone/other with thumb u
   assert.equal(body.sections.other.candidates[0].id, 'id-other');
 });
 
+test('GET /reconcile/:month: a filename-less (listing-scan) candidate gets a non-null display filename (the app decodes a non-optional String) and lands in "other"', async () => {
+  store.appendCandidate('2026-07', { photoId: 'AF1QipNoName', filename: null, cameraModel: null, captureDateMs: Date.parse('2026-07-04T15:30:00Z'), pixelWidth: 1, pixelHeight: 2, status: 'candidate' });
+  const body = await (await get('/reconcile/2026-07')).json();
+  assert.equal(body.sections.iphone.count, 0);
+  const c = body.sections.other.candidates[0];
+  assert.equal(c.id, 'AF1QipNoName');
+  assert.equal(typeof c.filename, 'string');
+  assert.match(c.filename, /2026-07-04 15:30/);
+});
+
 test('POST /reconcile/:month/confirm marks ids queued, sets confirming, spawns trash worker', async () => {
   const res = await post('/reconcile/2026-09/confirm', { ids: ['id_iphone'] });
   assert.equal(res.status, 200);

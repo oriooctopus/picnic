@@ -102,7 +102,8 @@ import {
   filenamesAgree,
   parseCameraModel,
 } from './lib/matcher.mjs';
-import { ReconcileStore, diffGoogleVsManifest } from './lib/reconcile.mjs';
+import { ReconcileStore, diffGoogleVsManifest, diffListingVsManifest, dimensionsAgree } from './lib/reconcile.mjs';
+import { parseListingBody, filterItemsToMonth, mergeItems } from './lib/listing.mjs';
 
 const QUEUE_PATH = process.env.PICNIC_QUEUE_PATH || join(homedir(), '.local/share/picnic/queue.jsonl');
 // The reconcile store (the "Clean up Google" feature) lives in its own tree,
@@ -164,6 +165,10 @@ export const MAX_STEPS_PER_DATE = 80;
 // above -- a date with a huge grid must not scroll forever trying to find
 // tiles that were never going to load.
 export const MAX_SCROLL_ATTEMPTS_PER_DATE = 6;
+// Reconcile scan (passive listing capture): see runReconcileScan.
+const LISTING_URL_PATTERN = /photos\.google\.com\/.*batchexecute/;
+const RECONCILE_FRUITLESS_SCROLLS = 2;
+const RECONCILE_MAX_SCROLLS_PER_DAY = 40;
 // Bound how many times openFirstTile() re-collects and retries opening the
 // EXHAUSTIVE fallback's starting tile after a StaleTileError (the held
 // reference -- captured before the aria pre-scroll even runs, see
@@ -3331,16 +3336,18 @@ export async function runRevisitFromFile(page, filePath, jobs, queue, { dryRun }
 // header for the feature-level contract. Two modes, dispatched from parseArgs:
 //
 //   --reconcile-scan=<YYYY-MM>  READ-ONLY. Searches each calendar day of the
-//                               month (±1 day) in Google Photos, reads every
-//                               photo whose capture time does NOT fast-path to
-//                               a manifest entry, and records the ones whose
-//                               filename is absent from the manifest (i.e.
-//                               only-in-Google) as candidates. NEVER trashes.
+//                               month (±1 day) in Google Photos and PASSIVELY
+//                               captures Google's own listing responses
+//                               (batchexecute) while scrolling; items with no
+//                               manifest entry at the same capture time and
+//                               dimensions are recorded as candidates.
+//                               Never opens a photo, never trashes.
 //   --reconcile-trash=<YYYY-MM> For each candidate the user confirmed, re-open
 //                               the photo and MOVE IT TO GOOGLE TRASH (never
 //                               permanent-delete) — only after re-reading the
-//                               panel and re-confirming the filename still
-//                               agrees with the stored candidate.
+//                               panel and re-confirming identity (filename, or
+//                               for filename-less candidates: filename off the
+//                               manifest + capture time + dimensions).
 //
 // Unlike the mirror-job walk above, these modes take an explicit `store` (a
 // ReconcileStore) so tests can inject one on a temp dir and a fake page; the
@@ -3371,237 +3378,125 @@ function monthDayStrings(month) {
  * manifest once up front; if it is absent there is nothing to diff against,
  * so log and return without writing any status.
  */
-export async function runReconcileScan(page, month, store) {
+export async function runReconcileScan(page, month, store, { fetchImpl = fetch } = {}) {
   const manifest = store.loadManifest(month);
   if (manifest == null) {
     console.log(`[reconcile-scan] no manifest for ${month} — nothing to diff against`);
     return;
   }
 
-  // Photos already opened this scan, across all days (the ±1-day margin days
-  // and multi-size grids both surface the same photo more than once).
-  const seenPhotoIds = new Set();
-  for (const day of monthDayStrings(month)) {
-    console.log(`[reconcile-scan] searching ${day}`);
-    await searchByDate(page, day);
-    let tiles = await collectResultTiles(page);
-
-    // Realize the whole day's grid before deciding anything: a big day is
-    // virtualized, so tiles off-screen simply aren't collected yet (same
-    // pre-scroll the mirror walk uses — see processDateGroup's header).
-    const seen = new Map();
-    const mergeSeen = (fresh) => {
-      let added = false;
-      for (const t of fresh) {
-        const k = tileIdentity(t);
-        if (!seen.has(k)) {
-          seen.set(k, t);
-          added = true;
-        }
+  // PASSIVE CAPTURE: Google's own listing responses (batchexecute) carry
+  // per-item capture time + dimensions, so nothing is ever opened (the old
+  // open-every-photo-to-read-its-filename scan cost ~6s/photo and dropped
+  // photos whose tiles unmounted mid-scroll). We only LISTEN; we never issue a
+  // request of our own through the browser. The handler is attached before the
+  // first search so no response is missed.
+  const itemsByKey = new Map();
+  const pending = new Set();
+  let responsesParsed = 0;
+  const onResponse = (response) => {
+    if (!LISTING_URL_PATTERN.test(response.url())) return;
+    const work = (async () => {
+      let body;
+      try {
+        body = await response.text();
+      } catch (err) {
+        // Redirects/aborted requests have no body; that is not a listing, but say so.
+        loud(`[reconcile-scan] could not read a batchexecute response body: ${err.message || err}`);
+        return;
       }
-      return added;
-    };
-    mergeSeen(tiles);
-    let scrollAttempts = 0;
-    while (scrollAttempts < MAX_SCROLL_ATTEMPTS_PER_DATE) {
-      await scrollResults(page);
-      scrollAttempts += 1;
-      if (!mergeSeen(await collectResultTiles(page))) break;
-    }
-    tiles = [...seen.values()];
+      const items = parseListingBody(body);
+      responsesParsed += 1;
+      mergeItems(itemsByKey, items);
+    })();
+    pending.add(work);
+    work.finally(() => pending.delete(work));
+  };
+  const settle = async () => {
+    while (pending.size > 0) await Promise.all([...pending]);
+  };
+  page.on('response', onResponse);
 
-    // FAST PATH: if the tile's aria-label capture time predicts a manifest
-    // entry (to the second, via the same self-calibrating matcher the mirror
-    // walk uses), skip it — assume already on the phone. This is only an
-    // OPTIMIZATION to avoid opening every on-phone tile; a tile the plan
-    // can't place still gets opened and decided by filename below, which
-    // remains authoritative.
-    const plan = planAriaMatches(manifest, tiles);
-    const planned = plan ? new Set([...plan.values()].map(tileIdentity)) : new Set();
-    // Per-day counts in the log: a day that silently yields nothing (search
-    // results not rendered, every tile stale) was otherwise invisible — the
-    // 2026-09-28 server run lost 16 photos with no trace of why.
-    console.log(`[reconcile-scan] ${day}: ${tiles.length} tiles, ${planned.size} planned as on-phone`);
+  try {
+    for (const day of monthDayStrings(month)) {
+      console.log(`[reconcile-scan] searching ${day}`);
+      const responsesBefore = responsesParsed;
+      await searchByDate(page, day);
+      await settle();
 
-    // LIVE EVIDENCE 2026-09-29 (full March 2026 scan, with the searchByDate
-    // fix already live): "2026-03-13" had 69 tiles / 15 planned, but ~40
-    // "skipping stale tile" lines covered 34 distinct photoIds, and 20 of
-    // those NEVER became candidates at all. Cause: the pre-scroll above just
-    // walked the ENTIRE day's grid down to the bottom to build `tiles` for
-    // planAriaMatches -- by the time the OLD code opened `tiles` in that same
-    // (top-to-bottom) order, the grid's virtualization window had long since
-    // unmounted the early tiles the scroll passed over. tileLocatorFor's
-    // count was 0 for every one of them -> StaleTileError -> "continue",
-    // forever (the old loop never revisited a tile once skipped).
-    //
-    // Fix: open whatever's on-screen, then walk the window UP (scrollResultsUp)
-    // and DOWN (scrollResults) around it, opening every unvisited/unplanned
-    // tile at EVERY step along the way -- not just at the top or bottom.
-    // Earlier draft of this fix scrolled all the way to the top FIRST (no
-    // opening in transit) and only opened tiles once stationary there, on
-    // the theory that a subsequent walk back down would pick up whatever the
-    // ascent passed over. That's wrong for a virtualized grid: once the
-    // pre-scroll has already loaded every tile (as it always has by this
-    // point), a further downward scroll has nothing new to REVEAL, so it
-    // snaps straight back to the tail instead of stepping through the
-    // window positions in between -- exactly the middle tiles the ascent
-    // passed through are the ones that would go unopened. Opening at every
-    // step, in both directions, is what actually guarantees every mounted
-    // window gets visited regardless of which direction the grid's own
-    // scroll implementation jumps by.
-    const visitedIdentities = new Set(); // this day's tiles actually opened (or given up on) THIS pass
-    const staleCounts = new Map(); // identity -> consecutive stale-open count
-    // A tile that fails to open gets retried the NEXT time it's back on
-    // screen (a later collectResultTiles() call, possibly after another
-    // scroll) rather than being given up on immediately -- the whole bug
-    // being fixed here was exactly "seen once, marked skipped forever" for a
-    // tile that would have opened fine a screen-height later. Only after
-    // RECONCILE_STALE_RETRY_LIMIT consecutive failures do we stop retrying it
-    // and count it as reached-but-unreachable (see the "never reached" tally
-    // below).
-    const RECONCILE_STALE_RETRY_LIMIT = 2;
-
-    // Opens every tile currently on-screen that isn't planned or already
-    // visited. Returns whether anything was actually opened, which the
-    // up/down walk below uses (together with whether the window moved at
-    // all) to decide when a direction has nothing left to give.
-    const openOnScreenTiles = async () => {
-      const onScreen = await collectResultTiles(page);
-      let openedAny = false;
-      for (const tile of onScreen) {
-        const key = tileIdentity(tile);
-        if (planned.has(key) || visitedIdentities.has(key)) continue;
-        // The same photo renders as two tiles with different hrefs/identities
-        // but the same photo id (live: 222 opens for 99 photos). Skip a tile
-        // whose photo was already read; mark it visited for the tally.
-        const preId = photoIdFromUrl(tile.href ?? '');
-        if (preId != null && seenPhotoIds.has(preId)) {
-          visitedIdentities.add(key);
-          continue;
-        }
-        try {
-          await openTile(page, tile);
-        } catch (err) {
-          if (!(err instanceof StaleTileError)) throw err;
-          const attempts = (staleCounts.get(key) ?? 0) + 1;
-          staleCounts.set(key, attempts);
-          if (attempts >= RECONCILE_STALE_RETRY_LIMIT) {
-            visitedIdentities.add(key); // give up -- counts as "reached" for the tally below, not silently dropped
-            console.log(`[reconcile-scan] giving up on stale tile after ${attempts} attempts: ${err.message}`);
-          } else {
-            console.log(`[reconcile-scan] stale tile, will retry if seen again: ${err.message}`);
+      // Scroll the results only to make Google load the rest of the day's
+      // listing (the grid is virtualized and lists lazily). Nothing is opened.
+      // Stop after RECONCILE_FRUITLESS_SCROLLS consecutive scrolls that add
+      // neither a new media key nor a new tile; RECONCILE_MAX_SCROLLS_PER_DAY
+      // is a hard cap so a grid that never stops growing cannot loop forever.
+      const tileKeys = new Set((await collectResultTiles(page)).map(tileIdentity));
+      let fruitless = 0;
+      let scrolls = 0;
+      while (fruitless < RECONCILE_FRUITLESS_SCROLLS && scrolls < RECONCILE_MAX_SCROLLS_PER_DAY) {
+        const keysBefore = itemsByKey.size;
+        await scrollResults(page);
+        scrolls += 1;
+        await settle();
+        let newTiles = false;
+        for (const t of await collectResultTiles(page)) {
+          const k = tileIdentity(t);
+          if (!tileKeys.has(k)) {
+            tileKeys.add(k);
+            newTiles = true;
           }
-          continue;
         }
-        visitedIdentities.add(key);
-        openedAny = true;
-        // Wait for the viewer to actually open. Google sometimes opens the photo
-        // a beat after the click: reading the URL immediately saw the grid, the
-        // tile was skipped, and the late-opening viewer then hid the search box
-        // so the NEXT day's search timed out and killed the whole scan (live
-        // 2026-09-28, March 2026 died on the 7th in one run and the 11th in
-        // another).
-        await page.waitForURL(/\/photo\//, { timeout: 10000 }).catch(() => {});
-        const photoId = photoIdFromUrl(page.url());
-        // One line per opened tile, so a photo missing from candidates can be
-        // traced (never opened / opened a different photo / on phone / dup).
-        // A tile href ending in a different id than the viewer URL means the
-        // click opened a neighbour -- the flaky run-to-run misses of 2026-09-29
-        // had no trace to tell these apart.
-        const tileId = photoIdFromUrl(tile.href ?? '');
-        console.log(`[reconcile-scan] opened tile ${tileId} -> ${photoId}${tileId && photoId && tileId !== photoId ? ' MISMATCH' : ''}`);
-        if (photoId == null) {
-          await closeAnyOpenPhoto(page);
-          continue;
-        }
-        // The same photo renders as more than one tile in a day's grid (two grid
-        // sizes with different hrefs), so tile dedupe alone let every candidate
-        // be recorded twice. photoId is the real identity.
-        if (seenPhotoIds.has(photoId)) {
-          await closeAnyOpenPhoto(page);
-          continue;
-        }
-        // seenPhotoIds.add happens only AFTER a filename is read (below): a
-        // failed panel read must stay retryable when the photo's other tile
-        // (or a margin day) opens it again. Adding it here dropped
-        // EDAABD02-...jpg live 2026-09-29: first read came back with no
-        // filename, both later opens were then skipped as duplicates.
-        let text;
-        try {
-          // Use the text openInfoPanelOnce validated, never a second read: the
-          // panel can go blank between two reads, which dropped
-          // 92de8d96-...jpg live 2026-09-29 (a single-tile photo is never
-          // reopened, so "retry if reopened" never came).
-          text = await openInfoPanelOnce(page);
-        } catch (err) {
-          // openInfoPanelOnce THROWS (its documented "selector/UI drift" contract)
-          // when a photo's panel never yields a filename -- a deleted-from-Google or
-          // otherwise unreadable photo. One dead photo must NOT abort the whole
-          // month's scan: skip it (no candidate, no thumbnail) and move on, exactly
-          // like the trash pass treats an unreadable candidate. Must close the
-          // photo first -- an open viewer blocks the grid, so the NEXT tile's
-          // identity selector would count 0 and silently skip every tile after it.
-          console.log(`[reconcile-scan] skipping unreadable tile: ${err.message || err}`);
-          await closeAnyOpenPhoto(page);
-          continue;
-        }
-        const parsed = parsePanelText(text);
-        seenPhotoIds.add(photoId);
-        const googlePhoto = {
-          photoId,
-          filename: parsed.filename,
-          cameraModel: parseCameraModel(text),
-          captureDateMs: parsed.captureDateMs,
-          pixelWidth: parsed.pixelWidth,
-          pixelHeight: parsed.pixelHeight,
-        };
-        const { candidates } = diffGoogleVsManifest(manifest, [googlePhoto]);
-        if (candidates.length === 1) {
-          const buffer = await page.screenshot({ type: 'jpeg', quality: 50 });
-          store.saveThumb(month, photoId, buffer);
-          store.appendCandidate(month, { ...googlePhoto, status: 'candidate' });
-          console.log(`[reconcile-scan] candidate ${parsed.filename} (${photoId})`);
-        } else {
-          console.log(`[reconcile-scan] on phone ${parsed.filename} (${photoId})`);
-        }
-        await closeAnyOpenPhoto(page);
+        fruitless = itemsByKey.size > keysBefore || newTiles ? 0 : fruitless + 1;
       }
-      return openedAny;
-    };
-
-    // Walks one direction (scrollResultsUp or scrollResults) repeatedly,
-    // opening on-screen tiles at every step, until a step both opens nothing
-    // AND leaves the on-screen identity set unchanged -- i.e. this direction
-    // has genuinely run out of new ground to cover. Capped at
-    // MAX_SCROLL_ATTEMPTS_PER_DATE the same way the pre-scroll above is.
-    const walkDirection = async (scrollFn) => {
-      for (let attempts = 0; attempts < MAX_SCROLL_ATTEMPTS_PER_DATE; attempts++) {
-        const before = new Set((await collectResultTiles(page)).map(tileIdentity));
-        await scrollFn(page);
-        const openedNow = await openOnScreenTiles();
-        const after = new Set((await collectResultTiles(page)).map(tileIdentity));
-        const windowMoved = after.size !== before.size || [...after].some((id) => !before.has(id));
-        if (!openedNow && !windowMoved) break;
+      if (fruitless < RECONCILE_FRUITLESS_SCROLLS) {
+        loud(`[reconcile-scan] ${day}: still loading after ${scrolls} scrolls — stopped at the cap, listing may be incomplete`);
       }
-    };
+      const dayResponses = responsesParsed - responsesBefore;
+      console.log(`[reconcile-scan] ${day}: ${tileKeys.size} tiles, ${dayResponses} listing responses, ${itemsByKey.size} items so far`);
+      if (tileKeys.size > 0 && dayResponses === 0) {
+        loud(`[reconcile-scan] ${day}: tiles rendered but NO listing response was captured — Google may have served this day from its cache; this day is unverified`);
+      }
+    }
+  } finally {
+    page.off('response', onResponse);
+  }
 
-    await openOnScreenTiles(); // whatever's on-screen right where the pre-scroll above left off (the tail)
-    await walkDirection(scrollResultsUp); // recover everything the pre-scroll's descent unmounted
-    await walkDirection(scrollResults); // then sweep back down in case anything new surfaced going up
-
-    // Every identity planAriaMatches saw (`tiles`, the full pre-scroll set)
-    // must end up either planned (fast-pathed) or visited (opened, or given
-    // up on after RECONCILE_STALE_RETRY_LIMIT stale attempts) -- this should
-    // always print 0. A nonzero count here is the exact silent-loss failure
-    // mode this fix targets (see the 2026-09-29 evidence above): a day whose
-    // grid never gave the walk a route back to every tile it once saw.
-    const neverReached = tiles.filter((t) => {
-      const id = tileIdentity(t);
-      return !planned.has(id) && !visitedIdentities.has(id);
-    }).length;
-    console.log(`[reconcile-scan] ${day}: ${neverReached} tiles never reached`);
+  const inMonth = filterItemsToMonth([...itemsByKey.values()], month);
+  const candidates = diffListingVsManifest(manifest, inMonth);
+  console.log(`[reconcile-scan] ${itemsByKey.size} items seen, ${inMonth.length} in ${month}, ${manifest.length} on phone, ${candidates.length} candidates`);
+  for (const { thumbUrl, ...candidate } of candidates) {
+    // Capability URL fetched by plain Node, never through the browser.
+    try {
+      const res = await fetchImpl(`${thumbUrl}=w400`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      store.saveThumb(month, candidate.photoId, Buffer.from(await res.arrayBuffer()));
+    } catch (err) {
+      loud(`[reconcile-scan] thumbnail fetch failed for ${candidate.photoId}: ${err.message || err} — candidate kept without a thumbnail`);
+    }
+    store.appendCandidate(month, { ...candidate, status: 'candidate' });
+    console.log(`[reconcile-scan] candidate ${candidate.photoId} captured ${new Date(candidate.captureDateMs).toISOString()}`);
   }
   store.saveStatus(month, 'ready');
+}
+
+/**
+ * Safety gate for a filename-less (listing-scan) reconcile candidate: returns
+ * why it must NOT be trashed, or null when it may. `parsed` is
+ * parsePanelText of the re-opened photo. The panel's capture time has only
+ * minute resolution, hence the 60s tolerance.
+ */
+export function listingCandidateGateProblem(candidate, parsed, manifest) {
+  if (parsed.filename == null) return 'has no readable filename';
+  if (manifest == null) return 'has no manifest to re-check the filename against';
+  if (diffGoogleVsManifest(manifest, [{ filename: parsed.filename, cameraModel: null }]).candidates.length !== 1) {
+    return `re-read as "${parsed.filename}", which is on the phone`;
+  }
+  if (parsed.captureDateMs == null || Math.abs(parsed.captureDateMs - candidate.captureDateMs) >= 60000) {
+    return `capture time ${parsed.captureDateMs ?? '(none)'} disagrees with the stored ${candidate.captureDateMs}`;
+  }
+  if (!dimensionsAgree(parsed.pixelWidth, parsed.pixelHeight, candidate.pixelWidth, candidate.pixelHeight)) {
+    return `dimensions ${parsed.pixelWidth}x${parsed.pixelHeight} disagree with the stored ${candidate.pixelWidth}x${candidate.pixelHeight}`;
+  }
+  return null;
 }
 
 /**
@@ -3649,15 +3544,29 @@ export async function runReconcileTrash(page, month, store, { moveToTrash: trash
     // SAFETY GATE — re-verify identity before acting. Load-bearing: this is
     // what stops a stale candidate from trashing a DIFFERENT photo that now
     // lives at the same URL.
-    if (currentFilename == null || !filenamesAgree(currentFilename, candidate.filename)) {
-      loud(`[reconcile-trash] SAFETY: candidate ${candidate.filename} re-read as "${currentFilename ?? '(none)'}" — identity changed, marking needs_review instead of trashing`);
-      store.updateCandidateStatus(month, photoId, 'needs_review');
-      continue;
+    if (candidate.filename != null) {
+      if (currentFilename == null || !filenamesAgree(currentFilename, candidate.filename)) {
+        loud(`[reconcile-trash] SAFETY: candidate ${candidate.filename} re-read as "${currentFilename ?? '(none)'}" — identity changed, marking needs_review instead of trashing`);
+        store.updateCandidateStatus(month, photoId, 'needs_review');
+        continue;
+      }
+    } else {
+      // Listing-scan candidate: no stored filename. The photo must (a) yield a
+      // filename now, (b) STILL be absent from the manifest by that filename,
+      // and (c) agree with the stored capture time and dimensions, so a
+      // /photo/<id> that resolves to some other photo can never be trashed.
+      const parsed = parsePanelText(panelTextBefore);
+      const problem = listingCandidateGateProblem(candidate, parsed, store.loadManifest(month));
+      if (problem != null) {
+        loud(`[reconcile-trash] SAFETY: candidate ${photoId} ${problem} — marking needs_review instead of trashing`);
+        store.updateCandidateStatus(month, photoId, 'needs_review');
+        continue;
+      }
     }
 
     const { confirmed } = await trash(page, panelTextBefore, {
       matchedUrl,
-      expectedFilename: candidate.filename,
+      expectedFilename: candidate.filename ?? currentFilename,
       verifyByUrl: true,
     });
     store.updateCandidateStatus(month, photoId, confirmed ? 'trashed' : 'needs_review');

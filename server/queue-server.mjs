@@ -565,7 +565,9 @@ export function createApp({
         for (const c of candidates) {
           const view = {
             id: c.photoId,
-            filename: c.filename,
+            // Listing-scan candidates carry no filename; the app decodes a
+            // non-optional String, so a null would fail the whole response.
+            filename: c.filename ?? `Google Photo ${new Date(c.captureDateMs).toISOString().slice(0, 16).replace('T', ' ')} UTC`,
             cameraModel: c.cameraModel,
             captureDateMs: c.captureDateMs,
             pixelWidth: c.pixelWidth,

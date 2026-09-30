@@ -114,6 +114,51 @@ export function diffGoogleVsManifest(manifestAssets, googlePhotos) {
   return { candidates, bySection };
 }
 
+/** Two capture times agree when within this many ms (manifest dates are whole seconds; Google's are ms). */
+export const CAPTURE_TOLERANCE_MS = 2000;
+
+/** Do two width/height pairs describe the same picture (either orientation)? Nulls never agree. */
+export function dimensionsAgree(aW, aH, bW, bH) {
+  if ([aW, aH, bW, bH].some((v) => typeof v !== 'number')) return false;
+  return (aW === bW && aH === bH) || (aW === bH && aH === bW);
+}
+
+/**
+ * Pure diff for the passive-listing scan: items from Google's listing
+ * responses ({mediaKey, thumbUrl, height, width, captureMs, ...}) that have NO
+ * manifest entry with the same capture time (within CAPTURE_TOLERANCE_MS) and
+ * the same dimensions (either order). Duplicate mediaKeys are reported once.
+ * Returns candidate records in the store's shape, filename/cameraModel null
+ * (the listing does not carry them).
+ */
+export function diffListingVsManifest(manifestAssets, items, toleranceMs = CAPTURE_TOLERANCE_MS) {
+  const manifest = manifestAssets.map((a) => ({
+    ms: Date.parse(a.creationDate),
+    w: a.pixelWidth,
+    h: a.pixelHeight,
+  }));
+  const seen = new Set();
+  const candidates = [];
+  for (const item of items) {
+    if (seen.has(item.mediaKey)) continue;
+    seen.add(item.mediaKey);
+    const onPhone = manifest.some(
+      (m) => Math.abs(m.ms - item.captureMs) <= toleranceMs && dimensionsAgree(m.w, m.h, item.width, item.height)
+    );
+    if (onPhone) continue;
+    candidates.push({
+      photoId: item.mediaKey,
+      filename: null,
+      cameraModel: null,
+      captureDateMs: item.captureMs,
+      pixelWidth: item.width,
+      pixelHeight: item.height,
+      thumbUrl: item.thumbUrl,
+    });
+  }
+  return candidates;
+}
+
 const DEFAULT_BASE_DIR = join(homedir(), '.local', 'share', 'picnic', 'reconcile');
 
 /**

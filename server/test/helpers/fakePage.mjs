@@ -845,6 +845,8 @@ export function createFakePage(config = {}) {
     log: [],
     searchLog: [], // every date-search query actually submitted, in order
     activeQuery: null,
+    _responseHandlers: [],
+    scrollEmitCount: 0,
     _staleGridTiles: [], // ROUND 13: frozen pre-Enter grid snapshot, served while _staleGridCountdown > 0
     _staleGridCountdown: 0,
     openedAriaLabel: null,
@@ -963,8 +965,10 @@ export function createFakePage(config = {}) {
           page.openedAriaLabel = null;
           page.openedIdentity = null;
           page.revealedCount = 0;
+          page.scrollEmitCount = 0;
           page.windowStart = 0; // fresh grid for the new search -- mounted window resets too
           if (page.activeQuery != null) page.searchLog.push(page.activeQuery);
+          if (page.activeQuery != null) for (const r of page.config.listingResponses?.[page.activeQuery]?.onSearch ?? []) page.emitResponse(r);
         }
       },
       async type(text) {
@@ -1046,6 +1050,9 @@ export function createFakePage(config = {}) {
         }
         const reveals = page.config.scrollReveals[page.activeQuery] ?? [];
         if (page.revealedCount < reveals.length) page.revealedCount += 1;
+        // config.listingResponses[query].onScroll[n] is emitted on the (n+1)th downward scroll.
+        for (const r of page.config.listingResponses?.[page.activeQuery]?.onScroll?.[page.scrollEmitCount] ?? []) page.emitResponse(r);
+        page.scrollEmitCount += 1;
         // A downward scroll also advances the mounted window to keep
         // following the tail -- mirrors the live grid mounting newly-
         // scrolled-into-view tiles while unmounting ones that scrolled off
@@ -1057,6 +1064,22 @@ export function createFakePage(config = {}) {
           page.windowStart = Math.max(0, tilesInGrid(page).length - page.config.windowSize);
         }
       },
+    },
+    // page.on('response', fn) / page.off: Playwright's response events. A
+    // config.listingResponses entry is a body string (emitted as a
+    // batchexecute response) or {url, body} for other URLs/noise.
+    on(event, fn) {
+      if (event === 'response') page._responseHandlers.push(fn);
+    },
+    off(event, fn) {
+      if (event === 'response') page._responseHandlers = page._responseHandlers.filter((h) => h !== fn);
+    },
+    emitResponse(r) {
+      const { url, body } = typeof r === 'string'
+        ? { url: 'https://photos.google.com/_/PhotosUi/data/batchexecute?rpcids=EzkLib', body: r }
+        : r;
+      const response = { url: () => url, text: async () => body };
+      for (const h of page._responseHandlers) h(response);
     },
     locator(selector) {
       return new FakeLocator(page, selector);
