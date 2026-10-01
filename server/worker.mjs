@@ -3484,6 +3484,7 @@ export async function runReconcileScan(page, month, store, { fetchImpl = null } 
     store.appendCandidate(month, { ...candidate, status: 'candidate' });
     console.log(`[reconcile-scan] candidate ${candidate.photoId} captured ${new Date(candidate.captureDateMs).toISOString()}`);
   });
+  store.saveScanVersion(month);
   store.saveStatus(month, 'ready');
 }
 

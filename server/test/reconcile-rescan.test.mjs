@@ -99,6 +99,7 @@ test('re-POST with an unchanged manifest reuses a ready result instead of rescan
   const month = '2026-10';
   store.saveManifest(month, [ASSET_A, ASSET_B]);
   store.saveStatus(month, 'ready');
+  store.saveScanVersion(month);
   store.appendCandidate(month, { photoId: 'keep1', filename: 'G.HEIC', cameraModel: null, captureDateMs: 1, pixelWidth: 1, pixelHeight: 1, status: 'candidate' });
   const before = spawnCalls.length;
 
@@ -112,6 +113,20 @@ test('re-POST with an unchanged manifest reuses a ready result instead of rescan
   assert.equal(changed.status, 200);
   assert.equal(spawnCalls.length, before + 1, 'a changed manifest rescans');
   assert.equal(store.listCandidates(month).length, 0);
+});
+
+test('a ready result from an older scan method (no version stamp) is rescanned even with the same manifest', async () => {
+  const month = '2026-09';
+  store.saveManifest(month, [ASSET_A, ASSET_B]);
+  store.saveStatus(month, 'ready');
+  store.appendCandidate(month, { photoId: 'stale1', filename: 'G.HEIC', cameraModel: null, captureDateMs: 1, pixelWidth: 1, pixelHeight: 1, status: 'candidate' });
+  const before = spawnCalls.length;
+
+  const res = await post('/reconcile', { month, assets: [ASSET_A, ASSET_B] });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).status, 'scanning');
+  assert.equal(spawnCalls.length, before + 1, 'unstamped ready result must be rescanned');
+  assert.equal(store.listCandidates(month).length, 0, 'stale candidates must be cleared');
 });
 
 test('re-POST with the same manifest while its scan is running joins it (200), not 409', async () => {

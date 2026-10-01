@@ -170,6 +170,9 @@ const DEFAULT_BASE_DIR = join(homedir(), '.local', 'share', 'picnic', 'reconcile
  * On disk: <baseDir>/<month>/manifest.json, <baseDir>/<month>/candidates.jsonl,
  * <baseDir>/<month>/thumbs/<photoId>.jpg. `month` is the "YYYY-MM" string.
  */
+// Bump when the scan method changes so stale "ready" results are rescanned.
+export const SCAN_VERSION = 2;
+
 export class ReconcileStore {
   constructor(baseDir = DEFAULT_BASE_DIR) {
     this.baseDir = baseDir;
@@ -229,6 +232,21 @@ export class ReconcileStore {
   saveStatus(month, status) {
     mkdirSync(this.monthDir(month), { recursive: true });
     writeFileSync(this.statusPath(month), JSON.stringify(status));
+  }
+
+  /**
+   * Stamp a finished scan with SCAN_VERSION. A "ready" result from an older scan
+   * method (per-photo filename reads) must not be reused for an unchanged
+   * manifest, so the server only reuses results carrying the current stamp.
+   */
+  saveScanVersion(month) {
+    mkdirSync(this.monthDir(month), { recursive: true });
+    writeFileSync(join(this.monthDir(month), 'scan-version'), String(SCAN_VERSION));
+  }
+
+  hasCurrentScan(month) {
+    const p = join(this.monthDir(month), 'scan-version');
+    return existsSync(p) && readFileSync(p, 'utf8') === String(SCAN_VERSION);
   }
 
   /** null when no status has been written for this month yet. */

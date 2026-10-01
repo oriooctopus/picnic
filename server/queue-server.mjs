@@ -532,7 +532,7 @@ export function createApp({
         // appending to this month's candidates.jsonl would corrupt it, and
         // resetForRescan below would wipe candidates the live scan hasn't
         // finished writing yet.
-        // A scan takes ~30 min (every Google tile gets opened), and the app
+        // A scan takes under a minute, but the app
         // POSTs its manifest every time the review screen opens -- so an
         // unchanged manifest joins the running scan or reuses the finished
         // result instead of throwing it away.
@@ -542,7 +542,7 @@ export function createApp({
           if (sameManifest) return send(res, 200, { month, status: 'scanning', assetCount: assets.length, reused: true });
           return send(res, 409, { error: 'a scan is already running for this month', status: 'scanning' });
         }
-        if (sameManifest && reconcile.loadStatus(month) === 'ready') {
+        if (sameManifest && reconcile.loadStatus(month) === 'ready' && reconcile.hasCurrentScan(month)) {
           return send(res, 200, { month, status: 'ready', assetCount: assets.length, reused: true });
         }
         // A re-run must start clean -- see resetForRescan's doc comment for
