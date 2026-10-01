@@ -5,7 +5,7 @@
  * by length-prefixed lines; every JSON line looks like
  *   [["wrb.fr","<rpcid>","<JSON string>", ...], ["di",..], ...]
  * and the inner JSON string, parsed, contains item arrays shaped
- *   [mediaKey, [thumbUrl, height, width, ...], captureMs, dedupeStr, tzOffsetMs, uploadMs, ...]
+ *   [mediaKey, [thumbUrl, width, height, ...], captureMs, dedupeStr, tzOffsetMs, uploadMs, ...]
  * Verified live 2026-09-30 by a read-only probe. Filename and camera model are
  * NOT in these items.
  */
@@ -30,8 +30,8 @@ function walk(node, out) {
     out.push({
       mediaKey: node[0],
       thumbUrl: node[1][0],
-      height: node[1][1],
-      width: node[1][2],
+      width: node[1][1],
+      height: node[1][2],
       captureMs: node[2],
       tzOffsetMs: Number.isInteger(node[4]) ? node[4] : 0,
       uploadMs: Number.isInteger(node[5]) ? node[5] : null,
@@ -42,7 +42,7 @@ function walk(node, out) {
 }
 
 /**
- * Pure: a batchexecute response body -> [{mediaKey, thumbUrl, height, width,
+ * Pure: a batchexecute response body -> [{mediaKey, thumbUrl, width, height,
  * captureMs, tzOffsetMs, uploadMs}]. Lines that are not JSON (the `)]}'`
  * preamble, the length prefixes, blanks) are skipped -- they are the wire
  * format, not an error. A line that IS a JSON array but whose wrb.fr payload

@@ -577,12 +577,38 @@ export function createApp({
           };
           sections[sectionForCameraModel(c.cameraModel)].push(view);
         }
+        // Unified view: every photo of the month, tagged with where it lives.
+        // source 'both' = on phone AND in Google (phoneIndex = position in the
+        // posted manifest, which is PhotoKit bucket order); 'google' = only in
+        // Google; 'phone' = on the phone with no Google match (no thumbUrl,
+        // the app renders it from PhotoKit). Sorted by capture time.
+        const manifest = reconcile.loadManifest(month) ?? [];
+        const matched = reconcile.loadMatched(month);
+        const claimed = new Set(matched.map((m) => m.phoneIndex));
+        const thumb = (id) => `/reconcile/thumb/${month}/${id}`;
+        const items = [
+          ...matched.map((m) => ({
+            id: m.photoId, source: 'both', phoneIndex: m.phoneIndex, filename: m.filename,
+            captureDateMs: m.captureDateMs, pixelWidth: m.pixelWidth, pixelHeight: m.pixelHeight, thumbUrl: thumb(m.photoId),
+          })),
+          ...candidates.map((c) => ({
+            id: c.photoId, source: 'google', phoneIndex: null,
+            filename: c.filename ?? `Google Photo ${new Date(c.captureDateMs).toISOString().slice(0, 16).replace('T', ' ')} UTC`,
+            captureDateMs: c.captureDateMs, pixelWidth: c.pixelWidth, pixelHeight: c.pixelHeight, thumbUrl: thumb(c.photoId),
+          })),
+          ...manifest.flatMap((a, i) => (claimed.has(i) ? [] : [{
+            id: `phone-${i}`, source: 'phone', phoneIndex: i, filename: a.filename,
+            captureDateMs: Date.parse(a.creationDate), pixelWidth: a.pixelWidth, pixelHeight: a.pixelHeight, thumbUrl: null,
+          }])),
+        ].sort((a, b) => a.captureDateMs - b.captureDateMs);
         return send(res, 200, {
           month,
           status: reconcile.loadStatus(month) ?? 'scanning',
           // Non-null only after a worker crash (see attachReconcileExitHandler);
           // the app shows this instead of polling "scanning" forever.
           error: reconcile.loadError(month),
+          items,
+          counts: { both: matched.length, google: candidates.length, phone: items.length - matched.length - candidates.length },
           totalCandidates: candidates.length,
           sections: {
             iphone: { count: sections.iphone.length, candidates: sections.iphone },
@@ -597,13 +623,38 @@ export function createApp({
         const month = reconcileConfirmMatch[1];
         if (!/^\d{4}-\d{2}$/.test(month)) return send(res, 400, { error: 'month must be a "YYYY-MM" string' });
         const body = await readJsonBody(req);
-        const { ids } = body;
+        const { ids, phoneDeleted = [] } = body;
         if (!Array.isArray(ids) || ids.length === 0) {
           return send(res, 400, { error: 'ids must be a non-empty array' });
         }
+        if (!Array.isArray(phoneDeleted) || !phoneDeleted.every(Number.isInteger)) {
+          return send(res, 400, { error: 'phoneDeleted must be an array of manifest indexes' });
+        }
         const known = new Set(reconcile.listCandidates(month).map((c) => c.photoId));
-        if (!ids.every((id) => known.has(id))) {
-          return send(res, 404, { error: 'one or more ids do not match an existing candidate' });
+        const matchedById = new Map(reconcile.loadMatched(month).map((m) => [m.photoId, m]));
+        if (!ids.every((id) => known.has(id) || matchedById.has(id))) {
+          return send(res, 404, { error: 'one or more ids do not match an existing photo' });
+        }
+        // A photo that is still on the phone may only be trashed from Google
+        // after the app reports it deleted from the phone (the trash gate
+        // refuses anything whose filename is on the manifest).
+        const phoneGone = new Set(phoneDeleted);
+        const stillOnPhone = ids.filter((id) => matchedById.has(id) && !phoneGone.has(matchedById.get(id).phoneIndex));
+        if (stillOnPhone.length > 0) {
+          return send(res, 409, { error: 'these photos are still on the phone; delete them there first', ids: stillOnPhone });
+        }
+        if (phoneGone.size > 0) {
+          const manifest = reconcile.loadManifest(month) ?? [];
+          reconcile.saveManifest(month, manifest.filter((_, i) => !phoneGone.has(i)));
+        }
+        for (const id of ids) {
+          const m = matchedById.get(id);
+          if (m && !known.has(id)) {
+            reconcile.appendCandidate(month, {
+              photoId: m.photoId, filename: null, cameraModel: null, captureDateMs: m.captureDateMs,
+              pixelWidth: m.pixelWidth, pixelHeight: m.pixelHeight, status: 'candidate',
+            });
+          }
         }
         reconcile.confirm(month, ids);
         reconcile.saveStatus(month, 'confirming');

@@ -117,7 +117,7 @@ test('runReconcileScan: one month-wide search; only items with no manifest times
       { photoId: 'AF1QipCCC', filename: null, cameraModel: null, captureDateMs: T('2026-08-05T15:00:00.000Z'), pixelWidth: 3024, pixelHeight: 4032, status: 'candidate' }
     );
     assert.equal(sectionForCameraModel(c.cameraModel), 'other');
-    assert.ok(urls.every((u) => u.endsWith('=w400')) && urls.length === 4, 'thumbnails fetched from thumbUrl + =w400');
+    assert.ok(urls.every((u) => u.endsWith('=w400')) && urls.length === 6, 'thumbnails (4 candidates + 2 matched) fetched from thumbUrl + =w400');
     assert.ok(existsSync(store.thumbPath(month, 'AF1QipCCC')));
     assert.deepEqual(page.log.filter((l) => l.startsWith('type:')), ['type:August 2026'], 'exactly one search, for the month');
     assert.equal(page.log.filter((l) => l.startsWith('tile-click:')).length, 0, 'no photo was ever opened');

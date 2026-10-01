@@ -102,7 +102,7 @@ import {
   filenamesAgree,
   parseCameraModel,
 } from './lib/matcher.mjs';
-import { ReconcileStore, diffGoogleVsManifest, diffListingVsManifest, dimensionsAgree } from './lib/reconcile.mjs';
+import { ReconcileStore, diffGoogleVsManifest, matchListingToManifest, dimensionsAgree } from './lib/reconcile.mjs';
 import { parseListingBody, filterItemsToMonth, mergeItems } from './lib/listing.mjs';
 
 const QUEUE_PATH = process.env.PICNIC_QUEUE_PATH || join(homedir(), '.local/share/picnic/queue.jsonl');
@@ -3453,8 +3453,8 @@ export async function runReconcileScan(page, month, store, { fetchImpl = null } 
   }
 
   const inMonth = filterItemsToMonth([...itemsByKey.values()], month);
-  const candidates = diffListingVsManifest(manifest, inMonth);
-  console.log(`[reconcile-scan] ${itemsByKey.size} items seen, ${inMonth.length} in ${month}, ${manifest.length} on phone, ${candidates.length} candidates`);
+  const { candidates, matched } = matchListingToManifest(manifest, inMonth);
+  console.log(`[reconcile-scan] ${itemsByKey.size} items seen, ${inMonth.length} in ${month}, ${manifest.length} on phone, ${matched.length} matched, ${candidates.length} candidates`);
   // Thumbnails go through the browser's request context (Node's own fetch to
   // the CDN failed at network level, ~40s per attempt, live 2026-10-01), a few
   // seconds max each, THUMB_CONCURRENCY at a time.
@@ -3463,10 +3463,11 @@ export async function runReconcileScan(page, month, store, { fetchImpl = null } 
     return { ok: res.ok(), status: res.status(), arrayBuffer: () => res.body() };
   });
   const results = [];
-  for (let i = 0; i < candidates.length; i += THUMB_CONCURRENCY) {
+  const thumbTargets = [...candidates, ...matched];
+  for (let i = 0; i < thumbTargets.length; i += THUMB_CONCURRENCY) {
     results.push(
       ...(await Promise.all(
-        candidates.slice(i, i + THUMB_CONCURRENCY).map(async ({ thumbUrl, photoId }) => {
+        thumbTargets.slice(i, i + THUMB_CONCURRENCY).map(async ({ thumbUrl, photoId }) => {
           try {
             const res = await fetchThumb(`${thumbUrl}=w400`);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -3479,11 +3480,14 @@ export async function runReconcileScan(page, month, store, { fetchImpl = null } 
       ))
     );
   }
-  candidates.forEach(({ thumbUrl, ...candidate }, i) => {
-    if (results[i]) store.saveThumb(month, candidate.photoId, results[i]);
+  thumbTargets.forEach(({ photoId }, i) => {
+    if (results[i]) store.saveThumb(month, photoId, results[i]);
+  });
+  candidates.forEach(({ thumbUrl, ...candidate }) => {
     store.appendCandidate(month, { ...candidate, status: 'candidate' });
     console.log(`[reconcile-scan] candidate ${candidate.photoId} captured ${new Date(candidate.captureDateMs).toISOString()}`);
   });
+  store.saveMatched(month, matched.map(({ thumbUrl, ...m }) => m));
   store.saveScanVersion(month);
   store.saveStatus(month, 'ready');
 }

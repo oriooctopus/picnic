@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseListingBody, filterItemsToMonth, mergeItems, localMonthOf } from '../lib/listing.mjs';
-import { diffListingVsManifest, dimensionsAgree } from '../lib/reconcile.mjs';
+import { diffListingVsManifest, matchListingToManifest, dimensionsAgree } from '../lib/reconcile.mjs';
 import { item, body, listingBody } from './helpers/listingFixture.mjs';
 
 const T = (iso) => Date.parse(iso);
@@ -102,4 +102,34 @@ test('diffListingVsManifest: same time but different dimensions is a candidate; 
 test('diffListingVsManifest: a media key duplicated across responses yields one candidate', () => {
   const dup = item('AF1QipA', T('2026-03-13T21:00:00Z'));
   assert.equal(diffListingVsManifest([], [...items(dup), ...items(dup)]).length, 1);
+});
+
+test('parseListingBody: item[1] is [url, WIDTH, HEIGHT] (live: all 109 matched phone items had swapped dims when read as height,width)', () => {
+  const [parsed] = items(item('AF1QipA', 1, { w: 1170, h: 1111 }));
+  assert.equal(parsed.width, 1170);
+  assert.equal(parsed.height, 1111);
+});
+
+test('matchListingToManifest: splits matched (with phone index + filename), Google-only candidates and phone-only indexes', () => {
+  const manifest = [
+    { filename: 'IMG_1.HEIC', creationDate: '2026-03-13T20:00:00Z', pixelWidth: 3024, pixelHeight: 4032 },
+    { filename: 'IMG_2.HEIC', creationDate: '2026-03-13T21:00:00Z', pixelWidth: 3024, pixelHeight: 4032 },
+    { filename: 'IMG_3.HEIC', creationDate: '2026-03-13T22:00:00Z', pixelWidth: 3024, pixelHeight: 4032 },
+  ];
+  const out = matchListingToManifest(manifest, items(
+    item('AF1QipB', T('2026-03-13T21:00:00Z')),
+    item('AF1QipA', T('2026-03-13T20:00:00Z')),
+    item('AF1QipZ', T('2026-03-13T23:30:00Z')),
+  ));
+  assert.deepEqual(out.matched.map((m) => [m.photoId, m.phoneIndex, m.filename]), [['AF1QipB', 1, 'IMG_2.HEIC'], ['AF1QipA', 0, 'IMG_1.HEIC']]);
+  assert.deepEqual(out.candidates.map((c) => c.photoId), ['AF1QipZ']);
+  assert.deepEqual(out.phoneOnly, [2]);
+});
+
+test('matchListingToManifest: two Google copies of one phone photo claim distinct entries when the phone has both', () => {
+  const at = '2026-03-13T20:00:00Z';
+  const manifest = [0, 1].map((n) => ({ filename: `IMG_${n}.HEIC`, creationDate: at, pixelWidth: 3024, pixelHeight: 4032 }));
+  const out = matchListingToManifest(manifest, items(item('AF1QipA', T(at)), item('AF1QipB', T(at))));
+  assert.deepEqual(out.matched.map((m) => m.phoneIndex), [0, 1]);
+  assert.deepEqual(out.phoneOnly, []);
 });

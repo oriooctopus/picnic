@@ -124,28 +124,51 @@ export function dimensionsAgree(aW, aH, bW, bH) {
 }
 
 /**
- * Pure diff for the passive-listing scan: items from Google's listing
- * responses ({mediaKey, thumbUrl, height, width, captureMs, ...}) that have NO
- * manifest entry with the same capture time (within CAPTURE_TOLERANCE_MS) and
- * the same dimensions (either order). Duplicate mediaKeys are reported once.
- * Returns candidate records in the store's shape, filename/cameraModel null
- * (the listing does not carry them).
+ * Pure match of the passive-listing scan against the phone manifest. An item
+ * (from Google's listing responses: {mediaKey, thumbUrl, width, height,
+ * captureMs, ...}) is ON THE PHONE when some manifest entry has the same
+ * capture time (within CAPTURE_TOLERANCE_MS) and the same dimensions (either
+ * order). Duplicate mediaKeys are reported once. Returns:
+ *   candidates: items with no manifest match, in the store's candidate shape
+ *     (filename/cameraModel null, the listing does not carry them) + thumbUrl
+ *   matched:    items with a match: {photoId, phoneIndex, filename (the
+ *     phone's), captureDateMs, pixelWidth, pixelHeight, thumbUrl}. phoneIndex
+ *     is the manifest position; the first unclaimed matching entry is
+ *     preferred so two Google items never share a phone photo unless the
+ *     phone has fewer copies than Google does.
+ *   phoneOnly:  manifest indexes no Google item matched.
  */
-export function diffListingVsManifest(manifestAssets, items, toleranceMs = CAPTURE_TOLERANCE_MS) {
+export function matchListingToManifest(manifestAssets, items, toleranceMs = CAPTURE_TOLERANCE_MS) {
   const manifest = manifestAssets.map((a) => ({
     ms: Date.parse(a.creationDate),
     w: a.pixelWidth,
     h: a.pixelHeight,
   }));
+  const claimed = new Set();
   const seen = new Set();
   const candidates = [];
+  const matched = [];
   for (const item of items) {
     if (seen.has(item.mediaKey)) continue;
     seen.add(item.mediaKey);
-    const onPhone = manifest.some(
-      (m) => Math.abs(m.ms - item.captureMs) <= toleranceMs && dimensionsAgree(m.w, m.h, item.width, item.height)
-    );
-    if (onPhone) continue;
+    const hits = [];
+    manifest.forEach((m, i) => {
+      if (Math.abs(m.ms - item.captureMs) <= toleranceMs && dimensionsAgree(m.w, m.h, item.width, item.height)) hits.push(i);
+    });
+    if (hits.length > 0) {
+      const phoneIndex = hits.find((i) => !claimed.has(i)) ?? hits[0];
+      claimed.add(phoneIndex);
+      matched.push({
+        photoId: item.mediaKey,
+        phoneIndex,
+        filename: manifestAssets[phoneIndex].filename,
+        captureDateMs: item.captureMs,
+        pixelWidth: item.width,
+        pixelHeight: item.height,
+        thumbUrl: item.thumbUrl,
+      });
+      continue;
+    }
     candidates.push({
       photoId: item.mediaKey,
       filename: null,
@@ -156,7 +179,13 @@ export function diffListingVsManifest(manifestAssets, items, toleranceMs = CAPTU
       thumbUrl: item.thumbUrl,
     });
   }
-  return candidates;
+  const phoneOnly = manifest.map((_, i) => i).filter((i) => !claimed.has(i));
+  return { candidates, matched, phoneOnly };
+}
+
+/** Candidates only (Google items with no phone match); see matchListingToManifest. */
+export function diffListingVsManifest(manifestAssets, items, toleranceMs = CAPTURE_TOLERANCE_MS) {
+  return matchListingToManifest(manifestAssets, items, toleranceMs).candidates;
 }
 
 const DEFAULT_BASE_DIR = join(homedir(), '.local', 'share', 'picnic', 'reconcile');
@@ -300,6 +329,22 @@ export class ReconcileStore {
     return this.listCandidates(month);
   }
 
+  matchedPath(month) {
+    return join(this.monthDir(month), 'matched.json');
+  }
+
+  /** Google photos that ARE on the phone: [{photoId, phoneIndex, filename, captureDateMs, pixelWidth, pixelHeight}]. */
+  saveMatched(month, matched) {
+    mkdirSync(this.monthDir(month), { recursive: true });
+    writeFileSync(this.matchedPath(month), JSON.stringify(matched));
+  }
+
+  loadMatched(month) {
+    const p = this.matchedPath(month);
+    if (!existsSync(p)) return [];
+    return JSON.parse(readFileSync(p, 'utf8'));
+  }
+
   /** Write a candidate thumbnail and return its path. */
   saveThumb(month, photoId, buffer) {
     mkdirSync(this.thumbsDir(month), { recursive: true });
@@ -337,6 +382,7 @@ export class ReconcileStore {
    */
   resetForRescan(month) {
     rmSync(this.candidatesPath(month), { force: true });
+    rmSync(this.matchedPath(month), { force: true });
     rmSync(this.thumbsDir(month), { recursive: true, force: true });
     rmSync(this.errorPath(month), { force: true });
   }

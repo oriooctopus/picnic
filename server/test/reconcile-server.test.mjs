@@ -275,3 +275,46 @@ test('end to end on ONE store: POST confirm -> queued -> real trash pass -> tras
   assert.ok(page.trashedIdentities.has('e2eA'));
   assert.ok(!page.trashedIdentities.has('e2eB'));
 });
+
+test('GET /reconcile/:month returns the unified items: both + google + phone, tagged and time-sorted', async () => {
+  const m = '2026-05';
+  store.saveManifest(m, [
+    manifestAsset('IMG_A.HEIC', { creationDate: '2026-05-01T10:00:00.000Z' }),
+    manifestAsset('IMG_B.HEIC', { creationDate: '2026-05-01T12:00:00.000Z' }),
+  ]);
+  store.saveMatched(m, [{ photoId: 'gid-a', phoneIndex: 0, filename: 'IMG_A.HEIC', captureDateMs: Date.parse('2026-05-01T10:00:00.000Z'), pixelWidth: 2316, pixelHeight: 3088 }]);
+  store.appendCandidate(m, candidate('gid-only', null, null, { captureDateMs: Date.parse('2026-05-01T11:00:00.000Z') }));
+  store.saveStatus(m, 'ready');
+  const body = await (await get(`/reconcile/${m}`)).json();
+  assert.deepEqual(body.items.map((i) => [i.id, i.source, i.phoneIndex, i.thumbUrl]), [
+    ['gid-a', 'both', 0, `/reconcile/thumb/${m}/gid-a`],
+    ['gid-only', 'google', null, `/reconcile/thumb/${m}/gid-only`],
+    ['phone-1', 'phone', 1, null],
+  ]);
+  assert.deepEqual(body.counts, { both: 1, google: 1, phone: 1 });
+  assert.equal(body.items[0].filename, 'IMG_A.HEIC');
+});
+
+test('POST confirm for a matched photo: 409 until the app reports it deleted from the phone; then it leaves the manifest and becomes a queued candidate', async () => {
+  const m = '2026-06';
+  store.saveManifest(m, [manifestAsset('IMG_A.HEIC'), manifestAsset('IMG_B.HEIC')]);
+  store.saveMatched(m, [{ photoId: 'gid-a', phoneIndex: 0, filename: 'IMG_A.HEIC', captureDateMs: 5, pixelWidth: 2316, pixelHeight: 3088 }]);
+  store.saveStatus(m, 'ready');
+  const refused = await post(`/reconcile/${m}/confirm`, { ids: ['gid-a'] });
+  assert.equal(refused.status, 409);
+  assert.deepEqual((await refused.json()).ids, ['gid-a']);
+  assert.equal(store.listCandidates(m).length, 0, 'nothing queued on refusal');
+  assert.equal(store.loadManifest(m).length, 2, 'manifest untouched on refusal');
+
+  const wrongIndex = await post(`/reconcile/${m}/confirm`, { ids: ['gid-a'], phoneDeleted: [1] });
+  assert.equal(wrongIndex.status, 409);
+
+  const ok = await post(`/reconcile/${m}/confirm`, { ids: ['gid-a'], phoneDeleted: [0] });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(store.loadManifest(m).map((a) => a.filename), ['IMG_B.HEIC']);
+  const c = store.listCandidates(m).find((x) => x.photoId === 'gid-a');
+  assert.equal(c.status, 'queued');
+  assert.equal(c.filename, null);
+  assert.deepEqual(spawnCalls.at(-1), { mode: 'trash', month: m });
+  assert.equal((await post(`/reconcile/${m}/confirm`, { ids: ['gid-a'], phoneDeleted: ['x'] })).status, 400);
+});

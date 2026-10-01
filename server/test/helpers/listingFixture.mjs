@@ -7,7 +7,7 @@
 export function item(mediaKey, captureMs, { w = 3024, h = 4032, tz = -21600000, upload = 1777517769332 } = {}) {
   return [
     mediaKey,
-    [`https://lh3.googleusercontent.com/synthetic/${mediaKey}`, h, w, null, null, null, null, null, [null, null, 14], [1]],
+    [`https://lh3.googleusercontent.com/synthetic/${mediaKey}`, w, h, null, null, null, null, null, [null, null, 14], [1]],
     captureMs,
     'dedupe-' + mediaKey,
     tz,
