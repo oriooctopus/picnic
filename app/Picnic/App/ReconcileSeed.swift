@@ -8,9 +8,8 @@ import Foundation
 /// The real review screen POSTs a manifest and fetches candidates from the
 /// mirror server; CI has no server, so the seeded UI test launches with
 /// `--reconcile-seed` and this returns a fixed response instead — 3
-/// "from this iPhone" candidates (cameraModel set, hence pre-selected) and 2
-/// "other sources" candidates (cameraModel nil, hence pre-kept), the same
-/// split the Option A grid renders for real data. Thumbnails are solid colors
+/// photos on the phone AND in Google, 2 Google-only and 1 phone-only, all
+/// starting kept, the same unified grid the real data renders. Thumbnails are solid colors
 /// (see thumbnailColor(for:)) — never a network fetch — so the grid renders
 /// deterministic tiles with no flaky image loads.
 enum ReconcileSeed {
@@ -29,61 +28,51 @@ enum ReconcileSeed {
     }
 
     static func scanningResponse(for month: String) -> ReconcileResponse {
-        ReconcileResponse(
-            month: month,
-            status: "scanning",
-            totalCandidates: 7,
-            sections: ReconcileSections(
-                iphone: ReconcileSection(count: 0, candidates: []),
-                other: ReconcileSection(count: 0, candidates: [])
-            )
-        )
+        ReconcileResponse(month: month, status: "scanning", totalCandidates: 7)
     }
 
     static func response(for month: String) -> ReconcileResponse {
         ReconcileResponse(
             month: month,
             status: "ready",
-            totalCandidates: iphoneCandidates.count + otherCandidates.count,
-            sections: ReconcileSections(
-                iphone: ReconcileSection(count: iphoneCandidates.count, candidates: iphoneCandidates),
-                other: ReconcileSection(count: otherCandidates.count, candidates: otherCandidates)
-            )
+            totalCandidates: googleOnlyItems.count,
+            items: bothItems + googleOnlyItems + phoneOnlyItems
         )
     }
 
-    static let iphoneCandidates: [ReconcileCandidate] = (1...3).map { i in
-        ReconcileCandidate(
-            id: "seed-iphone-\(i)",
-            filename: "IMG_\(i).HEIC",
-            cameraModel: "Apple iPhone 13 Pro",
+    private static func item(
+        _ id: String, _ source: ReconcileItem.Source, phoneIndex: Int?, filename: String, hasThumb: Bool
+    ) -> ReconcileItem {
+        ReconcileItem(
+            id: id,
+            source: source,
+            phoneIndex: phoneIndex,
+            filename: filename,
             captureDateMs: 1_741_986_420_000,
             pixelWidth: 2316,
             pixelHeight: 3088,
-            thumbUrl: "/reconcile/thumb/seed/iphone-\(i)",
-            status: "candidate"
+            thumbUrl: hasThumb ? "/reconcile/thumb/seed/\(id)" : nil
         )
     }
 
-    static let otherCandidates: [ReconcileCandidate] = (1...2).map { i in
-        ReconcileCandidate(
-            id: "seed-other-\(i)",
-            filename: "IMG_\(i + 10).JPG",
-            cameraModel: nil,
-            captureDateMs: 1_741_986_420_000,
-            pixelWidth: 2316,
-            pixelHeight: 3088,
-            thumbUrl: "/reconcile/thumb/seed/other-\(i)",
-            status: "candidate"
-        )
+    static let bothItems: [ReconcileItem] = (1...3).map { i in
+        item("seed-both-\(i)", .both, phoneIndex: i - 1, filename: "IMG_\(i).HEIC", hasThumb: true)
     }
+
+    static let googleOnlyItems: [ReconcileItem] = (1...2).map { i in
+        item("seed-google-\(i)", .google, phoneIndex: nil, filename: "Google Photo \(i)", hasThumb: true)
+    }
+
+    static let phoneOnlyItems: [ReconcileItem] = [
+        item("phone-3", .phone, phoneIndex: 3, filename: "IMG_4.HEIC", hasThumb: false),
+    ]
 
     /// Deterministic solid color per candidate so the seeded grid renders
     /// real-looking tiles with no network and no flaky loads. Derived from
     /// the candidate id via a plain unicode-scalar checksum — NOT
     /// `hashValue`, which is seeded per-launch and would reshuffle the colors
     /// between runs, breaking any visual-walk pixel baseline.
-    static func thumbnailColor(for candidate: ReconcileCandidate) -> Color {
+    static func thumbnailColor(for candidate: ReconcileItem) -> Color {
         let palette: [Color] = [.red, .orange, .yellow, .green, .teal, .blue, .indigo, .purple, .pink]
         let checksum = candidate.id.unicodeScalars.reduce(0) { $0 + Int($1.value) }
         return palette[checksum % palette.count]

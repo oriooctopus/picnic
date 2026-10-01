@@ -8,14 +8,34 @@ import Combine
 /// and the callers are this VM's two init sites.
 typealias ReconcileCandidateProvider = (String) async throws -> ReconcileResponse
 
-/// Which of the two review sections a select-all/none action targets.
-enum ReconcileSectionKind {
-    case iphone
-    case other
+/// What a confirmed review will actually do. Derived from the keep set; the
+/// confirm dialog shows these exact counts and `confirm` executes exactly this.
+struct ReconcileDeletionPlan: Equatable {
+    /// (manifest index, filename) of every phone photo to delete. The filename
+    /// lets the deleter re-check the PHAsset at that index before deleting.
+    let phone: [(index: Int, filename: String)]
+    /// Google media keys to move to Google trash.
+    let googleIds: [String]
+
+    var isEmpty: Bool { phone.isEmpty && googleIds.isEmpty }
+
+    static func == (lhs: ReconcileDeletionPlan, rhs: ReconcileDeletionPlan) -> Bool {
+        lhs.googleIds == rhs.googleIds && lhs.phone.map(\.index) == rhs.phone.map(\.index)
+    }
 }
 
-/// Drives the "Clean up Google" review screen: loads candidates, holds the
-/// per-candidate selection, and runs the confirm → poll-results flow.
+/// Thrown by the phone deleter when an asset no longer matches the manifest
+/// entry the server matched it to -- nothing is deleted in that case.
+struct ReconcilePhoneMismatch: Error, CustomStringConvertible {
+    let index: Int
+    let expected: String
+    var description: String { "Phone photo #\(index) is no longer \(expected); library changed since the scan." }
+}
+
+/// Drives the unified "Clean up" review screen: loads every photo of the month
+/// (on phone, in Google, or both), holds the KEEP selection (everything starts
+/// kept, so doing nothing deletes nothing), and runs the delete flow: phone
+/// first, then Google trash, then poll results.
 @MainActor
 final class ReconcileViewModel: ObservableObject {
     enum State: Equatable {
@@ -42,8 +62,13 @@ final class ReconcileViewModel: ObservableObject {
     @Published private(set) var state: State = .loading
     @Published private(set) var response: ReconcileResponse?
     @Published private(set) var results: ReconcileResults?
-    /// Candidate ids the user wants moved to Google trash.
-    @Published private(set) var selectedIds: Set<String> = []
+    /// Ids of photos the user is KEEPING. Starts as every item; unselected = delete.
+    @Published private(set) var keepIds: Set<String> = []
+    /// Shown on the grid after a confirm that did not run (iOS prompt declined
+    /// or the library changed). Nothing was trashed from Google in that case.
+    @Published private(set) var actionMessage: String?
+    /// Phone photos actually deleted by the last confirm, for the results screen.
+    @Published private(set) var phoneDeletedCount: Int = 0
     /// Number of on-phone assets in the manifest, for the header summary line.
     @Published private(set) var phoneAssetCount: Int = 0
 
@@ -55,12 +80,37 @@ final class ReconcileViewModel: ObservableObject {
         self.candidateProvider = candidateProvider
     }
 
-    var selectedCount: Int { selectedIds.count }
-    var iphoneCandidates: [ReconcileCandidate] { response?.sections.iphone.candidates ?? [] }
-    var otherCandidates: [ReconcileCandidate] { response?.sections.other.candidates ?? [] }
+    var items: [ReconcileItem] { response?.items ?? [] }
+    var keepCount: Int { items.filter { keepIds.contains($0.id) }.count }
+    var deleteCount: Int { items.count - keepCount }
 
-    /// The "only in Google" count, for the header summary line.
-    var onlyInGoogleCount: Int { response?.totalCandidates ?? 0 }
+    /// Header counts by where each photo lives.
+    func count(_ source: ReconcileItem.Source) -> Int { items.filter { $0.source == source }.count }
+
+    /// The exact set of deletions a confirm would run.
+    ///
+    /// Phone: every unselected `both`/`phone` item, except that a phone photo
+    /// shared by several items (two Google copies of one phone photo) is only
+    /// deleted when ALL of them are unselected. Google: every unselected
+    /// `both`/`google` item, EXCEPT a `both` item whose phone copy is not being
+    /// deleted (the server's trash gate refuses photos still on the phone, so
+    /// we never ask for them). `phone` items have no Google side.
+    var deletePlan: ReconcileDeletionPlan {
+        let doomed = items.filter { !keepIds.contains($0.id) }
+        var phoneByIndex: [Int: String] = [:]
+        for item in doomed where item.onPhone {
+            guard let index = item.phoneIndex else { continue }
+            let sharedAndKept = items.contains { $0.phoneIndex == index && keepIds.contains($0.id) }
+            if !sharedAndKept { phoneByIndex[index] = item.filename }
+        }
+        let google = doomed.filter { item in
+            guard item.inGoogle else { return false }
+            if let index = item.phoneIndex { return phoneByIndex[index] != nil }
+            return true
+        }.map(\.id)
+        let phone = phoneByIndex.keys.sorted().map { (index: $0, filename: phoneByIndex[$0]!) }
+        return ReconcileDeletionPlan(phone: phone, googleIds: google)
+    }
 
     // MARK: Load
 
@@ -101,11 +151,9 @@ final class ReconcileViewModel: ObservableObject {
             switch fetched.status {
             case "ready":
                 response = fetched
-                // iPhone section pre-selected: those match photos still on
-                // this phone, so trashing them is the safe default. Other
-                // section pre-kept: probably not from this iPhone, don't
-                // trash without review. Mirrors the design's Option A copy.
-                selectedIds = Set(fetched.sections.iphone.candidates.map(\.id))
+                // Everything starts KEPT: doing nothing deletes nothing.
+                keepIds = Set(fetched.items.map(\.id))
+                actionMessage = nil
                 state = .loaded
                 return
             case "failed":
@@ -123,52 +171,64 @@ final class ReconcileViewModel: ObservableObject {
 
     // MARK: Selection
 
-    func toggle(_ candidate: ReconcileCandidate) {
-        if selectedIds.contains(candidate.id) {
-            selectedIds.remove(candidate.id)
+    func toggle(_ item: ReconcileItem) {
+        if keepIds.contains(item.id) {
+            keepIds.remove(item.id)
         } else {
-            selectedIds.insert(candidate.id)
+            keepIds.insert(item.id)
         }
     }
 
-    func selectAll(in section: ReconcileSectionKind) {
-        for candidate in candidates(in: section) {
-            selectedIds.insert(candidate.id)
-        }
+    func keepAll() {
+        keepIds = Set(items.map(\.id))
     }
 
-    func deselectAll(in section: ReconcileSectionKind) {
-        for candidate in candidates(in: section) {
-            selectedIds.remove(candidate.id)
-        }
-    }
-
-    func isSelected(_ candidate: ReconcileCandidate) -> Bool {
-        selectedIds.contains(candidate.id)
-    }
-
-    private func candidates(in section: ReconcileSectionKind) -> [ReconcileCandidate] {
-        guard let response else { return [] }
-        switch section {
-        case .iphone: return response.sections.iphone.candidates
-        case .other: return response.sections.other.candidates
-        }
+    func isKept(_ item: ReconcileItem) -> Bool {
+        keepIds.contains(item.id)
     }
 
     // MARK: Confirm
 
-    /// Sends the selected ids to the server and polls results until done.
-    func confirm() async {
-        let ids = Array(selectedIds)
-        guard !ids.isEmpty, state != .confirming else { return }
+    /// Runs the confirmed plan. ORDER MATTERS:
+    ///   1. Phone first, as ONE PhotoKit batch (`deletePhone`), so iOS shows a
+    ///      single system prompt and deleted photos land in Recently Deleted.
+    ///      If the user declines it (or the library changed), the call throws,
+    ///      NOTHING has been deleted anywhere, and we return to the grid with
+    ///      `actionMessage` set -- Google copies are never trashed for photos
+    ///      that are still on the phone.
+    ///   2. Then the Google trash request with the phone indexes just deleted,
+    ///      which the server needs because its trash gate refuses photos that
+    ///      are still on the phone.
+    /// If step 2 fails after step 1 succeeded, the phone photos are gone but
+    /// their Google copies remain; the error says so, and a rescan will list
+    /// them as Google-only.
+    func confirm(deletePhone: ([(index: Int, filename: String)]) async throws -> Void) async {
+        let plan = deletePlan
+        guard !plan.isEmpty, state != .confirming else { return }
         state = .confirming
+        actionMessage = nil
+        if !plan.phone.isEmpty {
+            do {
+                try await deletePhone(plan.phone)
+            } catch {
+                actionMessage = "Nothing was deleted. The phone deletion did not go through (\(error)); Google copies were left alone."
+                state = .loaded
+                return
+            }
+        }
+        phoneDeletedCount = plan.phone.count
+        guard !plan.googleIds.isEmpty else {
+            results = ReconcileResults(month: monthKey, done: true, results: [])
+            state = .results
+            return
+        }
         do {
-            _ = try await ReconcileClient.confirm(month: monthKey, ids: ids)
-            let final = try await pollResults()
-            results = final
+            _ = try await ReconcileClient.confirm(month: monthKey, ids: plan.googleIds, phoneDeleted: plan.phone.map(\.index))
+            results = try await pollResults()
             state = .results
         } catch {
-            state = .failed("\(error)")
+            let prefix = plan.phone.isEmpty ? "" : "Deleted \(plan.phone.count) from the phone, but "
+            state = .failed("\(prefix)moving to Google trash failed: \(error)")
         }
     }
 

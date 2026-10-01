@@ -1,9 +1,11 @@
 import SwiftUI
+import Photos
 
-/// The "Clean up Google" review screen — Option A of the reconcile feature.
-/// Long-pressing a month card opens it; the screen POSTs that month's
-/// manifest and shows Google photos NOT on the phone, split into two sections
-/// so the user can trash the "only in Google" set with a single confirm.
+/// The "Clean up" review screen: ONE grid with every photo of the month, from
+/// the phone and from Google Photos, each tagged with where it lives. Every
+/// photo starts selected (= Keep); tapping unselects it (= Delete). Nothing
+/// happens until the confirm dialog, which shows the exact counts. Long-pressing
+/// a month card opens it; the screen POSTs that month's manifest first.
 ///
 /// Presented via AppState.reconcileMonth (a second `.fullScreenCover` in
 /// MyLifeView), mirroring how `selectedMonth` presents the deck.
@@ -12,7 +14,8 @@ struct ReconcileReviewView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel: ReconcileViewModel
-    @State private var enlargedCandidate: ReconcileCandidate?
+    @State private var enlargedItem: ReconcileItem?
+    @State private var showConfirm = false
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 4)
 
@@ -65,7 +68,7 @@ struct ReconcileReviewView: View {
                         if viewModel.state == .confirming {
                             ZStack {
                                 Color.black.opacity(0.5).ignoresSafeArea()
-                                ProgressView("Moving to trash…").tint(.white)
+                                ProgressView("Deleting…").tint(.white)
                             }
                         }
                     }
@@ -75,7 +78,7 @@ struct ReconcileReviewView: View {
             await viewModel.load(manifestAssets: appState.photoLibrary.reconcileManifest(for: month))
         }
         .overlay {
-            if let enlarged = enlargedCandidate {
+            if let enlarged = enlargedItem {
                 enlargedOverlay(enlarged)
             }
         }
@@ -111,36 +114,55 @@ struct ReconcileReviewView: View {
         VStack(spacing: 0) {
             header
             ScrollView {
-                // Plain VStack, not LazyVStack: the two section headers must
-                // both be present in the accessibility tree without scrolling
-                // (the seeded UI test asserts both exist), and a candidate
-                // list is small enough that eager layout is fine.
-                VStack(alignment: .leading, spacing: 24) {
-                    section(
-                        kind: .iphone,
-                        title: "From this iPhone — likely already backed up",
-                        subtitle: "These match photos you took on this phone. Tap a photo to keep it instead of trashing it.",
-                        candidates: viewModel.iphoneCandidates,
-                        accent: .white
-                    )
-                    section(
-                        kind: .other,
-                        title: "Probably not from this iPhone",
-                        subtitle: "Other camera, WhatsApp, or shared with you. Not preselected — review before including.",
-                        candidates: viewModel.otherCandidates,
-                        accent: Color(red: 1.0, green: 0.831, blue: 0.475) // #ffd479
-                    )
+                LazyVGrid(columns: columns, spacing: 6) {
+                    ForEach(viewModel.items) { item in
+                        itemTile(item)
+                    }
                 }
+                .padding(.horizontal)
                 .padding(.vertical, 12)
             }
             footer
         }
+        .confirmationDialog(
+            "Delete \(plan.phone.count) from phone, \(plan.googleIds.count) from Google?",
+            isPresented: $showConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete \(plan.phone.count) from phone, \(plan.googleIds.count) from Google", role: .destructive) {
+                Task { await viewModel.confirm(deletePhone: deletePhoneAssets) }
+            }
+            .accessibilityIdentifier("reconcile.confirmDelete")
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Phone photos are deleted first (iOS asks you to confirm and keeps them in Recently Deleted). Google photos go to Google Photos trash. Photos marked Keep are not touched.")
+        }
+    }
+
+    private var plan: ReconcileDeletionPlan { viewModel.deletePlan }
+
+    /// Deletes the phone photos at `targets` in ONE PhotoKit batch (one iOS
+    /// prompt). Re-checks each asset's filename against what the server
+    /// matched, so a library that changed since the scan deletes nothing.
+    private func deletePhoneAssets(_ targets: [(index: Int, filename: String)]) async throws {
+        var assets: [PHAsset] = []
+        for target in targets {
+            guard month.assets.indices.contains(target.index),
+                  appState.photoLibrary.originalFilename(for: month.assets[target.index]) == target.filename else {
+                throw ReconcilePhoneMismatch(index: target.index, expected: target.filename)
+            }
+            assets.append(month.assets[target.index])
+        }
+        #if DEBUG
+        if ReconcileSeed.isEnabled { return } // seeded UI test: never touch the real library
+        #endif
+        try await appState.photoLibrary.deleteAssets(assets)
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Google Photos cleanup")
+                Text("Clean up \(month.title)")
                     .font(.title2.bold())
                     .foregroundStyle(.white)
                 Spacer()
@@ -155,168 +177,162 @@ struct ReconcileReviewView: View {
                 }
                 .accessibilityIdentifier("reconcile.close")
             }
-            summaryLine
+            Text("\(viewModel.count(.both)) on phone + Google · \(viewModel.count(.google)) only in Google · \(viewModel.count(.phone)) only on phone")
                 .font(.subheadline)
                 .foregroundStyle(.white.opacity(0.85))
+                .accessibilityIdentifier("reconcile.summary")
+            HStack {
+                Text("Tap a photo to mark it for deletion. Selected = Keep.")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.7))
+                Spacer()
+                Button("Keep all") { viewModel.keepAll() }
+                    .font(.caption.bold())
+                    .foregroundStyle(.white)
+                    .accessibilityIdentifier("reconcile.keepAll")
+            }
+            if let message = viewModel.actionMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("reconcile.actionMessage")
+            }
         }
         .padding(.horizontal)
         .padding(.top, 8)
         .padding(.bottom, 4)
     }
 
-    /// "May 2025 · 5 on phone · 10 in Google · 5 only in Google" — the counts
-    /// the design's header shows; "in Google" = on-phone + only-in-Google.
-    private var summaryLine: Text {
-        let onPhone = viewModel.phoneAssetCount
-        let onlyInGoogle = viewModel.onlyInGoogleCount
-        let inGoogle = onPhone + onlyInGoogle
-        return Text(month.title).bold()
-            + Text(" · \(onPhone) on phone · \(inGoogle) in Google · ")
-            + Text("\(onlyInGoogle) only in Google").bold()
-    }
-
-    /// The sticky confirm bar: `content` is a VStack whose middle ScrollView
-    /// flexes, so this footer is pinned to the bottom and stays visible while
-    /// the grid scrolls. Disabled while nothing is selected — the count in the
-    /// label is the single source of truth for what a tap will trash.
+    /// The sticky confirm bar. Disabled while nothing is marked for deletion
+    /// (the initial state), so a user who changes nothing can delete nothing.
     private var footer: some View {
         VStack(spacing: 6) {
             Button {
-                Task { await viewModel.confirm() }
+                showConfirm = true
             } label: {
-                Text("Move \(viewModel.selectedCount) to Google trash")
+                Text(plan.isEmpty ? "Nothing marked for deletion" : "Delete \(plan.phone.count) from phone, \(plan.googleIds.count) from Google…")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.blue)
-            .disabled(viewModel.selectedCount == 0)
+            .tint(.red)
+            .disabled(plan.isEmpty)
             .accessibilityIdentifier("reconcile.confirmButton")
 
-            Text("Recoverable from Google Photos trash for 60 days")
+            Text("\(viewModel.keepCount) kept · \(viewModel.deleteCount) marked for deletion")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.7))
+                .accessibilityIdentifier("reconcile.keepCount")
         }
         .padding(.horizontal)
         .padding(.bottom, 8)
     }
 
-    private func section(
-        kind: ReconcileSectionKind,
-        title: String,
-        subtitle: String,
-        candidates: [ReconcileCandidate],
-        accent: Color
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(title)
-                    .font(.headline)
-                    .foregroundStyle(accent)
-                    .accessibilityIdentifier(kind == .iphone ? "reconcile.section.iphone" : "reconcile.section.other")
-                Spacer()
-                HStack(spacing: 12) {
-                    Button("Select all") { viewModel.selectAll(in: kind) }
-                        .font(.caption.bold())
-                        .foregroundStyle(.white)
-                    Button("Select none") { viewModel.deselectAll(in: kind) }
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.7))
-                }
-                .buttonStyle(.plain)
-            }
-            Text(subtitle)
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.7))
-                .fixedSize(horizontal: false, vertical: true)
-
-            LazyVGrid(columns: columns, spacing: 6) {
-                ForEach(candidates) { candidate in
-                    candidateTile(candidate)
-                }
-            }
+    private func sourceLabel(_ source: ReconcileItem.Source) -> String {
+        switch source {
+        case .both: return "on phone and in Google"
+        case .google: return "only in Google"
+        case .phone: return "only on phone"
         }
-        .padding(.horizontal)
     }
 
-    private func candidateTile(_ candidate: ReconcileCandidate) -> some View {
-        let selected = viewModel.isSelected(candidate)
+    /// Where-it-lives tag: phone glyph, cloud glyph, or both.
+    private func sourceBadge(_ item: ReconcileItem) -> some View {
+        HStack(spacing: 3) {
+            if item.onPhone { Image(systemName: "iphone") }
+            if item.inGoogle { Image(systemName: "cloud.fill") }
+        }
+        .font(.system(size: 10, weight: .bold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(item.source == .phone ? Color.orange.opacity(0.9) : item.source == .google ? Color.blue.opacity(0.9) : Color(white: 0.2).opacity(0.9)))
+        .padding(4)
+    }
+
+    private func itemTile(_ item: ReconcileItem) -> some View {
+        let kept = viewModel.isKept(item)
         return Button {
-            viewModel.toggle(candidate)
+            viewModel.toggle(item)
         } label: {
             Color.clear
                 .aspectRatio(1, contentMode: .fit)
-                .overlay { thumbnailImage(for: candidate) }
-                // Dim the unselected (kept) tile so "will be trashed" reads
-                // as the prominent state, matching the design's kept opacity.
-                .overlay { Color.black.opacity(selected ? 0 : 0.45) }
+                .overlay { itemImage(for: item, fill: true) }
+                // Unselected (= Delete) tiles are dimmed red so "will be
+                // deleted" is the unmistakable state.
+                .overlay { Color.red.opacity(kept ? 0 : 0.45) }
                 .clipShape(RoundedRectangle(cornerRadius: 4))
                 .overlay(alignment: .topLeading) {
-                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    Image(systemName: kept ? "checkmark.circle.fill" : "xmark.circle.fill")
                         .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(selected ? .green : .white.opacity(0.85))
-                        .background(Circle().fill(.black.opacity(0.55)))
+                        .foregroundStyle(kept ? .green : .red)
+                        .background(Circle().fill(.white.opacity(0.85)))
                         .clipShape(Circle())
                         .padding(4)
                 }
+                .overlay(alignment: .bottomTrailing) { sourceBadge(item) }
                 .contentShape(RoundedRectangle(cornerRadius: 4))
         }
         .buttonStyle(.plain)
-        .accessibilityIdentifier("reconcile.candidate.\(candidate.id)")
-        .accessibilityLabel("\(candidate.filename), \(selected ? "selected" : "kept")")
+        .accessibilityIdentifier("reconcile.item.\(item.id)")
+        .accessibilityLabel("\(item.filename), \(sourceLabel(item.source)), \(kept ? "keep" : "delete")")
         .onLongPressGesture {
-            enlargedCandidate = candidate
+            enlargedItem = item
         }
     }
 
     // MARK: Thumbnail
 
-    /// The candidate's tile image: a solid color in the seeded UI-test path,
-    /// an AsyncImage (with the bearer token as a `?token=` query param) in
-    /// production.
+    /// The tile image: a solid color in the seeded UI-test path, the phone's
+    /// own PhotoKit thumbnail for phone-only items, an AsyncImage (bearer
+    /// token as a `?token=` query param) for anything Google has.
     @ViewBuilder
-    private func thumbnailImage(for candidate: ReconcileCandidate) -> some View {
+    private func itemImage(for item: ReconcileItem, fill: Bool) -> some View {
         #if DEBUG
         if ReconcileSeed.isEnabled {
-            ReconcileSeed.thumbnailColor(for: candidate)
+            ReconcileSeed.thumbnailColor(for: item)
         } else {
-            asyncThumbnail(for: candidate)
+            liveImage(for: item, fill: fill)
         }
         #else
-        asyncThumbnail(for: candidate)
+        liveImage(for: item, fill: fill)
         #endif
     }
 
     @ViewBuilder
-    private func asyncThumbnail(for candidate: ReconcileCandidate) -> some View {
-        AsyncImage(url: candidate.thumbnailURL) { phase in
-            switch phase {
-            case .success(let image):
-                image.resizable().scaledToFill()
-            case .failure:
-                Color(white: 0.2)
-            case .empty:
-                Color(white: 0.15)
-            @unknown default:
-                Color(white: 0.15)
+    private func liveImage(for item: ReconcileItem, fill: Bool) -> some View {
+        if let index = item.phoneIndex, item.thumbUrl == nil, month.assets.indices.contains(index) {
+            PhoneAssetImage(asset: month.assets[index], fill: fill)
+        } else {
+            AsyncImage(url: item.thumbnailURL) { phase in
+                switch phase {
+                case .success(let image):
+                    if fill { image.resizable().scaledToFill() } else { image.resizable().scaledToFit() }
+                case .failure:
+                    Color(white: 0.2)
+                case .empty:
+                    Color(white: 0.15)
+                @unknown default:
+                    Color(white: 0.15)
+                }
             }
         }
     }
 
     // MARK: Enlarged (long-press)
 
-    private func enlargedOverlay(_ candidate: ReconcileCandidate) -> some View {
+    private func enlargedOverlay(_ item: ReconcileItem) -> some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            fullThumbnail(for: candidate)
+            itemImage(for: item, fill: false)
                 .padding()
         }
         .contentShape(Rectangle())
-        .onTapGesture { enlargedCandidate = nil }
+        .onTapGesture { enlargedItem = nil }
         .overlay(alignment: .topTrailing) {
             Button {
-                enlargedCandidate = nil
+                enlargedItem = nil
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 30))
@@ -326,40 +342,12 @@ struct ReconcileReviewView: View {
         }
     }
 
-    /// The enlarged long-press preview: full image aspect-fit (not the
-    /// crop-to-tile fill used in the grid), or the candidate's solid seed
-    /// color in the seeded path.
-    @ViewBuilder
-    private func fullThumbnail(for candidate: ReconcileCandidate) -> some View {
-        #if DEBUG
-        if ReconcileSeed.isEnabled {
-            ReconcileSeed.thumbnailColor(for: candidate)
-        } else {
-            AsyncImage(url: candidate.thumbnailURL) { phase in
-                if case .success(let image) = phase {
-                    image.resizable().scaledToFit()
-                } else {
-                    Color(white: 0.15)
-                }
-            }
-        }
-        #else
-        AsyncImage(url: candidate.thumbnailURL) { phase in
-            if case .success(let image) = phase {
-                image.resizable().scaledToFit()
-            } else {
-                Color(white: 0.15)
-            }
-        }
-        #endif
-    }
-
     // MARK: Results
 
     private var resultsView: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("Google Photos cleanup")
+                Text("Clean up \(month.title)")
                     .font(.title2.bold())
                     .foregroundStyle(.white)
                 Spacer()
@@ -376,7 +364,7 @@ struct ReconcileReviewView: View {
             .padding(.horizontal)
             .padding(.top, 8)
 
-            Text("Cleanup complete")
+            Text("Cleanup complete · \(viewModel.phoneDeletedCount) deleted from phone (see Recently Deleted)")
                 .font(.headline)
                 .foregroundStyle(.white)
                 .padding(.horizontal)
@@ -419,12 +407,12 @@ struct ReconcileReviewView: View {
     }
 
     private func filename(for id: String) -> String {
-        (viewModel.iphoneCandidates + viewModel.otherCandidates).first { $0.id == id }?.filename ?? id
+        viewModel.items.first { $0.id == id }?.filename ?? id
     }
 
     private func statusLabel(_ status: String) -> String {
         switch status {
-        case "trashed": return "Trashed"
+        case "trashed": return "Trashed from Google"
         case "needs_review": return "Needs review"
         case "queued": return "Queued"
         default: return status
@@ -446,7 +434,7 @@ struct ReconcileReviewView: View {
             Image(systemName: "wifi.exclamationmark")
                 .font(.system(size: 40))
                 .foregroundStyle(.white.opacity(0.6))
-            Text("Clean up Google failed")
+            Text("Clean up failed")
                 .font(.headline)
                 .foregroundStyle(.white)
             Text(message)
@@ -462,5 +450,26 @@ struct ReconcileReviewView: View {
         }
         .padding()
         .accessibilityIdentifier("reconcile.error")
+    }
+}
+
+/// A phone-only tile's image, loaded from PhotoKit (those photos have no
+/// Google thumbnail on the server).
+private struct PhoneAssetImage: View {
+    let asset: PHAsset
+    let fill: Bool
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                if fill { Image(uiImage: image).resizable().scaledToFill() } else { Image(uiImage: image).resizable().scaledToFit() }
+            } else {
+                Color(white: 0.15)
+            }
+        }
+        .task {
+            image = await ThumbnailLoader.thumbnail(for: asset, targetSize: CGSize(width: 400, height: 400))
+        }
     }
 }

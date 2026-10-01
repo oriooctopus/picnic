@@ -2733,9 +2733,9 @@ final class WalkthroughUITests: XCTestCase {
 
     /// The "Clean up Google" review screen (Option A of the reconcile
     /// feature): long-presses a month card, taps "Clean up Google", and
-    /// checks the two candidate sections + the confirm count. Launches with
+    /// checks the unified keep/delete grid + the confirm counts. Launches with
     /// `--reconcile-seed` so the review screen renders canned candidates
-    /// (3 "from this iPhone", 2 "other") with no mirror server.
+    /// (3 matched, 2 Google-only, 1 phone-only) with no mirror server.
     func test49ReconcileReview() throws {
         relaunch(withExtraArguments: ["--reconcile-seed"])
         let seededMonth = openMyLifeGrid()
@@ -2747,25 +2747,25 @@ final class WalkthroughUITests: XCTestCase {
                       "Clean up Google should appear in the month context menu")
         cleanUpButton.tap()
 
-        // The review screen's .task builds the manifest and loads candidates;
-        // the seeded path skips both network calls, so the iPhone section
-        // (the first thing rendered) should appear promptly.
-        let iphoneSection = app.descendants(matching: .any)["reconcile.section.iphone"].firstMatch
-        XCTAssertTrue(iphoneSection.waitForExistence(timeout: 15),
-                      "From this iPhone section should appear")
+        // The seeded path skips both network calls, so the unified grid
+        // (3 on phone + Google, 2 Google-only, 1 phone-only) appears promptly.
+        let summary = app.descendants(matching: .any)["reconcile.summary"].firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 15), "Unified grid summary should appear")
 
         capture("reconcile-review")
 
-        let otherSection = app.descendants(matching: .any)["reconcile.section.other"].firstMatch
-        XCTAssertTrue(otherSection.waitForExistence(timeout: 5),
-                      "Other sources section should appear")
-
-        // 3 seeded iPhone candidates are pre-selected; the 2 other candidates
-        // are pre-kept, so the confirm button should count exactly 3.
+        // Everything starts kept, so nothing is marked and confirm is disabled.
         let confirmButton = app.buttons["reconcile.confirmButton"]
         XCTAssertTrue(confirmButton.waitForExistence(timeout: 5), "Confirm button should appear")
-        XCTAssertTrue(confirmButton.label.contains("Move 3 to Google trash"),
-                      "Confirm button should read 'Move 3 to Google trash' (3 iPhone candidates pre-selected), got: \(confirmButton.label)")
+        XCTAssertFalse(confirmButton.isEnabled, "Confirm must be disabled while everything is kept")
+        XCTAssertTrue(confirmButton.label.contains("Nothing marked for deletion"),
+                      "Got: \(confirmButton.label)")
+
+        // Unselect one matched photo (phone + Google) and one Google-only photo.
+        app.buttons["reconcile.item.seed-both-1"].tap()
+        app.buttons["reconcile.item.seed-google-1"].tap()
+        XCTAssertTrue(confirmButton.label.contains("Delete 1 from phone, 2 from Google"),
+                      "Confirm should count 1 phone + 2 Google deletions, got: \(confirmButton.label)")
     }
 
     /// Regression test for the March 2026 bug report: a scan still in
@@ -2794,8 +2794,8 @@ final class WalkthroughUITests: XCTestCase {
         // The bug: the old code rendered whatever the first response held
         // even while scanning, so the (still-empty) candidate grid appeared
         // as if the scan had finished with nothing to review.
-        let iphoneSection = app.descendants(matching: .any)["reconcile.section.iphone"].firstMatch
-        XCTAssertFalse(iphoneSection.exists,
+        let summary = app.descendants(matching: .any)["reconcile.summary"].firstMatch
+        XCTAssertFalse(summary.exists,
                        "Must not render the loaded candidate grid while status is still \"scanning\"")
         XCTAssertFalse(app.buttons["reconcile.confirmButton"].exists,
                        "Must not render the confirm bar while status is still \"scanning\"")

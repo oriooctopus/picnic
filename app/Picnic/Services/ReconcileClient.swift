@@ -6,7 +6,7 @@ import Foundation
 /// those fields and nothing more. All routes reuse the queue's bearer token
 /// (`MirrorToken.value`) for the Authorization header, while the thumbnail
 /// GET routes take the same token as a `?token=` query param (browser-facing
-/// routes don't read the bearer header — see ReconcileCandidate.thumbnailURL).
+/// routes don't read the bearer header — see ReconcileItem.thumbnailURL).
 
 /// One asset entry in the POST /reconcile manifest body. Client-only: the
 /// app builds it from PhotoKit (PhotoLibraryService.reconcileManifest) and
@@ -22,10 +22,9 @@ struct ReconcileManifestAsset {
     let pixelHeight: Int
 }
 
-/// GET /reconcile/:month — the server's verdict after diffing the on-phone
-/// manifest against Google Photos. `status` is "scanning" until that diff is
-/// ready, then "ready". `totalCandidates` counts Google photos with no match
-/// on the phone (the "only in Google" set).
+/// GET /reconcile/:month — the server's unified view of the month after
+/// diffing the on-phone manifest against Google Photos. `status` is
+/// "scanning" until that diff is ready, then "ready".
 struct ReconcileResponse: Decodable {
     let month: String
     /// "scanning" | "ready" | "failed" (the finite lifecycle ReconcileStore's
@@ -37,45 +36,53 @@ struct ReconcileResponse: Decodable {
     let status: String
     /// Set only when status == "failed" (a worker crash -- see
     /// attachReconcileExitHandler on the server). nil otherwise; missing
-    /// entirely from the JSON decodes fine since this is Optional, and the
-    /// default lets ReconcileSeed's memberwise-init call sites (never
-    /// failed) skip passing it.
-    let error: String? = nil
+    /// entirely from the JSON decodes fine since this is Optional. `var`, not
+    /// `let`: a `let` with a default value is skipped by synthesized Decodable,
+    /// which would silently drop the server's error text.
+    var error: String? = nil
+    /// Google photos with no phone match; during "scanning" this is the live
+    /// found-so-far count shown on the scanning screen.
     let totalCandidates: Int
-    let sections: ReconcileSections
+    /// Every photo of the month, sorted by capture time.
+    var items: [ReconcileItem] = []
 }
 
-/// The two review sections, split on whether the server believes the Google
-/// photo came from this iPhone (`cameraModel != nil`) or not.
-struct ReconcileSections: Decodable {
-    let iphone: ReconcileSection
-    let other: ReconcileSection
-}
+/// One photo in the unified review grid.
+struct ReconcileItem: Decodable, Identifiable {
+    /// Where the photo lives.
+    enum Source: String, Decodable {
+        /// On the phone AND in Google Photos.
+        case both
+        /// Only in Google Photos.
+        case google
+        /// Only on the phone (no Google match found).
+        case phone
+    }
 
-struct ReconcileSection: Decodable {
-    let count: Int
-    let candidates: [ReconcileCandidate]
-}
-
-struct ReconcileCandidate: Decodable, Identifiable {
+    /// Google media key for `both`/`google`; "phone-<index>" for `phone`.
     let id: String
+    let source: Source
+    /// Position in the manifest the app posted, which is the month bucket's
+    /// asset order (PhotoLibraryService.reconcileManifest). nil for `google`.
+    let phoneIndex: Int?
+    /// The phone's filename for `both`/`phone`; a display placeholder for `google`.
     let filename: String
-    /// nil exactly when the server couldn't match the photo to this iPhone —
-    /// that's the signal driving the "other sources" section.
-    let cameraModel: String?
     let captureDateMs: Int64
     let pixelWidth: Int
     let pixelHeight: Int
-    let thumbUrl: String
-    /// "candidate" until the user acts; "kept"/"trashed" afterwards.
-    let status: String
+    /// nil for `phone` items: the app renders those from PhotoKit.
+    let thumbUrl: String?
+
+    var onPhone: Bool { source != .google }
+    var inGoogle: Bool { source != .phone }
 
     /// Full thumbnail URL for AsyncImage. The thumbnail GET routes are the
     /// browser-facing kind that read the token from `?token=` rather than the
     /// Authorization header (mirroring how /issues and /thumb already work,
     /// per MirrorClient.fetchStatus's comment).
     var thumbnailURL: URL? {
-        URL(string: "http://\(Config.mirrorHost):\(Config.mirrorPort)\(thumbUrl)?token=\(MirrorToken.value)")
+        guard let thumbUrl else { return nil }
+        return URL(string: "http://\(Config.mirrorHost):\(Config.mirrorPort)\(thumbUrl)?token=\(MirrorToken.value)")
     }
 }
 
@@ -140,14 +147,17 @@ enum ReconcileClient {
         return try JSONDecoder().decode(ReconcileResponse.self, from: data)
     }
 
-    /// POST /reconcile/:month/confirm — queues the selected candidates for
-    /// trash. Returns the server-reported number of jobs actually queued.
-    static func confirm(month: String, ids: [String]) async throws -> Int {
+    /// POST /reconcile/:month/confirm — queues Google photos for trash.
+    /// `phoneDeleted` lists the manifest indexes the app has ALREADY deleted
+    /// from the phone; the server refuses (409) any `both` photo whose index
+    /// is not listed, because the trash gate only trashes photos that are off
+    /// the phone. Returns the server-reported number of jobs actually queued.
+    static func confirm(month: String, ids: [String], phoneDeleted: [Int]) async throws -> Int {
         var request = URLRequest(url: Config.reconcileURL(for: "/reconcile/\(month)/confirm"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["ids": ids])
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["ids": ids, "phoneDeleted": phoneDeleted])
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
