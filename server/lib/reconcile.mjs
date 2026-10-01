@@ -200,7 +200,7 @@ const DEFAULT_BASE_DIR = join(homedir(), '.local', 'share', 'picnic', 'reconcile
  * <baseDir>/<month>/thumbs/<photoId>.jpg. `month` is the "YYYY-MM" string.
  */
 // Bump when the scan method changes so stale "ready" results are rescanned.
-export const SCAN_VERSION = 2;
+export const SCAN_VERSION = 3;
 
 export class ReconcileStore {
   constructor(baseDir = DEFAULT_BASE_DIR) {
