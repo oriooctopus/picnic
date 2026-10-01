@@ -168,7 +168,9 @@ export const MAX_SCROLL_ATTEMPTS_PER_DATE = 6;
 // Reconcile scan (passive listing capture): see runReconcileScan.
 const LISTING_URL_PATTERN = /photos\.google\.com\/.*batchexecute/;
 const RECONCILE_FRUITLESS_SCROLLS = 2;
-const RECONCILE_MAX_SCROLLS_PER_DAY = 40;
+const RECONCILE_MAX_SCROLLS = 60;
+const THUMB_TIMEOUT_MS = 8000;
+const THUMB_CONCURRENCY = 6;
 // Bound how many times openFirstTile() re-collects and retries opening the
 // EXHAUSTIVE fallback's starting tile after a StaleTileError (the held
 // reference -- captured before the aria pre-scroll even runs, see
@@ -497,7 +499,10 @@ async function closeAnyOpenPhoto(page) {
  * default (no bot-avoidance needed) a plain fast type is fine.
  */
 async function searchByDate(page, dateStr) {
-  const query = formatSearchDate(dateStr);
+  return searchByQuery(page, formatSearchDate(dateStr));
+}
+
+async function searchByQuery(page, query) {
   await closeAnyOpenPhoto(page);
   const searchBox = page.locator(SEARCH_BOX_SELECTOR).first();
   await searchBox.click();
@@ -3354,22 +3359,9 @@ export async function runRevisitFromFile(page, filePath, jobs, queue, { dryRun }
 // CLI entry point (reconcileEntry) wires the real store + CDP page.
 // ============================================================================
 
-/**
- * Every "YYYY-MM-DD" day in `month`, plus one day of margin on either side.
- * WHY the margin: Google Photos displays LOCAL capture time, the manifest's
- * creationDate is UTC, and the offset is not known ahead of time — a photo
- * captured near a month boundary can legitimately appear under the adjacent
- * day's search results. A wrong-day guess only costs a wasted read (the
- * filename check remains authoritative), so widen by one day on each edge.
- */
-function monthDayStrings(month) {
-  const [year, monthNum] = month.split('-').map(Number);
-  const daysInMonth = new Date(Date.UTC(year, monthNum, 0)).getUTCDate();
-  const days = [];
-  for (let d = 1; d <= daysInMonth; d++) {
-    days.push(`${month}-${String(d).padStart(2, '0')}`);
-  }
-  return [shiftDateDays(days[0], -1), ...days, shiftDateDays(days[days.length - 1], 1)];
+/** "2026-03" -> "March 2026", the month-wide query typed into Google Photos search. */
+function monthSearchQuery(month) {
+  return formatSearchDate(`${month}-01`).replace(/ \d+,/, '');
 }
 
 /**
@@ -3378,7 +3370,7 @@ function monthDayStrings(month) {
  * manifest once up front; if it is absent there is nothing to diff against,
  * so log and return without writing any status.
  */
-export async function runReconcileScan(page, month, store, { fetchImpl = fetch } = {}) {
+export async function runReconcileScan(page, month, store, { fetchImpl = null } = {}) {
   const manifest = store.loadManifest(month);
   if (manifest == null) {
     console.log(`[reconcile-scan] no manifest for ${month} — nothing to diff against`);
@@ -3418,43 +3410,43 @@ export async function runReconcileScan(page, month, store, { fetchImpl = fetch }
   page.on('response', onResponse);
 
   try {
-    for (const day of monthDayStrings(month)) {
-      console.log(`[reconcile-scan] searching ${day}`);
-      const responsesBefore = responsesParsed;
-      await searchByDate(page, day);
+    // ONE month-wide search ("March 2026") instead of one search per day. Live
+    // 2026-10-01: per-day searches were flaky (Google answered "No results" for
+    // days that have photos, and the margin days cost 20s each when empty),
+    // while the month query returns every day's items through one lazily
+    // loaded list in ~6s (94 in-month items vs 84 for the per-day sweep).
+    const query = monthSearchQuery(month);
+    console.log(`[reconcile-scan] searching "${query}"`);
+    await searchByQuery(page, query);
+    await settle();
+    // Scroll only to make Google load the rest of the list (nothing is
+    // opened). Stop after RECONCILE_FRUITLESS_SCROLLS consecutive scrolls that
+    // add neither a new media key nor a new tile; RECONCILE_MAX_SCROLLS is a
+    // hard cap so a list that never stops growing cannot loop forever.
+    const tileKeys = new Set((await collectResultTiles(page)).map(tileIdentity));
+    let fruitless = 0;
+    let scrolls = 0;
+    while (fruitless < RECONCILE_FRUITLESS_SCROLLS && scrolls < RECONCILE_MAX_SCROLLS) {
+      const keysBefore = itemsByKey.size;
+      await scrollResults(page);
+      scrolls += 1;
       await settle();
-
-      // Scroll the results only to make Google load the rest of the day's
-      // listing (the grid is virtualized and lists lazily). Nothing is opened.
-      // Stop after RECONCILE_FRUITLESS_SCROLLS consecutive scrolls that add
-      // neither a new media key nor a new tile; RECONCILE_MAX_SCROLLS_PER_DAY
-      // is a hard cap so a grid that never stops growing cannot loop forever.
-      const tileKeys = new Set((await collectResultTiles(page)).map(tileIdentity));
-      let fruitless = 0;
-      let scrolls = 0;
-      while (fruitless < RECONCILE_FRUITLESS_SCROLLS && scrolls < RECONCILE_MAX_SCROLLS_PER_DAY) {
-        const keysBefore = itemsByKey.size;
-        await scrollResults(page);
-        scrolls += 1;
-        await settle();
-        let newTiles = false;
-        for (const t of await collectResultTiles(page)) {
-          const k = tileIdentity(t);
-          if (!tileKeys.has(k)) {
-            tileKeys.add(k);
-            newTiles = true;
-          }
+      let newTiles = false;
+      for (const t of await collectResultTiles(page)) {
+        const k = tileIdentity(t);
+        if (!tileKeys.has(k)) {
+          tileKeys.add(k);
+          newTiles = true;
         }
-        fruitless = itemsByKey.size > keysBefore || newTiles ? 0 : fruitless + 1;
       }
-      if (fruitless < RECONCILE_FRUITLESS_SCROLLS) {
-        loud(`[reconcile-scan] ${day}: still loading after ${scrolls} scrolls — stopped at the cap, listing may be incomplete`);
-      }
-      const dayResponses = responsesParsed - responsesBefore;
-      console.log(`[reconcile-scan] ${day}: ${tileKeys.size} tiles, ${dayResponses} listing responses, ${itemsByKey.size} items so far`);
-      if (tileKeys.size > 0 && dayResponses === 0) {
-        loud(`[reconcile-scan] ${day}: tiles rendered but NO listing response was captured — Google may have served this day from its cache; this day is unverified`);
-      }
+      fruitless = itemsByKey.size > keysBefore || newTiles ? 0 : fruitless + 1;
+    }
+    if (fruitless < RECONCILE_FRUITLESS_SCROLLS) {
+      loud(`[reconcile-scan] "${query}": still loading after ${scrolls} scrolls — stopped at the cap, listing may be incomplete`);
+    }
+    console.log(`[reconcile-scan] "${query}": ${scrolls} scrolls, ${tileKeys.size} tiles, ${responsesParsed} listing responses, ${itemsByKey.size} items`);
+    if (tileKeys.size > 0 && responsesParsed === 0) {
+      loud(`[reconcile-scan] tiles rendered but NO listing response was captured — the scan is unverified`);
     }
   } finally {
     page.off('response', onResponse);
@@ -3463,18 +3455,35 @@ export async function runReconcileScan(page, month, store, { fetchImpl = fetch }
   const inMonth = filterItemsToMonth([...itemsByKey.values()], month);
   const candidates = diffListingVsManifest(manifest, inMonth);
   console.log(`[reconcile-scan] ${itemsByKey.size} items seen, ${inMonth.length} in ${month}, ${manifest.length} on phone, ${candidates.length} candidates`);
-  for (const { thumbUrl, ...candidate } of candidates) {
-    // Capability URL fetched by plain Node, never through the browser.
-    try {
-      const res = await fetchImpl(`${thumbUrl}=w400`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      store.saveThumb(month, candidate.photoId, Buffer.from(await res.arrayBuffer()));
-    } catch (err) {
-      loud(`[reconcile-scan] thumbnail fetch failed for ${candidate.photoId}: ${err.message || err} — candidate kept without a thumbnail`);
-    }
+  // Thumbnails go through the browser's request context (Node's own fetch to
+  // the CDN failed at network level, ~40s per attempt, live 2026-10-01), a few
+  // seconds max each, THUMB_CONCURRENCY at a time.
+  const fetchThumb = fetchImpl ?? (async (url) => {
+    const res = await page.request.get(url, { timeout: THUMB_TIMEOUT_MS });
+    return { ok: res.ok(), status: res.status(), arrayBuffer: () => res.body() };
+  });
+  const results = [];
+  for (let i = 0; i < candidates.length; i += THUMB_CONCURRENCY) {
+    results.push(
+      ...(await Promise.all(
+        candidates.slice(i, i + THUMB_CONCURRENCY).map(async ({ thumbUrl, photoId }) => {
+          try {
+            const res = await fetchThumb(`${thumbUrl}=w400`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return Buffer.from(await res.arrayBuffer());
+          } catch (err) {
+            loud(`[reconcile-scan] thumbnail fetch failed for ${photoId}: ${err.message || err} — candidate kept without a thumbnail`);
+            return null;
+          }
+        })
+      ))
+    );
+  }
+  candidates.forEach(({ thumbUrl, ...candidate }, i) => {
+    if (results[i]) store.saveThumb(month, candidate.photoId, results[i]);
     store.appendCandidate(month, { ...candidate, status: 'candidate' });
     console.log(`[reconcile-scan] candidate ${candidate.photoId} captured ${new Date(candidate.captureDateMs).toISOString()}`);
-  }
+  });
   store.saveStatus(month, 'ready');
 }
 

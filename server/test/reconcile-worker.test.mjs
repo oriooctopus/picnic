@@ -75,7 +75,7 @@ const OK_FETCH = (urls) => async (url) => {
   return { ok: true, status: 200, arrayBuffer: async () => new TextEncoder().encode('thumb-bytes').buffer };
 };
 
-test('runReconcileScan: passive listing -- only items with no manifest timestamp+dimension match become candidates; nothing is ever opened', async () => {
+test('runReconcileScan: one month-wide search; only items with no manifest timestamp+dimension match become candidates; nothing is ever opened', async () => {
   await withTempStore(async (store) => {
     const month = '2026-08';
     store.saveManifest(month, [
@@ -84,15 +84,17 @@ test('runReconcileScan: passive listing -- only items with no manifest timestamp
     ]);
     const label = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
     const page = createFakePage({
-      searchResults: { 'August 5, 2026': [label] },
+      searchResults: { 'August 2026': [label] },
       listingResponses: {
-        'August 5, 2026': {
+        'August 2026': {
           onSearch: [
             listingBody([
               item('AF1QipAAA', T('2026-08-05T12:54:07.000Z')), // exact match -> on phone
               item('AF1QipBBB', T('2026-08-05T13:31:08.500Z')), // 1.5s jitter, rotated dims -> on phone
               item('AF1QipCCC', T('2026-08-05T15:00:00.000Z')), // no manifest entry -> candidate
               item('AF1QipDDD', T('2026-08-05T12:54:07.000Z'), { w: 1000, h: 1000 }), // time matches, dims do not -> candidate
+              item('AF1QipFFF', T('2026-09-01T02:00:00.000Z')), // local Aug 31 20:00 -> IN month
+              item('AF1QipGGG', T('2026-08-01T03:00:00.000Z')), // local Jul 31 21:00 -> out of month
             ]),
             // non-listing rpc and a non-batchexecute URL: ignored
             body([{ rpc: 'KI4Ef', payload: [[null, null, 2]] }]),
@@ -102,9 +104,6 @@ test('runReconcileScan: passive listing -- only items with no manifest timestamp
             [listingBody([item('AF1QipEEE', T('2026-08-05T16:00:00.000Z')), item('AF1QipCCC', T('2026-08-05T15:00:00.000Z'))], 'frGlJf')], // new + duplicate key
           ],
         },
-        // margin day: an item whose LOCAL date is in July is out of month -> never a candidate
-        'September 1, 2026': { onSearch: [listingBody([item('AF1QipFFF', T('2026-09-01T02:00:00.000Z'))])] }, // local Aug 31 20:00 -> IN month
-        'July 31, 2026': { onSearch: [listingBody([item('AF1QipGGG', T('2026-08-01T03:00:00.000Z'))])] }, // local Jul 31 21:00 -> out
       },
     });
     const urls = [];
@@ -120,6 +119,7 @@ test('runReconcileScan: passive listing -- only items with no manifest timestamp
     assert.equal(sectionForCameraModel(c.cameraModel), 'other');
     assert.ok(urls.every((u) => u.endsWith('=w400')) && urls.length === 4, 'thumbnails fetched from thumbUrl + =w400');
     assert.ok(existsSync(store.thumbPath(month, 'AF1QipCCC')));
+    assert.deepEqual(page.log.filter((l) => l.startsWith('type:')), ['type:August 2026'], 'exactly one search, for the month');
     assert.equal(page.log.filter((l) => l.startsWith('tile-click:')).length, 0, 'no photo was ever opened');
     assert.equal(page.log.filter((l) => l === 'screenshot').length, 0);
     assert.equal(page.log.filter((l) => l.startsWith('goto:')).length, 0);
@@ -128,13 +128,48 @@ test('runReconcileScan: passive listing -- only items with no manifest timestamp
   });
 });
 
+test('runReconcileScan: default thumbnail fetch goes through the browser request context with a short timeout, in parallel', async () => {
+  await withTempStore(async (store) => {
+    const month = '2026-08';
+    store.saveManifest(month, [{ filename: 'IMG_1.HEIC', creationDate: '2026-08-05T12:00:00.000Z', pixelWidth: 1, pixelHeight: 1 }]);
+    const many = Array.from({ length: 12 }, (_, n) => item(`AF1QipT${n}`, T(`2026-08-05T${String(13 + (n % 9)).padStart(2, '0')}:${String(n).padStart(2, '0')}:00.000Z`)));
+    const page = createFakePage({
+      searchResults: { 'August 2026': ['Photo - Portrait - Aug 5, 2026, 6:54:07 PM'] },
+      listingResponses: { 'August 2026': { onSearch: [listingBody(many)] } },
+    });
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const calls = [];
+    page.request = {
+      get: async (url, opts) => {
+        calls.push({ url, opts });
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((r) => setTimeout(r, 10));
+        inFlight -= 1;
+        if (url.includes('AF1QipT3') || calls.length === 4) return { ok: () => false, status: () => 500, body: async () => Buffer.alloc(0) };
+        return { ok: () => true, status: () => 200, body: async () => Buffer.from('bytes') };
+      },
+    };
+    const start = Date.now();
+    await runReconcileScan(page, month, store);
+    assert.equal(store.listCandidates(month).length, 12, 'every candidate recorded');
+    assert.equal(calls.length, 12);
+    assert.ok(calls.every((c) => c.opts.timeout > 0 && c.opts.timeout <= 10000), 'short per-thumb timeout');
+    assert.ok(maxInFlight > 1, 'thumbs fetched concurrently');
+    assert.ok(Date.now() - start < 5000);
+    const have = store.listCandidates(month).filter((c) => existsSync(store.thumbPath(month, c.photoId))).length;
+    assert.equal(have, 11, 'the one failed thumb is skipped, the rest saved');
+  });
+});
+
 test('runReconcileScan: a failed thumbnail fetch is loud but the candidate is still recorded', async () => {
   await withTempStore(async (store) => {
     const month = '2026-08';
     store.saveManifest(month, [{ filename: 'IMG_1.HEIC', creationDate: '2026-08-05T12:00:00.000Z', pixelWidth: 1, pixelHeight: 1 }]);
     const page = createFakePage({
-      searchResults: { 'August 5, 2026': ['Photo - Portrait - Aug 5, 2026, 6:54:07 PM'] },
-      listingResponses: { 'August 5, 2026': { onSearch: [listingBody([item('AF1QipXXX', T('2026-08-05T15:00:00.000Z'))])] } },
+      searchResults: { 'August 2026': ['Photo - Portrait - Aug 5, 2026, 6:54:07 PM'] },
+      listingResponses: { 'August 2026': { onSearch: [listingBody([item('AF1QipXXX', T('2026-08-05T15:00:00.000Z'))])] } },
     });
     await runReconcileScan(page, month, store, { fetchImpl: async () => ({ ok: false, status: 403 }) });
     assert.deepEqual(store.listCandidates(month).map((c) => c.photoId), ['AF1QipXXX']);
@@ -149,8 +184,8 @@ test('runReconcileScan: keeps scrolling while new listing responses arrive, so i
     store.saveManifest(month, [{ filename: 'IMG_1.HEIC', creationDate: '2026-08-05T12:00:00.000Z', pixelWidth: 1, pixelHeight: 1 }]);
     const batches = [1, 2, 3, 4].map((n) => [listingBody([item(`AF1QipS${n}`, T(`2026-08-05T1${n}:00:00.000Z`))])]);
     const page = createFakePage({
-      searchResults: { 'August 5, 2026': ['Photo - Portrait - Aug 5, 2026, 6:54:07 PM'] },
-      listingResponses: { 'August 5, 2026': { onScroll: batches } },
+      searchResults: { 'August 2026': ['Photo - Portrait - Aug 5, 2026, 6:54:07 PM'] },
+      listingResponses: { 'August 2026': { onScroll: batches } },
     });
     await runReconcileScan(page, month, store, { fetchImpl: OK_FETCH([]) });
     assert.deepEqual(store.listCandidates(month).map((c) => c.photoId), ['AF1QipS1', 'AF1QipS2', 'AF1QipS3', 'AF1QipS4']);
