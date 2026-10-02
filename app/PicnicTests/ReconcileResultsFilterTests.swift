@@ -4,6 +4,7 @@ import XCTest
 /// Covers ReconcileViewModel.resultsForConfirm: the results screen must list
 /// only the photos this confirm sent, never the month's other (kept)
 /// candidates that GET /results also returns with status "candidate".
+@MainActor
 final class ReconcileResultsFilterTests: XCTestCase {
 
     private func entry(_ id: String, _ status: String) -> ReconcileResultEntry {
