@@ -1281,24 +1281,37 @@ async function verifyTrashByUrl(page, matchedUrl) {
     // matchedUrl -- see confirmAndTrash's own callers).
     return { confirmed: true, guardFailed: false, verifiedByUrl: false };
   }
-  try {
-    await page.goto(matchedUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  } catch (err) {
-    if (isPageClosedError(page, err)) throw err;
-    loud(`[trash] SAFETY: could not reload ${matchedUrl} to verify the trash -- ${err.message || err} -- treating as NOT verified`);
-    return { confirmed: false, guardFailed: false, verifiedByUrl: false };
+  // LOAD-BEARING WAIT before navigating. Live 2026-10-02 (March reconcile):
+  // settled() accepts a panel re-render as success, which happens the moment
+  // the dialog closes -- before Google's trash RPC completes -- and the
+  // immediate goto() below then aborted that RPC. Result: all 39 confirmed
+  // photos recorded needs_review; 31 had trashed anyway, 8 stayed live. The
+  // "Moved to trash" toast only shows once the RPC has returned, so wait for
+  // it (best effort: a missed toast still falls through to the reload check).
+  const toast = page.locator('text=/moved to (trash|bin)/i').first();
+  const toastDeadline = Date.now() + (FAST_DELAYS ? 20 : 8000);
+  while (Date.now() < toastDeadline && !(await toast.isVisible().catch(() => false))) {
+    await sleep(FAST_DELAYS ? 1 : 250);
   }
-  // POLL for the banner, never a single check: goto() resolves at
-  // domcontentloaded, before Google renders the photo chrome, so a one-shot
-  // isVisible() read "no banner" on photos that WERE trashed. Live 2026-10-02:
-  // the March reconcile marked all 39 needs_review, and 31 of them were in
-  // the trash when re-checked 3.5s after load. 10s covers a slow tailnet load.
+  // Up to 3 reloads, each polling ~5s for the banner: goto() resolves at
+  // domcontentloaded, before the banner renders, and a trash committed just
+  // after a load never shows on that load.
   const banner = page.locator('text=/until permanently deleted/i').first();
-  const deadline = Date.now() + (FAST_DELAYS ? 20 : 10000);
   let bannerVisible = false;
-  while (!bannerVisible && Date.now() < deadline) {
-    bannerVisible = await banner.isVisible().catch(() => false);
-    if (!bannerVisible) await sleep(FAST_DELAYS ? 1 : 500);
+  for (let attempt = 0; attempt < 3 && !bannerVisible; attempt++) {
+    try {
+      await page.goto(matchedUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    } catch (err) {
+      if (isPageClosedError(page, err)) throw err;
+      loud(`[trash] SAFETY: could not reload ${matchedUrl} to verify the trash -- ${err.message || err} -- treating as NOT verified`);
+      return { confirmed: false, guardFailed: false, verifiedByUrl: false };
+    }
+    if (/\/trash\//i.test(page.url())) break;
+    const deadline = Date.now() + (FAST_DELAYS ? 20 : 5000);
+    while (!bannerVisible && Date.now() < deadline) {
+      bannerVisible = await banner.isVisible().catch(() => false);
+      if (!bannerVisible) await sleep(FAST_DELAYS ? 1 : 500);
+    }
   }
   const redirectedToTrash = /\/trash\//i.test(page.url());
   const verifiedByUrl = bannerVisible || redirectedToTrash;

@@ -3116,6 +3116,60 @@ test('moveToTrash: verifyByUrl -- a trash banner that renders AFTER the reload r
   assert.equal(confirmed, true);
 });
 
+test('moveToTrash: verifyByUrl -- waits for the trash toast before reloading, and a trash committed after the first reload still confirms', async () => {
+  // Live 2026-10-02: reloading the instant the panel re-rendered aborted
+  // Google's in-flight trash RPC. Model: the toast appears only on the 3rd
+  // read after the dialog click (the RPC returning); the banner is absent on
+  // the first reload and present from the second.
+  let dialogVisible = false;
+  let toastReads = 0;
+  let clicked = false;
+  const gotoUrls = [];
+  const toastStateAtGoto = [];
+  const page = {
+    url: () => 'https://photos.google.com/photo/MATCHED-PHOTO',
+    keyboard: { press: async (key) => { if (key === '#') dialogVisible = true; } },
+    locator: (selector) => ({
+      first: () => ({
+        isVisible: async () => {
+          if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) return dialogVisible;
+          if (/moved to \(trash\|bin\)/i.test(selector)) return clicked && ++toastReads >= 3;
+          if (/until permanently deleted/i.test(selector)) return gotoUrls.length >= 2;
+          return false;
+        },
+        click: async () => {
+          if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) {
+            dialogVisible = false;
+            clicked = true;
+          }
+        },
+      }),
+      all: async () => [],
+    }),
+    viewportSize: () => ({ width: 1280, height: 800 }),
+    mouse: { click: async () => {} },
+    // Panel text changes after the click: settled() returns on that alone,
+    // which is exactly the early exit that raced the RPC live.
+    evaluate: async () => ({
+      detailsAndFile: [clicked ? 'Details\nSep 2\nTue, 1:00 PM\nGMT-04:00\nIMG_2.HEIC\n100 × 100' : 'Details\nSep 1\nMon, 1:00 PM\nGMT-04:00\nIMG_1.HEIC\n100 × 100'],
+      dimsAndFile: [],
+      fileOnly: [],
+    }),
+    goto: async (url) => { gotoUrls.push(url); toastStateAtGoto.push(toastReads >= 3); },
+  };
+
+  const { confirmed, verifiedByUrl } = await moveToTrash(page, 'PANEL TEXT', {
+    matchedUrl: 'https://photos.google.com/photo/MATCHED-PHOTO',
+    expectedFilename: 'IMG_1.HEIC',
+    verifyByUrl: true,
+  });
+
+  assert.equal(toastStateAtGoto[0], true, 'must not reload until the trash toast has shown');
+  assert.equal(gotoUrls.length, 2, 'banner missing on the first reload must trigger another reload');
+  assert.equal(verifiedByUrl, true);
+  assert.equal(confirmed, true);
+});
+
 test('walkTimeline: normal case -- trashed and verified, matchedUrl logged on the [trashed] line', async () => {
   await withTempQueue(async (queue) => {
     const { job } = queue.enqueue({ filename: 'IMG_9960.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
