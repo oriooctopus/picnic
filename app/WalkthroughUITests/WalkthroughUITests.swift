@@ -2748,7 +2748,8 @@ final class WalkthroughUITests: XCTestCase {
         cleanUpButton.tap()
 
         // The seeded path skips both network calls, so the unified grid
-        // (3 on phone + Google, 2 Google-only, 1 phone-only) appears promptly.
+        // (3 on phone + Google with 1 duplicate copy, 2 Google-only, 1
+        // phone-only) appears promptly.
         let summary = app.descendants(matching: .any)["reconcile.summary"].firstMatch
         XCTAssertTrue(summary.waitForExistence(timeout: 15), "Unified grid summary should appear")
 
@@ -2761,11 +2762,24 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(confirmButton.label.contains("Nothing marked for deletion"),
                       "Got: \(confirmButton.label)")
 
-        // Unselect one matched photo (phone + Google) and one Google-only photo.
+        // Header counts phone photos, not Google copies: 3 matched phone
+        // photos, one of which has a duplicate Google copy.
+        XCTAssertTrue(summary.label.contains("3 on phone + Google"), "Got: \(summary.label)")
+        XCTAssertTrue(summary.label.contains("1 duplicate in Google"), "Got: \(summary.label)")
+
+        // Unselect only the duplicate Google copy of IMG_1: its phone photo is
+        // still kept (by seed-both-1), so only the extra Google copy goes.
+        // Live bug 2026-10-02: this read "Delete 0 from phone, 0 from Google".
+        app.buttons["reconcile.item.seed-both-dup"].tap()
+        XCTAssertTrue(confirmButton.label.contains("Delete 0 from phone, 1 from Google"),
+                      "A duplicate Google copy must be deletable, got: \(confirmButton.label)")
+
+        // Now unselect IMG_1's other copy too (so the phone photo goes) and one
+        // Google-only photo.
         app.buttons["reconcile.item.seed-both-1"].tap()
         app.buttons["reconcile.item.seed-google-1"].tap()
-        XCTAssertTrue(confirmButton.label.contains("Delete 1 from phone, 2 from Google"),
-                      "Confirm should count 1 phone + 2 Google deletions, got: \(confirmButton.label)")
+        XCTAssertTrue(confirmButton.label.contains("Delete 1 from phone, 3 from Google"),
+                      "Confirm should count 1 phone + 3 Google deletions, got: \(confirmButton.label)")
     }
 
     /// Regression test for the March 2026 bug report: a scan still in

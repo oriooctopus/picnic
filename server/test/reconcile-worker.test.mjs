@@ -378,3 +378,131 @@ test('runReconcileTrash: filename-null candidate with no manifest to re-check ag
     assert.equal(store.listCandidates(month)[0].status, 'needs_review');
   });
 });
+
+// ---- duplicate candidates (duplicateOf): another Google copy of a phone photo that stays ----
+function dupCand(over = {}) {
+  return { photoId: 'dup1', filename: 'IMG_5000.HEIC', cameraModel: null, captureDateMs: PANEL_CAPTURE_MS, pixelWidth: 2316, pixelHeight: 3088, status: 'queued', duplicateOf: 'sib1', ...over };
+}
+const dupPanel = (f) => panelBlock(f).replace('Aug 5Wed', 'Aug 5\nWed');
+function dupSetup(store, { candOver = {}, sibText = dupPanel('IMG_5000.HEIC'), dupText = dupPanel('IMG_5000.HEIC') } = {}) {
+  const month = '2026-08';
+  store.appendCandidate(month, dupCand(candOver));
+  const texts = { D: dupText };
+  if (sibText != null) texts.S = sibText;
+  const page = trashPage([{ ariaLabel: 'D', href: 'dup1' }, { ariaLabel: 'S', href: 'sib1' }], texts);
+  return { month, page, trash: spyTrash() };
+}
+
+test('runReconcileTrash: duplicate with a readable, live sibling of the same filename IS trashed; sibling untouched', async () => {
+  await withTempStore(async (store) => {
+    const { month, page, trash } = dupSetup(store);
+    await runReconcileTrash(page, month, store, { moveToTrash: trash });
+    assert.equal(trash.calls.length, 1);
+    assert.equal(trash.calls[0].opts.matchedUrl, 'https://photos.google.com/photo/dup1');
+    assert.equal(trash.calls[0].opts.expectedFilename, 'IMG_5000.HEIC');
+    assert.equal(store.listCandidates(month)[0].status, 'trashed');
+    assert.ok(!page.trashedIdentities.has('sib1'));
+  });
+});
+
+test('runReconcileTrash: duplicate whose sibling is in Google trash -> needs_review, moveToTrash never called', async () => {
+  await withTempStore(async (store) => {
+    const { month, page, trash } = dupSetup(store);
+    // Sibling's panel still reads fine, but the trash banner is up (isolates the trash check).
+    const realGoto = page.goto.bind(page);
+    page.goto = async (url, ...rest) => {
+      const r = await realGoto(url, ...rest);
+      if (/\/photo\/sib1$/.test(url)) page._onTrashedPhotoPage = true;
+      return r;
+    };
+    await runReconcileTrash(page, month, store, { moveToTrash: trash });
+    assert.equal(trash.calls.length, 0);
+    assert.equal(store.listCandidates(month)[0].status, 'needs_review');
+  });
+});
+
+test('runReconcileTrash: duplicate whose sibling reads a different filename -> needs_review, never trashed', async () => {
+  await withTempStore(async (store) => {
+    const { month, page, trash } = dupSetup(store, { sibText: dupPanel('IMG_8888.HEIC') });
+    await runReconcileTrash(page, month, store, { moveToTrash: trash });
+    assert.equal(trash.calls.length, 0);
+    assert.equal(store.listCandidates(month)[0].status, 'needs_review');
+  });
+});
+
+test('runReconcileTrash: duplicate whose sibling is unreadable -> needs_review, never trashed, later candidates still processed', async () => {
+  await withTempStore(async (store) => {
+    const { month, page, trash } = dupSetup(store, { sibText: null });
+    store.appendCandidate(month, cand('plain', 'IMG_1002.HEIC', 'queued'));
+    page.config.timelineTiles.push({ ariaLabel: 'P', href: 'plain' });
+    page.config.timelinePanelTextByLabel.P = panelBlock('IMG_1002.HEIC');
+    await runReconcileTrash(page, month, store, { moveToTrash: trash });
+    const byId = Object.fromEntries(store.listCandidates(month).map((c) => [c.photoId, c.status]));
+    assert.deepEqual(byId, { dup1: 'needs_review', plain: 'trashed' });
+    assert.equal(trash.calls.length, 1);
+  });
+});
+
+test('runReconcileTrash: duplicate whose OWN filename re-reads differently -> needs_review, never trashed', async () => {
+  await withTempStore(async (store) => {
+    const { month, page, trash } = dupSetup(store, { dupText: dupPanel('IMG_9999.HEIC') });
+    await runReconcileTrash(page, month, store, { moveToTrash: trash });
+    assert.equal(trash.calls.length, 0);
+    assert.equal(store.listCandidates(month)[0].status, 'needs_review');
+  });
+});
+
+test('runReconcileTrash: duplicate whose capture time or dimensions disagree -> needs_review, never trashed', async () => {
+  await withTempStore(async (store) => {
+    const { month, page, trash } = dupSetup(store, { candOver: { captureDateMs: PANEL_CAPTURE_MS + 3600000 } });
+    await runReconcileTrash(page, month, store, { moveToTrash: trash });
+    assert.equal(trash.calls.length, 0);
+    assert.equal(store.listCandidates(month)[0].status, 'needs_review');
+  });
+  await withTempStore(async (store) => {
+    const { month, page, trash } = dupSetup(store, { candOver: { pixelWidth: 100, pixelHeight: 100 } });
+    await runReconcileTrash(page, month, store, { moveToTrash: trash });
+    assert.equal(trash.calls.length, 0);
+    assert.equal(store.listCandidates(month)[0].status, 'needs_review');
+  });
+});
+
+test('runReconcileTrash: duplicate with an empty / null stored filename -> needs_review (empty names must never "agree")', async () => {
+  for (const filename of ['', null]) {
+    await withTempStore(async (store) => {
+      const { month, page, trash } = dupSetup(store, { candOver: { filename } });
+      await runReconcileTrash(page, month, store, { moveToTrash: trash });
+      assert.equal(trash.calls.length, 0, `filename ${JSON.stringify(filename)}`);
+      assert.equal(store.listCandidates(month)[0].status, 'needs_review');
+    });
+  }
+});
+
+test('runReconcileTrash: two duplicates queued as each other (server-bug simulation) -> first trashed, second sees the sibling in trash LIVE -> needs_review', async () => {
+  await withTempStore(async (store) => {
+    const month = '2026-08';
+    store.appendCandidate(month, dupCand({ photoId: 'dup1', duplicateOf: 'sib1' }));
+    store.appendCandidate(month, dupCand({ photoId: 'sib1', duplicateOf: 'dup1' }));
+    const page = trashPage([{ ariaLabel: 'D', href: 'dup1' }, { ariaLabel: 'S', href: 'sib1' }], { D: dupPanel('IMG_5000.HEIC'), S: dupPanel('IMG_5000.HEIC') });
+    // A real moveToTrash: the fake page models the trash so a reload shows the banner.
+    await runReconcileTrash(page, month, store);
+    const byId = Object.fromEntries(store.listCandidates(month).map((c) => [c.photoId, c.status]));
+    assert.deepEqual(byId, { dup1: 'trashed', sib1: 'needs_review' });
+    assert.ok(page.trashedIdentities.has('dup1'));
+    assert.ok(!page.trashedIdentities.has('sib1'));
+  });
+});
+
+test('runReconcileTrash: a sibling check that THROWS (navigation error) -> needs_review, moveToTrash never called', async () => {
+  await withTempStore(async (store) => {
+    const { month, page, trash } = dupSetup(store);
+    const realGoto = page.goto.bind(page);
+    page.goto = async (url, ...rest) => {
+      if (/\/photo\/sib1$/.test(url)) throw new Error('net::ERR_TIMED_OUT');
+      return realGoto(url, ...rest);
+    };
+    await runReconcileTrash(page, month, store, { moveToTrash: trash });
+    assert.equal(trash.calls.length, 0);
+    assert.equal(store.listCandidates(month)[0].status, 'needs_review');
+  });
+});

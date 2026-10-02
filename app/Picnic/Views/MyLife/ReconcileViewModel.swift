@@ -87,14 +87,31 @@ final class ReconcileViewModel: ObservableObject {
     /// Header counts by where each photo lives.
     func count(_ source: ReconcileItem.Source) -> Int { items.filter { $0.source == source }.count }
 
+    /// Distinct phone photos that also have a Google copy. Not count(.both):
+    /// that counts Google copies, and one phone photo can match several.
+    var matchedPhoneCount: Int { Set(items.filter { $0.source == .both }.compactMap(\.phoneIndex)).count }
+
+    /// Extra Google copies of an already-matched phone photo.
+    var duplicateGoogleCount: Int { count(.both) - matchedPhoneCount }
+
+    /// Header line, e.g. "38 on phone + Google · 5 duplicates in Google · …".
+    var summaryText: String {
+        var parts = ["\(matchedPhoneCount) on phone + Google"]
+        let dups = duplicateGoogleCount
+        if dups > 0 { parts.append("\(dups) duplicate\(dups == 1 ? "" : "s") in Google") }
+        parts.append("\(count(.google)) only in Google")
+        parts.append("\(count(.phone)) only on phone")
+        return parts.joined(separator: " · ")
+    }
+
     /// The exact set of deletions a confirm would run.
     ///
     /// Phone: every unselected `both`/`phone` item, except that a phone photo
     /// shared by several items (two Google copies of one phone photo) is only
     /// deleted when ALL of them are unselected. Google: every unselected
-    /// `both`/`google` item, EXCEPT a `both` item whose phone copy is not being
-    /// deleted (the server's trash gate refuses photos still on the phone, so
-    /// we never ask for them). `phone` items have no Google side.
+    /// `both`/`google` item. When a `both` item's phone photo is kept, a
+    /// sibling copy is necessarily kept too (that's what kept the phone
+    /// photo), so the unselected one is a duplicate the server will trash.
     var deletePlan: ReconcileDeletionPlan {
         let doomed = items.filter { !keepIds.contains($0.id) }
         var phoneByIndex: [Int: String] = [:]
@@ -103,11 +120,7 @@ final class ReconcileViewModel: ObservableObject {
             let sharedAndKept = items.contains { $0.phoneIndex == index && keepIds.contains($0.id) }
             if !sharedAndKept { phoneByIndex[index] = item.filename }
         }
-        let google = doomed.filter { item in
-            guard item.inGoogle else { return false }
-            if let index = item.phoneIndex { return phoneByIndex[index] != nil }
-            return true
-        }.map(\.id)
+        let google = doomed.filter(\.inGoogle).map(\.id)
         let phone = phoneByIndex.keys.sorted().map { (index: $0, filename: phoneByIndex[$0]!) }
         return ReconcileDeletionPlan(phone: phone, googleIds: google)
     }

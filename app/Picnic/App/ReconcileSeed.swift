@@ -55,9 +55,11 @@ enum ReconcileSeed {
         )
     }
 
+    /// Plus one duplicate: a second Google copy of IMG_1 (same phoneIndex), the
+    /// shape the live March 2026 scan had for several photos.
     static let bothItems: [ReconcileItem] = (1...3).map { i in
         item("seed-both-\(i)", .both, phoneIndex: i - 1, filename: "IMG_\(i).HEIC", hasThumb: true)
-    }
+    } + [item("seed-both-dup", .both, phoneIndex: 0, filename: "IMG_1.HEIC", hasThumb: true)]
 
     static let googleOnlyItems: [ReconcileItem] = (1...2).map { i in
         item("seed-google-\(i)", .google, phoneIndex: nil, filename: "Google Photo \(i)", hasThumb: true)

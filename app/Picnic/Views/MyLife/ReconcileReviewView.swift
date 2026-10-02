@@ -177,7 +177,7 @@ struct ReconcileReviewView: View {
                 }
                 .accessibilityIdentifier("reconcile.close")
             }
-            Text("\(viewModel.count(.both)) on phone + Google · \(viewModel.count(.google)) only in Google · \(viewModel.count(.phone)) only on phone")
+            Text(viewModel.summaryText)
                 .font(.subheadline)
                 .foregroundStyle(.white.opacity(0.85))
                 .accessibilityIdentifier("reconcile.summary")

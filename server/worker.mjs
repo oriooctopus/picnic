@@ -3537,6 +3537,52 @@ export function listingCandidateGateProblem(candidate, parsed, manifest) {
   return null;
 }
 
+/** Capture-time (60s, panel is minute-resolution) and dimension agreement for a duplicate; null when fine. */
+function duplicateTimeDimsProblem(candidate, parsed) {
+  if (parsed.captureDateMs == null || Math.abs(parsed.captureDateMs - candidate.captureDateMs) >= 60000) {
+    return `capture time ${parsed.captureDateMs ?? '(none)'} disagrees with the stored ${candidate.captureDateMs}`;
+  }
+  if (!dimensionsAgree(parsed.pixelWidth, parsed.pixelHeight, candidate.pixelWidth, candidate.pixelHeight)) {
+    return `dimensions ${parsed.pixelWidth}x${parsed.pixelHeight} disagree with the stored ${candidate.pixelWidth}x${candidate.pixelHeight}`;
+  }
+  return null;
+}
+
+/**
+ * LOAD-BEARING sibling check for a DUPLICATE candidate (`duplicateOf` set by
+ * the server's confirm): the candidate is one Google copy of a phone photo
+ * that is being KEPT, so trashing it is only safe while another Google copy
+ * (the sibling) still exists. The server verified that at confirm time, but
+ * the sibling can be deleted/trashed between scan and trash; without this
+ * live re-check we could trash the last Google copy of a photo that is still
+ * on the phone. Opens the sibling, and requires it to be readable, to carry a
+ * filename agreeing with the candidate's, and to NOT be in Google trash
+ * (same "until permanently deleted" banner verifyTrashByUrl relies on).
+ * Returns why the candidate must not be trashed, or null. Any thrown error
+ * (except a closed page) is a refusal, never a pass.
+ */
+async function duplicateSiblingProblem(page, candidate) {
+  // filenamesAgree('', '') is true, so empty names must be refused explicitly.
+  if (typeof candidate.filename !== 'string' || candidate.filename === '') return 'has no stored filename to compare the sibling against';
+  const siblingUrl = `https://photos.google.com/photo/${candidate.duplicateOf}`;
+  try {
+    await page.goto(siblingUrl, { waitUntil: 'domcontentloaded' });
+    await openInfoPanelOnce(page);
+    const parsed = parsePanelText(await readPanelText(page));
+    const inTrash = /\/trash\//i.test(page.url()) ||
+      (await page.locator('text=/until permanently deleted/i').first().isVisible().catch(() => false));
+    if (inTrash) return `kept sibling ${candidate.duplicateOf} is in Google trash`;
+    if (typeof parsed.filename !== 'string' || parsed.filename === '') return `kept sibling ${candidate.duplicateOf} has no readable filename`;
+    if (!filenamesAgree(parsed.filename, candidate.filename)) {
+      return `kept sibling ${candidate.duplicateOf} reads "${parsed.filename}", not "${candidate.filename}"`;
+    }
+    return null;
+  } catch (err) {
+    if (isPageClosedError(page, err)) throw err;
+    return `kept sibling ${candidate.duplicateOf} unreadable — ${err.message || err}`;
+  }
+}
+
 /**
  * Trash pass over the candidates the user confirmed (status 'queued'). The
  * SAFETY GATE is the whole point: before any moveToTrash, re-open the photo
@@ -3560,6 +3606,14 @@ export async function runReconcileTrash(page, month, store, { moveToTrash: trash
     // resolve it without a prior openPhotosHome, and the fake page's direct
     // photo-URL open models the exact live behaviour this depends on.
     const matchedUrl = `https://photos.google.com/photo/${photoId}`;
+    if (candidate.duplicateOf != null) {
+      const problem = await duplicateSiblingProblem(page, candidate);
+      if (problem != null) {
+        loud(`[reconcile-trash] SAFETY: duplicate ${photoId} ${problem} — marking needs_review instead of trashing`);
+        store.updateCandidateStatus(month, photoId, 'needs_review');
+        continue;
+      }
+    }
     await page.goto(matchedUrl, { waitUntil: 'domcontentloaded' });
 
     // openInfoPanelOnce THROWS (its documented "selector/UI drift" contract)
@@ -3583,10 +3637,19 @@ export async function runReconcileTrash(page, month, store, { moveToTrash: trash
     // what stops a stale candidate from trashing a DIFFERENT photo that now
     // lives at the same URL.
     if (candidate.filename != null) {
-      if (currentFilename == null || !filenamesAgree(currentFilename, candidate.filename)) {
+      if (currentFilename == null || (candidate.duplicateOf != null && currentFilename === '') || !filenamesAgree(currentFilename, candidate.filename)) {
         loud(`[reconcile-trash] SAFETY: candidate ${candidate.filename} re-read as "${currentFilename ?? '(none)'}" — identity changed, marking needs_review instead of trashing`);
         store.updateCandidateStatus(month, photoId, 'needs_review');
         continue;
+      }
+      if (candidate.duplicateOf != null) {
+        const parsed = parsePanelText(panelTextBefore);
+        const problem = duplicateTimeDimsProblem(candidate, parsed);
+        if (problem != null) {
+          loud(`[reconcile-trash] SAFETY: duplicate ${photoId} ${problem} — marking needs_review instead of trashing`);
+          store.updateCandidateStatus(month, photoId, 'needs_review');
+          continue;
+        }
       }
     } else {
       // Listing-scan candidate: no stored filename. The photo must (a) yield a

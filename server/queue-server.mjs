@@ -623,7 +623,8 @@ export function createApp({
         const month = reconcileConfirmMatch[1];
         if (!/^\d{4}-\d{2}$/.test(month)) return send(res, 400, { error: 'month must be a "YYYY-MM" string' });
         const body = await readJsonBody(req);
-        const { ids, phoneDeleted = [] } = body;
+        const { ids: rawIds, phoneDeleted = [] } = body;
+        const ids = Array.isArray(rawIds) ? [...new Set(rawIds)] : rawIds; // [G1,G1] must not double-count
         if (!Array.isArray(ids) || ids.length === 0) {
           return send(res, 400, { error: 'ids must be a non-empty array' });
         }
@@ -637,19 +638,54 @@ export function createApp({
         }
         // A photo that is still on the phone may only be trashed from Google
         // after the app reports it deleted from the phone (the trash gate
-        // refuses anything whose filename is on the manifest).
+        // refuses anything whose filename is on the manifest) -- with ONE
+        // exception, a DUPLICATE. matched.json can hold several Google copies
+        // of one phone photo (same phoneIndex). Trashing one copy while another
+        // Google copy is kept leaves the phone photo backed up, so it needs no
+        // phone deletion. LOAD-BEARING: that holds only if a kept sibling
+        // really survives, so the sibling must be outside this request's ids
+        // and not itself already trashed/queued/needs_review (a copy with that
+        // status is gone or in doubt, so it is not a safe survivor); otherwise confirming
+        // every copy (or a copy whose sibling is gone) would erase the last
+        // Google copy of a photo that is still only on the phone. The worker
+        // re-checks the sibling live (see runReconcileTrash) because it can
+        // vanish between this check and the trash.
         const phoneGone = new Set(phoneDeleted);
-        const stillOnPhone = ids.filter((id) => matchedById.has(id) && !phoneGone.has(matchedById.get(id).phoneIndex));
+        const idSet = new Set(ids);
+        const candById = new Map(reconcile.listCandidates(month).map((c) => [c.photoId, c]));
+        const matchedAll = [...matchedById.values()];
+        const duplicateOf = new Map(); // dup photoId -> kept sibling photoId
+        const stillOnPhone = [];
+        for (const id of ids) {
+          const m = matchedById.get(id);
+          if (!m || phoneGone.has(m.phoneIndex)) continue;
+          const sibling = matchedAll.find((o) =>
+            o.photoId !== id && o.phoneIndex === m.phoneIndex && !idSet.has(o.photoId) &&
+            !['trashed', 'queued', 'needs_review'].includes(candById.get(o.photoId)?.status));
+          if (sibling) duplicateOf.set(id, sibling.photoId);
+          else stillOnPhone.push(id);
+        }
         if (stillOnPhone.length > 0) {
           return send(res, 409, { error: 'these photos are still on the phone; delete them there first', ids: stillOnPhone });
         }
+        // All validation is done; everything below mutates.
         if (phoneGone.size > 0) {
           const manifest = reconcile.loadManifest(month) ?? [];
           reconcile.saveManifest(month, manifest.filter((_, i) => !phoneGone.has(i)));
         }
         for (const id of ids) {
           const m = matchedById.get(id);
-          if (m && !known.has(id)) {
+          if (!m) continue;
+          if (duplicateOf.has(id)) {
+            // Carries the matched filename (the worker re-verifies it) and
+            // duplicateOf (the worker checks that sibling is still live).
+            // Appended even over an older line for this id: the last line wins.
+            reconcile.appendCandidate(month, {
+              photoId: m.photoId, filename: m.filename, cameraModel: null, captureDateMs: m.captureDateMs,
+              pixelWidth: m.pixelWidth, pixelHeight: m.pixelHeight, status: 'candidate',
+              duplicateOf: duplicateOf.get(id),
+            });
+          } else if (!known.has(id)) {
             reconcile.appendCandidate(month, {
               photoId: m.photoId, filename: null, cameraModel: null, captureDateMs: m.captureDateMs,
               pixelWidth: m.pixelWidth, pixelHeight: m.pixelHeight, status: 'candidate',

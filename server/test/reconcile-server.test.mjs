@@ -318,3 +318,137 @@ test('POST confirm for a matched photo: 409 until the app reports it deleted fro
   assert.deepEqual(spawnCalls.at(-1), { mode: 'trash', month: m });
   assert.equal((await post(`/reconcile/${m}/confirm`, { ids: ['gid-a'], phoneDeleted: ['x'] })).status, 400);
 });
+
+// ---- duplicate Google copies of a phone photo that is being KEPT ----
+function dupSetup(m, { siblingCandidate = null } = {}) {
+  store.saveManifest(m, [manifestAsset('IMG_A.HEIC'), manifestAsset('IMG_B.HEIC')]);
+  const mk = (photoId, phoneIndex, filename) => ({ photoId, phoneIndex, filename, captureDateMs: 5, pixelWidth: 2316, pixelHeight: 3088 });
+  store.saveMatched(m, [mk('dupA1', 0, 'IMG_A.HEIC'), mk('dupA2', 0, 'IMG_A.HEIC'), mk('solo', 1, 'IMG_B.HEIC')]);
+  if (siblingCandidate) store.appendCandidate(m, candidate('dupA2', 'IMG_A.HEIC', null, { status: siblingCandidate }));
+  store.saveStatus(m, 'ready');
+}
+
+test('POST confirm for a duplicate Google copy with a kept sibling: 200, queued candidate with filename + duplicateOf, phone untouched', async () => {
+  const m = '2026-11';
+  dupSetup(m);
+  const before = spawnCalls.length;
+  const res = await post(`/reconcile/${m}/confirm`, { ids: ['dupA1'], phoneDeleted: [] });
+  assert.equal(res.status, 200);
+  const c = store.listCandidates(m).find((x) => x.photoId === 'dupA1');
+  assert.equal(c.status, 'queued');
+  assert.equal(c.filename, 'IMG_A.HEIC');
+  assert.equal(c.duplicateOf, 'dupA2');
+  assert.equal(c.captureDateMs, 5);
+  assert.equal(store.loadManifest(m).length, 2, 'phone manifest untouched');
+  assert.equal(spawnCalls.length, before + 1);
+  assert.ok(!store.listCandidates(m).some((x) => x.photoId === 'dupA2'), 'the kept sibling is never queued');
+});
+
+test('POST confirm for a duplicate: an older candidate line for the same id is superseded (last line wins)', async () => {
+  const m = '2027-01';
+  dupSetup(m);
+  store.appendCandidate(m, candidate('dupA1', null, null, { status: 'needs_review' }));
+  assert.equal((await post(`/reconcile/${m}/confirm`, { ids: ['dupA1'] })).status, 200);
+  const c = store.listCandidates(m).filter((x) => x.photoId === 'dupA1');
+  assert.equal(c.length, 1);
+  assert.equal(c[0].status, 'queued');
+  assert.equal(c[0].duplicateOf, 'dupA2');
+  assert.equal(c[0].filename, 'IMG_A.HEIC');
+});
+
+test('POST confirm with BOTH copies of one phone photo and no phoneDeleted: 409 (no kept sibling), nothing mutated', async () => {
+  const m = '2027-02';
+  dupSetup(m);
+  const res = await post(`/reconcile/${m}/confirm`, { ids: ['dupA1', 'dupA2'] });
+  assert.equal(res.status, 409);
+  assert.deepEqual((await res.json()).ids.sort(), ['dupA1', 'dupA2']);
+  assert.equal(store.listCandidates(m).length, 0);
+});
+
+for (const status of ['trashed', 'queued', 'needs_review']) {
+  test(`POST confirm for a duplicate whose sibling is already ${status}: 409, nothing mutated`, async () => {
+    const m = { trashed: '2027-03', queued: '2027-04', needs_review: '2027-07' }[status];
+    dupSetup(m, { siblingCandidate: status });
+    const before = store.listCandidates(m);
+    const res = await post(`/reconcile/${m}/confirm`, { ids: ['dupA1'] });
+    assert.equal(res.status, 409);
+    assert.deepEqual((await res.json()).ids, ['dupA1']);
+    assert.deepEqual(store.listCandidates(m), before);
+  });
+}
+
+test('POST confirm mixed batch (valid duplicate + still-on-phone solo): 409 and NOTHING mutated, even with phoneDeleted given', async () => {
+  const m = '2027-05';
+  dupSetup(m);
+  const manifestBefore = JSON.stringify(store.loadManifest(m));
+  const spawnsBefore = spawnCalls.length;
+  const res = await post(`/reconcile/${m}/confirm`, { ids: ['dupA1', 'solo'], phoneDeleted: [] });
+  assert.equal(res.status, 409);
+  assert.deepEqual((await res.json()).ids, ['solo']);
+  assert.equal(store.listCandidates(m).length, 0);
+  assert.equal(JSON.stringify(store.loadManifest(m)), manifestBefore);
+  assert.equal(spawnCalls.length, spawnsBefore);
+  // phoneDeleted for an unrelated index must not be applied either
+  const res2 = await post(`/reconcile/${m}/confirm`, { ids: ['dupA1', 'solo'], phoneDeleted: [0] });
+  assert.equal(res2.status, 409);
+  assert.equal(store.loadManifest(m).length, 2);
+  assert.equal(store.listCandidates(m).length, 0);
+});
+
+test('end to end: confirm a duplicate copy -> real trash pass trashes it, the kept sibling is untouched', async () => {
+  const m = '2027-06';
+  const panel = (f) =>
+    `InfoAdd a descriptionPeopleDetailsAug 5\nWed, 6:54 PMGMT-06:00Apple iPhone 13 Pro` +
+    `ƒ/2.21/632.71mmISO40${f}7.2MP2316 × 3088Uploaded from iOS deviceBacked up (6 MB)Original quality. Learn moreWestminster, CO`;
+  const cap = Date.parse('2026-08-06T00:54:00.000Z');
+  store.saveManifest(m, [manifestAsset('IMG_5000.HEIC')]);
+  const mk = (photoId) => ({ photoId, phoneIndex: 0, filename: 'IMG_5000.HEIC', captureDateMs: cap, pixelWidth: 2316, pixelHeight: 3088 });
+  store.saveMatched(m, [mk('e2eD1'), mk('e2eD2')]);
+  store.saveStatus(m, 'ready');
+  assert.equal((await post(`/reconcile/${m}/confirm`, { ids: ['e2eD1'] })).status, 200);
+  const page = createFakePage({
+    timelineTiles: [{ ariaLabel: 'DX', href: 'e2eD1' }, { ariaLabel: 'SX', href: 'e2eD2' }],
+    timelinePanelTextByLabel: { DX: panel('IMG_5000.HEIC'), SX: panel('IMG_5000.HEIC') },
+  });
+  await runReconcileTrash(page, m, store);
+  const end = await (await get(`/reconcile/${m}/results`)).json();
+  assert.deepEqual(end.results, [{ id: 'e2eD1', status: 'trashed' }]);
+  assert.ok(page.trashedIdentities.has('e2eD1'));
+  assert.ok(!page.trashedIdentities.has('e2eD2'));
+});
+
+test('POST confirm: three copies, ids=[G1,G2] -> 200 and BOTH point at the one copy NOT in ids (never at each other)', async () => {
+  const m = '2027-08';
+  store.saveManifest(m, [manifestAsset('IMG_A.HEIC')]);
+  const mk = (photoId) => ({ photoId, phoneIndex: 0, filename: 'IMG_A.HEIC', captureDateMs: 5, pixelWidth: 2316, pixelHeight: 3088 });
+  store.saveMatched(m, [mk('G1'), mk('G2'), mk('G3')]);
+  assert.equal((await post(`/reconcile/${m}/confirm`, { ids: ['G1', 'G2'] })).status, 200);
+  const by = Object.fromEntries(store.listCandidates(m).map((c) => [c.photoId, c]));
+  assert.equal(by.G1.duplicateOf, 'G3');
+  assert.equal(by.G2.duplicateOf, 'G3');
+  assert.ok(!by.G3);
+});
+
+test('POST confirm: repeat confirms cannot erase the last copy (A: [G1] ok with G2 kept; B: [G2] -> 409 because G1 is queued)', async () => {
+  const m = '2027-09';
+  store.saveManifest(m, [manifestAsset('IMG_A.HEIC')]);
+  const mk = (photoId) => ({ photoId, phoneIndex: 0, filename: 'IMG_A.HEIC', captureDateMs: 5, pixelWidth: 2316, pixelHeight: 3088 });
+  store.saveMatched(m, [mk('G1'), mk('G2')]);
+  assert.equal((await post(`/reconcile/${m}/confirm`, { ids: ['G1'] })).status, 200);
+  const res = await post(`/reconcile/${m}/confirm`, { ids: ['G2'] });
+  assert.equal(res.status, 409);
+  assert.deepEqual((await res.json()).ids, ['G2']);
+  assert.equal(store.listCandidates(m).find((c) => c.photoId === 'G2'), undefined);
+});
+
+test('POST confirm: ids=[G1,G1] is deduped (no double-queue, no corruption); [G1,G1] over both copies still 409', async () => {
+  const m = '2027-10';
+  store.saveManifest(m, [manifestAsset('IMG_A.HEIC')]);
+  const mk = (photoId) => ({ photoId, phoneIndex: 0, filename: 'IMG_A.HEIC', captureDateMs: 5, pixelWidth: 2316, pixelHeight: 3088 });
+  store.saveMatched(m, [mk('G1'), mk('G2')]);
+  const res = await post(`/reconcile/${m}/confirm`, { ids: ['G1', 'G1'] });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).queued, 1);
+  assert.equal(store.listCandidates(m).length, 1);
+  assert.equal(store.listCandidates(m)[0].status, 'queued');
+});
