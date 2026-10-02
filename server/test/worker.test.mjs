@@ -3065,6 +3065,57 @@ test('moveToTrash: verifyByUrl -- the post-trash reload of matchedUrl shows NO t
   assert.ok(gotoUrls.includes('https://photos.google.com/photo/MATCHED-PHOTO'), 'must have reloaded matchedUrl to verify');
 });
 
+test('moveToTrash: verifyByUrl -- a trash banner that renders AFTER the reload resolves still confirms', async () => {
+  // Live 2026-10-02: goto() resolves at domcontentloaded, before Google draws
+  // the "until permanently deleted" banner, so the first read after reload is
+  // always false even for a trashed photo. Model that: false on the first
+  // banner read after the verify reload, true from then on.
+  let dialogVisible = false;
+  let toastVisible = false;
+  let bannerReadsSinceReload = null;
+  const page = {
+    url: () => 'https://photos.google.com/photo/MATCHED-PHOTO',
+    keyboard: { press: async (key) => { if (key === '#') dialogVisible = true; } },
+    locator: (selector) => ({
+      first: () => ({
+        isVisible: async () => {
+          if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) return dialogVisible;
+          if (/moved to \(trash\|bin\)/i.test(selector)) return toastVisible;
+          if (/until permanently deleted/i.test(selector)) {
+            if (bannerReadsSinceReload == null) return false;
+            return ++bannerReadsSinceReload > 1;
+          }
+          return false;
+        },
+        click: async () => {
+          if (/has-text\("Move to trash"\)|has-text\("Delete"\)/i.test(selector)) {
+            dialogVisible = false;
+            toastVisible = true;
+          }
+        },
+      }),
+      all: async () => [],
+    }),
+    viewportSize: () => ({ width: 1280, height: 800 }),
+    mouse: { click: async () => {} },
+    evaluate: async () => ({
+      detailsAndFile: ['Details\nSep 1\nMon, 1:00 PM\nGMT-04:00\nIMG_1.HEIC\n100 × 100'],
+      dimsAndFile: [],
+      fileOnly: [],
+    }),
+    goto: async () => { bannerReadsSinceReload = 0; },
+  };
+
+  const { confirmed, verifiedByUrl } = await moveToTrash(page, 'PANEL TEXT', {
+    matchedUrl: 'https://photos.google.com/photo/MATCHED-PHOTO',
+    expectedFilename: 'IMG_1.HEIC',
+    verifyByUrl: true,
+  });
+
+  assert.equal(verifiedByUrl, true, 'a banner that appears a moment after load must still verify the trash');
+  assert.equal(confirmed, true);
+});
+
 test('walkTimeline: normal case -- trashed and verified, matchedUrl logged on the [trashed] line', async () => {
   await withTempQueue(async (queue) => {
     const { job } = queue.enqueue({ filename: 'IMG_9960.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });

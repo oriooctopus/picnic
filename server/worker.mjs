@@ -1288,7 +1288,18 @@ async function verifyTrashByUrl(page, matchedUrl) {
     loud(`[trash] SAFETY: could not reload ${matchedUrl} to verify the trash -- ${err.message || err} -- treating as NOT verified`);
     return { confirmed: false, guardFailed: false, verifiedByUrl: false };
   }
-  const bannerVisible = await page.locator('text=/until permanently deleted/i').first().isVisible().catch(() => false);
+  // POLL for the banner, never a single check: goto() resolves at
+  // domcontentloaded, before Google renders the photo chrome, so a one-shot
+  // isVisible() read "no banner" on photos that WERE trashed. Live 2026-10-02:
+  // the March reconcile marked all 39 needs_review, and 31 of them were in
+  // the trash when re-checked 3.5s after load. 10s covers a slow tailnet load.
+  const banner = page.locator('text=/until permanently deleted/i').first();
+  const deadline = Date.now() + (FAST_DELAYS ? 20 : 10000);
+  let bannerVisible = false;
+  while (!bannerVisible && Date.now() < deadline) {
+    bannerVisible = await banner.isVisible().catch(() => false);
+    if (!bannerVisible) await sleep(FAST_DELAYS ? 1 : 500);
+  }
   const redirectedToTrash = /\/trash\//i.test(page.url());
   const verifiedByUrl = bannerVisible || redirectedToTrash;
   if (!verifiedByUrl) {
