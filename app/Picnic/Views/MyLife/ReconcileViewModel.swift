@@ -69,6 +69,22 @@ final class ReconcileViewModel: ObservableObject {
     @Published private(set) var actionMessage: String?
     /// Phone photos actually deleted by the last confirm, for the results screen.
     @Published private(set) var phoneDeletedCount: Int = 0
+    /// Google ids sent by the last confirm. GET /results returns EVERY
+    /// candidate of the month, including ones the user kept (status
+    /// "candidate"), so the results screen filters down to these.
+    @Published private(set) var confirmedGoogleIds: [String] = []
+
+    /// The results rows for what this confirm actually asked for, in the
+    /// order sent. Bug 2026-10-02: unfiltered, kept photos showed up as a raw
+    /// "candidate" row next to the real outcomes.
+    static func resultsForConfirm(_ all: [ReconcileResultEntry], confirmed: [String]) -> [ReconcileResultEntry] {
+        let byId = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        return confirmed.compactMap { byId[$0] }
+    }
+
+    var confirmResults: [ReconcileResultEntry] {
+        Self.resultsForConfirm(results?.results ?? [], confirmed: confirmedGoogleIds)
+    }
     /// Number of on-phone assets in the manifest, for the header summary line.
     @Published private(set) var phoneAssetCount: Int = 0
 
@@ -230,6 +246,7 @@ final class ReconcileViewModel: ObservableObject {
             }
         }
         phoneDeletedCount = plan.phone.count
+        confirmedGoogleIds = plan.googleIds
         guard !plan.googleIds.isEmpty else {
             results = ReconcileResults(month: monthKey, done: true, results: [])
             state = .results

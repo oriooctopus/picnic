@@ -392,7 +392,7 @@ struct ReconcileReviewView: View {
     }
 
     private var resultEntries: [ReconcileResultEntry] {
-        viewModel.results?.results ?? []
+        viewModel.confirmResults
     }
 
     private func filename(for id: String) -> String {
