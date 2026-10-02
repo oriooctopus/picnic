@@ -285,7 +285,7 @@ struct ReconcileReviewView: View {
     // MARK: Thumbnail
 
     /// The tile image: a solid color in the seeded UI-test path, the phone's
-    /// own PhotoKit thumbnail for phone-only items, an AsyncImage (bearer
+    /// own PhotoKit thumbnail for phone-only items, a RemoteThumbImage (bearer
     /// token as a `?token=` query param) for anything Google has.
     @ViewBuilder
     private func itemImage(for item: ReconcileItem, fill: Bool) -> some View {
@@ -305,18 +305,7 @@ struct ReconcileReviewView: View {
         if let index = item.phoneIndex, item.thumbUrl == nil, month.assets.indices.contains(index) {
             PhoneAssetImage(asset: month.assets[index], fill: fill)
         } else {
-            AsyncImage(url: item.thumbnailURL) { phase in
-                switch phase {
-                case .success(let image):
-                    if fill { image.resizable().scaledToFill() } else { image.resizable().scaledToFit() }
-                case .failure:
-                    Color(white: 0.2)
-                case .empty:
-                    Color(white: 0.15)
-                @unknown default:
-                    Color(white: 0.15)
-                }
-            }
+            RemoteThumbImage(url: item.thumbnailURL, fill: fill)
         }
     }
 
@@ -470,6 +459,47 @@ private struct PhoneAssetImage: View {
         }
         .task {
             image = await ThumbnailLoader.thumbnail(for: asset, targetSize: CGSize(width: 400, height: 400))
+        }
+    }
+}
+
+/// A Google tile's image, fetched from the mirror server. Replaces AsyncImage,
+/// which in a LazyVGrid left whole rows permanently blank on device: a load
+/// cancelled by scrolling (or a transient tailnet error) settles in `.failure`
+/// and AsyncImage never retries it, though the server served every thumb fine.
+/// Here `.task` re-runs each time the tile reappears, a failed fetch retries
+/// with backoff, and decoded images are cached so scrolling back is instant.
+private struct RemoteThumbImage: View {
+    let url: URL?
+    let fill: Bool
+    @State private var image: UIImage?
+
+    private static let cache = NSCache<NSURL, UIImage>()
+
+    var body: some View {
+        Group {
+            if let image {
+                if fill { Image(uiImage: image).resizable().scaledToFill() } else { Image(uiImage: image).resizable().scaledToFit() }
+            } else {
+                Color(white: 0.15)
+            }
+        }
+        .task(id: url) {
+            guard let url else { return }
+            if let cached = Self.cache.object(forKey: url as NSURL) { image = cached; return }
+            // 3 attempts, 0.5s then 1s apart: enough to ride out a dropped
+            // tailnet request without hammering a server that's really down.
+            for attempt in 0..<3 {
+                if attempt > 0 { try? await Task.sleep(for: .milliseconds(500 * attempt)) }
+                if Task.isCancelled { return }
+                if let (data, response) = try? await URLSession.shared.data(from: url),
+                   (response as? HTTPURLResponse)?.statusCode == 200,
+                   let loaded = UIImage(data: data) {
+                    Self.cache.setObject(loaded, forKey: url as NSURL)
+                    image = loaded
+                    return
+                }
+            }
         }
     }
 }

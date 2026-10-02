@@ -76,7 +76,7 @@ struct ReconcileItem: Decodable, Identifiable {
     var onPhone: Bool { source != .google }
     var inGoogle: Bool { source != .phone }
 
-    /// Full thumbnail URL for AsyncImage. The thumbnail GET routes are the
+    /// Full thumbnail URL for ReconcileReviewView's RemoteThumbImage. The thumbnail GET routes are the
     /// browser-facing kind that read the token from `?token=` rather than the
     /// Authorization header (mirroring how /issues and /thumb already work,
     /// per MirrorClient.fetchStatus's comment).
