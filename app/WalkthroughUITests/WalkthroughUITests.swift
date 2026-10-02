@@ -628,6 +628,39 @@ final class WalkthroughUITests: XCTestCase {
                        "Toggling hideSorted should stay on the same (unsorted) photo, not skip past it to the next one")
     }
 
+    /// "Mark sorted till here" keeps every unsorted photo before the current
+    /// one, so after jumping to card 3 via the filmstrip and hiding sorted
+    /// pics, the total drops by 2 and the deck stays on the same photo.
+    func test14bMarkSortedTillHere() throws {
+        _ = openMayDeck()
+
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+        let before = totalCount(fromPosition: position.label)
+        XCTAssertGreaterThan(before, 3, "Need at least 4 photos")
+
+        let thumb = app.descendants(matching: .any)["filmstrip.thumb.2"].firstMatch
+        XCTAssertTrue(thumb.waitForExistence(timeout: 10), "Filmstrip should show a third thumbnail")
+        thumb.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertEqual(numerator(fromPosition: position.label), 3)
+
+        app.buttons["deck.filter"].tap()
+        let markButton = app.descendants(matching: .any)["deck.markSortedToHere"].firstMatch
+        XCTAssertTrue(markButton.waitForExistence(timeout: 5), "Popover should offer 'Mark sorted till here'")
+        markButton.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+
+        app.buttons["deck.filter"].tap()
+        let toggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        toggle.tap()
+        tapOutside()
+
+        XCTAssertEqual(totalCount(fromPosition: position.label), before - 2)
+        XCTAssertEqual(numerator(fromPosition: position.label), 1)
+    }
+
     /// "3 OF 42" -> 42. Returns -1 when the label doesn't parse, so a failed
     /// assertion reports the raw label rather than silently comparing zeros.
     private func totalCount(fromPosition label: String) -> Int {

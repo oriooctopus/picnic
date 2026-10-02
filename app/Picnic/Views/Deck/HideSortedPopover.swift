@@ -2,6 +2,7 @@ import SwiftUI
 
 struct HideSortedPopover: View {
     @Binding var hideSorted: Bool
+    var markSortedToHere: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -26,6 +27,14 @@ struct HideSortedPopover: View {
             // stable "on"/"off" string to assert on instead of trying to
             // infer state from the symbol name.
             .accessibilityValue(hideSorted ? "on" : "off")
+
+            Divider()
+
+            Button(action: markSortedToHere) {
+                Label("Mark sorted till here", systemImage: "checkmark.circle")
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("deck.markSortedToHere")
 
             Divider()
 

@@ -492,7 +492,10 @@ struct DeckView: View {
             }
             .accessibilityIdentifier("deck.filter")
             .popover(isPresented: $showHidePopover) {
-                HideSortedPopover(hideSorted: $viewModel.hideSorted)
+                HideSortedPopover(hideSorted: $viewModel.hideSorted) {
+                    viewModel.markSortedUpToCurrent()
+                    showHidePopover = false
+                }
                     .presentationCompactAdaptation(.popover)
             }
         }

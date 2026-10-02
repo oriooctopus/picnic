@@ -304,6 +304,23 @@ final class DeckViewModel: ObservableObject {
         }
     }
 
+    /// Marks every still-unsorted photo before the current one (in deck
+    /// order) as kept, as one undo batch. The current photo stays unsorted.
+    /// Returns how many were marked.
+    @discardableResult
+    func markSortedUpToCurrent() -> Int {
+        guard let current = currentAsset,
+              let end = orderedAssets.firstIndex(where: { $0.localIdentifier == current.localIdentifier })
+        else { return 0 }
+        let toMark = orderedAssets[..<end].filter { sortStore.state(for: $0) == .unsorted }
+        guard !toMark.isEmpty else { return 0 }
+        let changes = toMark.map { UndoEntry.Change(assetID: $0.localIdentifier, previousState: .unsorted) }
+        for asset in toMark { sortStore.setState(.kept, for: asset, monthKey: month.key) }
+        undoStack.append(UndoEntry(changes: changes, compareGroupID: nil))
+        refresh(follow: current.localIdentifier)
+        return toMark.count
+    }
+
     private func advance() {
         if currentIndex < visibleAssets.count - 1 {
             // withAnimation only wraps the resulting SwiftUI view diff — the
