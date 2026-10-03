@@ -81,8 +81,17 @@ final class MirrorQueueStoreTests: XCTestCase {
         let (store, context) = try makeStore(poster: poster)
         let job = insertJob(context, store: store)
 
-        store.scheduleDrain()
-        // Reached only if scheduleDrain returned without awaiting the poster.
+        // Run in a separate Task so a blocking scheduleDrain shows up as a
+        // timeout here instead of hanging the whole test run. (`await` on a
+        // non-async scheduleDrain is a harmless warning; it is there so the
+        // test still compiles if scheduleDrain regresses to async.)
+        let returned = expectation(description: "scheduleDrain returned")
+        Task { @MainActor in
+            await store.scheduleDrain()
+            returned.fulfill()
+        }
+        let outcome = await XCTWaiter.fulfillment(of: [returned], timeout: 3)
+        XCTAssertEqual(outcome, .completed, "scheduleDrain blocked on the suspended poster")
         await waitUntil { poster.calls.count == 1 }
         XCTAssertEqual(job.status, "pending")
         XCTAssertEqual(store.pendingCount, 1)
