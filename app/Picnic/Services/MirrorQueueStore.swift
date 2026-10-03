@@ -17,12 +17,23 @@ final class MirrorQueueStore: ObservableObject {
     // every time one poll drops a packet.
     @Published private(set) var serverStatus: MirrorQueueStatus?
     private var pollTask: Task<Void, Never>?
+    // Injected so tests can drive drainQueue() with a controllable poster
+    // instead of hitting the network; production uses MirrorClient.post.
+    private let post: (MirrorJobRecord) async throws -> Void
+    // drainQueue() suspends at every POST, so a second call (foreground
+    // drain overlapping the fire-and-forget one from a delete commit) would
+    // otherwise fetch the same still-"pending" jobs and double-POST them.
+    private var isDraining = false
     // 5 minutes: the banner's own threshold is a full HOUR of backlog, so
     // polling faster than that buys no earlier signal, only battery/data.
     private static let pollIntervalNanoseconds: UInt64 = 5 * 60 * 1_000_000_000
 
-    init(context: ModelContext) {
+    init(
+        context: ModelContext,
+        post: @escaping (MirrorJobRecord) async throws -> Void = MirrorClient.post(job:)
+    ) {
         self.context = context
+        self.post = post
         refreshCount()
     }
 
@@ -60,13 +71,25 @@ final class MirrorQueueStore: ObservableObject {
         pendingCount = (try? context.fetchCount(descriptor)) ?? 0
     }
 
+    /// Fire-and-forget drain. The delete commit uses this instead of awaiting
+    /// drainQueue(): each POST can hang up to URLSession's 60s timeout on a
+    /// flaky network, and the deck must not stay locked in "committing" for
+    /// that long -- the jobs are already persisted, so a slow drain only
+    /// delays the mirror, never loses anything.
+    func scheduleDrain() {
+        Task { await drainQueue() }
+    }
+
     func drainQueue() async {
+        guard !isDraining else { return }
+        isDraining = true
+        defer { isDraining = false }
         let descriptor = FetchDescriptor<MirrorJobRecord>(predicate: #Predicate { $0.status == "pending" })
         guard let jobs = try? context.fetch(descriptor), !jobs.isEmpty else { return }
 
         for job in jobs {
             do {
-                try await MirrorClient.post(job: job)
+                try await post(job)
                 job.status = "sent"
                 job.lastError = nil
             } catch {

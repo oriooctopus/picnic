@@ -422,7 +422,9 @@ final class DeckViewModel: ObservableObject {
             // .markedForDelete, so refresh() derives an already-empty (of
             // these assets) pendingDeleteIDs on its own.
             refresh(follow: currentAsset?.localIdentifier)
-            await mirrorQueue.drainQueue()
+            // Not awaited: a hung POST would keep isCommitting true (deck
+            // locked) for up to a minute per job. See scheduleDrain().
+            mirrorQueue.scheduleDrain()
         } catch {
             // If the user declines the system confirm dialog (or the delete
             // otherwise fails), pendingDeleteIDs stays intact so nothing is
