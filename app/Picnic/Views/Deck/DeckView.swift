@@ -514,7 +514,7 @@ struct DeckView: View {
             }
         }
         .font(.system(size: 22))
-        .padding(.vertical, 14)
+        .padding(.vertical, 16)
     }
 
     private var positionAndFilmstrip: some View {
