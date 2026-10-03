@@ -9,6 +9,7 @@ final class AppState: ObservableObject {
     let photoLibrary = PhotoLibraryService()
     let sortStore: SortStore
     let mirrorQueue: MirrorQueueStore
+    let outfitLog: OutfitLogStore
 
     @Published var monthBuckets: [MonthBucket] = []
     // Set by MonthCardView's "Clean up Google" context-menu button; MyLifeView
@@ -95,6 +96,15 @@ final class AppState: ObservableObject {
             // auto-open to a stale month instead of the calendar-latest one.
             UserDefaults.standard.removeObject(forKey: SortStore.lastSwipedMonthKeyDefaultsKey)
         }
+        // Debug-only, UI-test-only: logged-outfit marks persist in SwiftData
+        // across relaunch (that is what the persistence test proves), so the
+        // test's first launch clears them to start from a known state.
+        if args.contains("--reset-outfit-log") {
+            for job in (try? modelContext.fetch(FetchDescriptor<OutfitImportJob>())) ?? [] {
+                modelContext.delete(job)
+            }
+            try? modelContext.save()
+        }
         #else
         isSeeding = false
         skipAutoOpenDeck = false
@@ -103,6 +113,17 @@ final class AppState: ObservableObject {
         // LOAD-BEARING ORDERING comment at the top of init().
         sortStore = SortStore(context: modelContext)
         mirrorQueue = MirrorQueueStore(context: modelContext)
+        #if DEBUG
+        // UI-test mode (every UI test launches with --seed-library) must never
+        // reach the real Outfits server: inject an uploader that just succeeds.
+        if args.contains("--seed-library") {
+            outfitLog = OutfitLogStore(context: modelContext, upload: { _ in })
+        } else {
+            outfitLog = OutfitLogStore(context: modelContext)
+        }
+        #else
+        outfitLog = OutfitLogStore(context: modelContext)
+        #endif
     }
 
     func bootstrap() async {
@@ -157,6 +178,7 @@ final class AppState: ObservableObject {
         refreshMonths()
         #endif
         await mirrorQueue.drainQueue()
+        await outfitLog.drainQueue()
         // Launch counts as a foreground -- see PicnicApp.swift's scenePhase
         // handler for the background/re-foreground case. Fetch once
         // immediately rather than waiting out the first poll interval so a

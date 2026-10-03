@@ -78,6 +78,7 @@ OPTIONAL = [
     "99-final-test18DeckPendingDeletePersistsAcrossRelaunch",
     "99-final-test19DeckSwipeDownFromTopExits",
     "99-final-test20CompareButtonsReachableWithMismatchedAspect",
+    "60-outfit-before-tap", "61-outfit-after-tap", "62-outfit-after-relaunch",
 ]
 
 EXPECTED = REQUIRED + OPTIONAL

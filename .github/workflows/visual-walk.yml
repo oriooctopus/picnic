@@ -304,6 +304,26 @@ jobs:
           python3 -m pip install --quiet --break-system-packages pillow
           python3 .github/scripts/check_deck_card_not_frozen.py "$BEFORE" "$AFTER"
 
+      # Real assertion for test52DeckLogOutfitFillsButtonAndPersists: counts
+      # lilac pixels in the action row (button) and top band (toast) across the
+      # before / after-tap / after-relaunch screenshots.
+      - name: Check Log-as-outfit button fills and persists (pixel measurement)
+        if: always()
+        run: |
+          B="screenshots/60-outfit-before-tap.png"
+          A="screenshots/61-outfit-after-tap.png"
+          R="screenshots/62-outfit-after-relaunch.png"
+          if [ ! -f "$B" ] || [ ! -f "$A" ] || [ ! -f "$R" ]; then
+            echo "Missing outfit screenshots (likely an only_testing run that excluded test52DeckLogOutfitFillsButtonAndPersists) — skipping."
+            if [ -z "${{ github.event.inputs.only_testing }}" ]; then
+              echo "::error::full-suite run, but the screenshots this check needs were never produced"
+              exit 1
+            fi
+            exit 0
+          fi
+          python3 -m pip install --quiet --break-system-packages pillow
+          python3 .github/scripts/check_outfit_button.py "$B" "$A" "$R"
+
       # Real assertion for test38CompareLandscapePhotoIsNotCropped: Compare
       # used to draw its photo with .aspectRatio(contentMode: .fill), which
       # crops a source photo to fill the (roughly portrait) card box instead

@@ -129,6 +129,7 @@ struct MyLifeView: View {
                 mirrorQueue: appState.mirrorQueue
             ))
             .environmentObject(appState)
+            .environmentObject(appState.outfitLog)
             .onDisappear { appState.refreshMonths() }
         }
         // Second, independent cover for the reconcile review screen — the

@@ -125,7 +125,7 @@ the registered port.)
 
 ## v1 scope cuts
 - No gamification beyond the streak counter display; no gift/referral UI.
-- No albums/add-to-album action (button can be present but disabled).
+- No albums/add-to-album action. The slot between heart and share is the one-tap "Log as outfit" button, which sends the photo to the Outfits server (port 8314) as a durable, retried job.
 - No share-sheet niceties beyond the system share sheet.
 - Profile tab = placeholder.
 - Similarity clustering = time-proximity only (no ML embeddings yet).

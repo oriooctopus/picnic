@@ -6,6 +6,7 @@ enum PersistenceController {
         MonthSortMeta.self,
         StreakRecord.self,
         MirrorJobRecord.self,
+        OutfitImportJob.self,
         CompareGroupResolution.self,
     ])
 

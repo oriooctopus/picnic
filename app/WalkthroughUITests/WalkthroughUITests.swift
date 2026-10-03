@@ -2125,6 +2125,31 @@ final class WalkthroughUITests: XCTestCase {
         return (idleSummary, dragSummary)
     }
 
+    /// One tap on the hanger fills it lilac and shows the "Logged to Outfits"
+    /// toast; the filled state survives relaunch. Asserted on screenshot
+    /// pixels by .github/scripts/check_outfit_button.py (before / after /
+    /// relaunched), never on element frames.
+    func test52DeckLogOutfitFillsButtonAndPersists() throws {
+        relaunch(withExtraArguments: ["--reset-outfit-log"])
+        openMayDeck()
+        let button = app.buttons["deck.logOutfit"]
+        XCTAssertTrue(button.waitForExistence(timeout: 10), "Log-as-outfit button should exist on a photo card")
+        XCTAssertEqual(button.value as? String, "not logged")
+        capture("60-outfit-before-tap", delay: 0.5)
+
+        button.tap()
+        // Toast is up for ~4s; capture well inside that window.
+        capture("61-outfit-after-tap", delay: 0.6)
+        XCTAssertTrue(app.buttons["deck.outfitToast.review"].exists, "Review now action should be on the toast")
+        XCTAssertEqual(button.value as? String, "logged")
+
+        relaunch(withExtraArguments: [])
+        openMayDeck()
+        XCTAssertTrue(app.buttons["deck.logOutfit"].waitForExistence(timeout: 10))
+        // Past the toast's 4s lifetime, and no toast is ever shown on a plain reopen.
+        capture("62-outfit-after-relaunch", delay: 1.0)
+    }
+
     /// setUp already launched the app; relaunching is how a test opts into
     /// extra seeding without making every other test pay for it.
     private func relaunch(withExtraArguments extra: [String]) {

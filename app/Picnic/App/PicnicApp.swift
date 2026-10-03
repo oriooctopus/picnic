@@ -10,6 +10,7 @@ struct PicnicApp: App {
         WindowGroup {
             RootTabView()
                 .environmentObject(appState)
+                .environmentObject(appState.outfitLog)
                 .preferredColorScheme(.dark)
                 .task {
                     await appState.bootstrap()
@@ -24,6 +25,7 @@ struct PicnicApp: App {
                     // suspended process.
                     if newPhase == .active {
                         Task { await appState.mirrorQueue.drainQueue() }
+                        Task { await appState.outfitLog.drainQueue() }
                         Task { await appState.mirrorQueue.refreshServerStatus() }
                         appState.mirrorQueue.startPolling()
                     } else {

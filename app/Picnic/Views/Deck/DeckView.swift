@@ -4,6 +4,7 @@ import AVFoundation
 
 struct DeckView: View {
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var outfitLog: OutfitLogStore
     @Environment(\.dismiss) private var dismiss
     @StateObject var viewModel: DeckViewModel
 
@@ -45,6 +46,17 @@ struct DeckView: View {
     /// Only flips on enter/exit, so it's fine for this to rebuild the body.
     @State private var isTrimming = false
     @State private var trimError: String?
+    /// Transient note at the top of the deck: "Logged to Outfits | Review now",
+    /// or the short failure note when Overland won't open.
+    @State private var toast: DeckToast?
+    @State private var toastDismissTask: Task<Void, Never>?
+
+    enum DeckToast: Equatable {
+        case logged(assetID: String)
+        case openFailed
+    }
+
+    static let outfitLilac = Color(red: 201 / 255, green: 162 / 255, blue: 255 / 255)
 
     /// Every card — the live one and the dimmed peek underneath — renders at
     /// this fixed portrait ratio so the outline never changes shape between
@@ -159,6 +171,7 @@ struct DeckView: View {
         // Always mounted (invisible) so a UI test can read the numbers without
         // needing the HUD itself shown.
         .overlay(alignment: .topLeading) { PerfStatsProbe() }
+        .overlay(alignment: .top) { toastView }
         .task(id: viewModel.currentAsset?.localIdentifier) {
             await loadCurrentImage()
         }
@@ -497,9 +510,7 @@ struct DeckView: View {
                 Image(systemName: isFav ? "heart.fill" : "heart")
                     .foregroundStyle(isFav ? .red : .white)
             }
-            // Add-to-album: present but disabled, per SPEC.md v1 scope cuts.
-            Image(systemName: "text.badge.plus")
-                .foregroundStyle(.white.opacity(0.3))
+            outfitButton
             Button {
                 guard let asset = viewModel.currentAsset else { return }
                 ShareSheetPresenter.present(asset: asset)
@@ -515,6 +526,76 @@ struct DeckView: View {
         }
         .font(.system(size: 22))
         .padding(.vertical, 16)
+    }
+
+    /// One-tap "Log as outfit". Outline until the photo is logged, then lilac;
+    /// tapping a logged photo opens Review instead of re-importing. Photos only.
+    private var outfitButton: some View {
+        let asset = viewModel.currentAsset
+        let isVideo = asset?.mediaType == .video
+        let isLogged = asset.map { outfitLog.isLogged($0) } ?? false
+        return Button {
+            guard let asset else { return }
+            if isLogged {
+                openReview(assetID: asset.localIdentifier)
+            } else {
+                outfitLog.log(assetID: asset.localIdentifier, takenAt: asset.creationDate ?? Date())
+                showToast(.logged(assetID: asset.localIdentifier), seconds: 4)
+            }
+        } label: {
+            Image(systemName: "hanger")
+                .foregroundStyle(isVideo ? .white.opacity(0.3) : (isLogged ? Self.outfitLilac : .white))
+        }
+        .disabled(isVideo)
+        .accessibilityIdentifier("deck.logOutfit")
+        .accessibilityValue(isLogged ? "logged" : "not logged")
+    }
+
+    private func showToast(_ new: DeckToast, seconds: Double) {
+        toastDismissTask?.cancel()
+        withAnimation { toast = new }
+        toastDismissTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            withAnimation { toast = nil }
+        }
+    }
+
+    private func openReview(assetID: String) {
+        Task {
+            let opened = await UIApplication.shared.open(OutfitReview.url(forAssetID: assetID))
+            if !opened { showToast(.openFailed, seconds: 3) }
+        }
+    }
+
+    @ViewBuilder
+    private var toastView: some View {
+        if let toast {
+            HStack(spacing: 12) {
+                switch toast {
+                case .logged(let assetID):
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(Color(red: 60 / 255, green: 230 / 255, blue: 176 / 255))
+                    Text("Logged to Outfits").foregroundStyle(Color(red: 240 / 255, green: 234 / 255, blue: 251 / 255))
+                    Rectangle().fill(.white.opacity(0.25)).frame(width: 1, height: 18)
+                    Button { openReview(assetID: assetID) } label: {
+                        Text("Review now").fontWeight(.bold).foregroundStyle(Self.outfitLilac)
+                    }
+                    .accessibilityIdentifier("deck.outfitToast.review")
+                case .openFailed:
+                    Text("Couldn't open Overland").foregroundStyle(Color(red: 240 / 255, green: 234 / 255, blue: 251 / 255))
+                }
+            }
+            .font(.system(size: 15, weight: .semibold))
+            .padding(.horizontal, 18)
+            .padding(.vertical, 13)
+            .background(Capsule().fill(Color(red: 30 / 255, green: 22 / 255, blue: 48 / 255).opacity(0.92)))
+            .overlay(Capsule().stroke(Self.outfitLilac.opacity(0.5), lineWidth: 1))
+            .padding(.top, 60)
+            .transition(.opacity)
+            .accessibilityIdentifier("deck.outfitToast")
+        }
     }
 
     private var positionAndFilmstrip: some View {

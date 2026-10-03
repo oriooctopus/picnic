@@ -14,6 +14,13 @@ enum Config {
         URL(string: "http://\(mirrorHost):\(mirrorPort)/queue")!
     }
 
+    /// Outfits server: same host as the mirror, no auth, plain http over the tailnet.
+    static let outfitsPort = 8314
+
+    static var outfitsImportURL: URL {
+        URL(string: "http://\(mirrorHost):\(outfitsPort)/api/outfits/import")!
+    }
+
     /// Full URL for a route under the mirror server's `/reconcile` namespace.
     /// The reconcile routes share the mirror's host/port and bearer token
     /// (see ReconcileClient.swift) — only the path differs from /queue.
