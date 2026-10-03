@@ -53,6 +53,7 @@ REQUIRED = [
     "46-filmstrip-hidden-before-unhide", "47-filmstrip-recentered-after-unhide",
     "reconcile-review",
     "reconcile-scanning",
+    "51-video-trim-open", "51-video-trim-dragged", "51-video-trim-reopened",
 ]
 
 # Best-effort: one per test method, captured in tearDown. See module

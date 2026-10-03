@@ -2847,4 +2847,91 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertFalse(app.buttons["reconcile.confirmButton"].exists,
                        "Must not render the confirm bar while status is still \"scanning\"")
     }
+
+    /// Parses the trim bar's "m:ss.t" kept-length label into seconds.
+    private func trimLengthSeconds(_ label: String) -> Double {
+        let parts = label.split(separator: ":")
+        guard parts.count == 2, let minutes = Double(parts[0]), let seconds = Double(parts[1]) else {
+            XCTFail("Unparseable trim length label: \(label)")
+            return -1
+        }
+        return minutes * 60 + seconds
+    }
+
+    /// Video trim: shortening a 2.0s clip must be written to PhotoKit (a
+    /// content edit on the asset) AND the deck's player must reload the
+    /// edited version -- proven by re-opening trim mode afterwards and
+    /// seeing the shorter clip length as the new "full" length.
+    func test51DeckVideoTrimSavesShorterClip() throws {
+        openMyLifeGrid()
+        let marchMonth = app.descendants(matching: .any)["monthCard.2026-03"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(marchMonth, initialTimeout: 30),
+                      "Seeded month 2026-03 (photo + two videos) should appear in the grid")
+        marchMonth.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["deck.card"].firstMatch.waitForExistence(timeout: 20))
+
+        // Jump to a video card via the filmstrip (no swiping: that persists
+        // sort state across tests). Only video cards show the scissors.
+        let trimButton = app.buttons["deck.trim"]
+        var onVideo = false
+        for index in 0..<3 {
+            let thumb = app.descendants(matching: .any)["filmstrip.thumb.\(index)"].firstMatch
+            guard thumb.waitForExistence(timeout: 10) else { continue }
+            thumb.tap()
+            if trimButton.waitForExistence(timeout: 4) { onVideo = true; break }
+        }
+        XCTAssertTrue(onVideo, "One of March's cards is a video and should show the trim button")
+
+        trimButton.tap()
+        let lengthLabel = app.staticTexts["trim.length"]
+        XCTAssertTrue(lengthLabel.waitForExistence(timeout: 10), "Trim bar should open")
+        // duration arrives asynchronously; wait for the full clip length.
+        let fullPredicate = NSPredicate(format: "label == %@", "0:02.0")
+        expectation(for: fullPredicate, evaluatedWith: lengthLabel)
+        waitForExpectations(timeout: 15)
+        capture("51-video-trim-open")
+
+        let endHandle = app.descendants(matching: .any)["trim.endHandle"].firstMatch
+        XCTAssertTrue(endHandle.exists)
+        endHandle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.2,
+                   thenDragTo: endHandle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                       .withOffset(CGVector(dx: -150, dy: 0)),
+                   withVelocity: .slow,
+                   thenHoldForDuration: 0.3)
+        let shortened = trimLengthSeconds(lengthLabel.label)
+        XCTAssertLessThan(shortened, 1.9, "Dragging the end handle left must shorten the kept length, got \(lengthLabel.label)")
+        XCTAssertGreaterThan(shortened, 0.4)
+        capture("51-video-trim-dragged")
+
+        app.buttons["trim.save"].tap()
+
+        // iOS asks "Allow Picnic to modify this video?"
+        if let alert = firstSystemAlert(timeout: 20) {
+            let names = alert.buttons.allElementsBoundByIndex.map { $0.label }
+            let note = XCTAttachment(string: "Alert buttons: \(names)")
+            note.lifetime = .keepAlways
+            add(note)
+            let modify = alert.buttons["Modify"]
+            if modify.exists { modify.tap() } else {
+                XCTFail("No Modify button in system alert; buttons: \(names)")
+            }
+        }
+
+        // Trim bar closes once the save completes.
+        let reappeared = trimButton.waitForExistence(timeout: 60)
+        XCTAssertTrue(reappeared, "Trim bar should close after a successful save")
+
+        trimButton.tap()
+        XCTAssertTrue(lengthLabel.waitForExistence(timeout: 10))
+        // Player reloads asynchronously; the label first shows 0:00.0 then the new duration.
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline && abs(trimLengthSeconds(lengthLabel.label) - shortened) > 0.1 {
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        let reopened = trimLengthSeconds(lengthLabel.label)
+        capture("51-video-trim-reopened")
+        XCTAssertEqual(reopened, shortened, accuracy: 0.1,
+                       "After saving, the edited (shorter) clip should be the new full length; got \(lengthLabel.label)")
+    }
 }
