@@ -41,6 +41,10 @@ struct DeckView: View {
     /// the Compare cover never presented while a live-photo cover was also
     /// attached here.
     @State private var presentation: DeckPresentation?
+    /// True while VideoTrimBar replaces the video controls + action row.
+    /// Only flips on enter/exit, so it's fine for this to rebuild the body.
+    @State private var isTrimming = false
+    @State private var trimError: String?
 
     /// Every card — the live one and the dimmed peek underneath — renders at
     /// this fixed portrait ratio so the outline never changes shape between
@@ -128,13 +132,21 @@ struct DeckView: View {
             // Outside and below the card on purpose — see VideoControlBar's
             // doc comment: a scrub drag here must never compete with the
             // card's own swipe pan gesture.
-            if let asset = viewModel.currentAsset, asset.mediaType == .video {
-                VideoControlBar(controller: videoController)
-                    .padding(.horizontal, 28)
-                    .padding(.top, 10)
-            }
+            if let asset = viewModel.currentAsset, asset.mediaType == .video, isTrimming {
+                VideoTrimBar(
+                    controller: videoController,
+                    onCancel: { endTrimming() },
+                    onSave: { await saveTrim(asset: asset, window: $0) }
+                )
+            } else {
+                if let asset = viewModel.currentAsset, asset.mediaType == .video {
+                    VideoControlBar(controller: videoController)
+                        .padding(.horizontal, 28)
+                        .padding(.top, 10)
+                }
 
-            bottomActionsRow
+                bottomActionsRow
+            }
             positionAndFilmstrip
             bottomControls
         }
@@ -149,6 +161,11 @@ struct DeckView: View {
         .overlay(alignment: .topLeading) { PerfStatsProbe() }
         .task(id: viewModel.currentAsset?.localIdentifier) {
             await loadCurrentImage()
+        }
+        // Swiping or tapping the filmstrip away mid-trim abandons the trim;
+        // load(item:) for the next video already resets the loop window.
+        .onChange(of: viewModel.currentAsset?.localIdentifier) { _, _ in
+            isTrimming = false
         }
         // Frees the shared AVPlayer's current item when the deck itself
         // goes away — the other half of "no leaked AVPlayer" alongside
@@ -191,6 +208,14 @@ struct DeckView: View {
             case .livePhoto(let livePhoto):
                 LivePhotoPlayerView(livePhoto: livePhoto) { presentation = nil }
             }
+        }
+        .alert("Couldn't trim", isPresented: Binding(
+            get: { trimError != nil },
+            set: { if !$0 { trimError = nil } }
+        )) {
+            Button("OK") { trimError = nil }
+        } message: {
+            Text(trimError ?? "")
         }
         .alert("Couldn't delete", isPresented: Binding(
             get: { viewModel.commitError != nil },
@@ -408,6 +433,40 @@ struct DeckView: View {
         )
     }
 
+    private func endTrimming() {
+        videoController.setLoopWindow(nil)
+        isTrimming = false
+    }
+
+    /// Writes the trim to Photos, then reloads the shared player from the
+    /// edited asset so the card immediately plays the trimmed clip.
+    /// Returns false (keeping trim mode open) on failure or when the user
+    /// declines iOS's modify-permission prompt — that decline is a choice,
+    /// not an error, so it gets no alert.
+    private func saveTrim(asset: PHAsset, window: ClosedRange<Double>) async -> Bool {
+        let range = CMTimeRange(
+            start: CMTime(seconds: window.lowerBound, preferredTimescale: 600),
+            end: CMTime(seconds: window.upperBound, preferredTimescale: 600)
+        )
+        do {
+            try await VideoTrimmer.trim(asset: asset, to: range)
+        } catch let error as PHPhotosError where error.code == .userCancelled {
+            return false
+        } catch {
+            trimError = error.localizedDescription
+            return false
+        }
+        isTrimming = false
+        // requestPlayerItem resolves the asset's current version by
+        // identifier, so this returns the just-saved trimmed render
+        // (test51 checks the reloaded length).
+        if let item = await VideoLoader.playerItem(for: asset),
+           viewModel.currentAsset?.localIdentifier == asset.localIdentifier {
+            videoController.load(item: item)
+        }
+        return true
+    }
+
     private func presentLivePhotoIfNeeded(_ asset: PHAsset) {
         guard asset.mediaSubtypes.contains(.photoLive) else { return }
         Task {
@@ -446,6 +505,12 @@ struct DeckView: View {
                 ShareSheetPresenter.present(asset: asset)
             } label: {
                 Image(systemName: "square.and.arrow.up").foregroundStyle(.white)
+            }
+            if viewModel.currentAsset?.mediaType == .video {
+                Button { isTrimming = true } label: {
+                    Image(systemName: "scissors").foregroundStyle(.white)
+                }
+                .accessibilityIdentifier("deck.trim")
             }
         }
         .font(.system(size: 22))

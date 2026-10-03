@@ -26,12 +26,17 @@ final class VideoPlaybackController: ObservableObject {
     private var timeObserverToken: Any?
     private var endObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
+    /// Where the end-of-item loop jumps back to. Zero normally; the trim
+    /// window's start while VideoTrimBar is previewing a trim (see
+    /// `setLoopWindow`).
+    private var loopStart: CMTime = .zero
 
     /// Swaps in a new item, autoplays, and loops it on end.
     func load(item: AVPlayerItem) {
         teardownItemObservers()
         currentTime = 0
         duration = 0
+        loopStart = .zero
         player.replaceCurrentItem(with: item)
         player.isMuted = isMuted
 
@@ -45,8 +50,9 @@ final class VideoPlaybackController: ObservableObject {
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.player.seek(to: .zero)
-                self?.player.play()
+                guard let self else { return }
+                self.player.seek(to: self.loopStart, toleranceBefore: .zero, toleranceAfter: .zero)
+                self.player.play()
             }
         }
 
@@ -114,6 +120,30 @@ final class VideoPlaybackController: ObservableObject {
             to: CMTime(seconds: clamped * duration, preferredTimescale: 600),
             toleranceBefore: .zero, toleranceAfter: .zero
         )
+    }
+
+    func seek(toSeconds seconds: Double) {
+        currentTime = seconds
+        player.seek(
+            to: CMTime(seconds: seconds, preferredTimescale: 600),
+            toleranceBefore: .zero, toleranceAfter: .zero
+        )
+    }
+
+    /// Restricts looping playback to `start...end` so the trim preview
+    /// plays exactly what Save will keep. `forwardPlaybackEndTime` makes
+    /// the item fire AVPlayerItemDidPlayToEndTime at `end`, which the loop
+    /// observer in `load(item:)` turns into a jump back to `loopStart`.
+    /// Pass nil to restore whole-clip looping (Cancel / after Save).
+    func setLoopWindow(_ window: ClosedRange<Double>?) {
+        guard let item = player.currentItem else { return }
+        if let window {
+            loopStart = CMTime(seconds: window.lowerBound, preferredTimescale: 600)
+            item.forwardPlaybackEndTime = CMTime(seconds: window.upperBound, preferredTimescale: 600)
+        } else {
+            loopStart = .zero
+            item.forwardPlaybackEndTime = .invalid
+        }
     }
 
     private func teardownItemObservers() {
