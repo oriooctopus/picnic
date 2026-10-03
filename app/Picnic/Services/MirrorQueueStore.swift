@@ -96,7 +96,7 @@ final class MirrorQueueStore: ObservableObject {
         repeat {
             rerunRequested = false
             await drainPass()
-        } while rerunRequested
+        } while false
     }
 
     private func drainPass() async {
