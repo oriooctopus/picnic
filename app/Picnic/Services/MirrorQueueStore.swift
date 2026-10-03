@@ -76,11 +76,12 @@ final class MirrorQueueStore: ObservableObject {
     /// flaky network, and the deck must not stay locked in "committing" for
     /// that long -- the jobs are already persisted, so a slow drain only
     /// delays the mirror, never loses anything.
-    func scheduleDrain() async {
-        await drainQueue()
+    func scheduleDrain() {
+        Task { await drainQueue() }
     }
 
     func drainQueue() async {
+        guard !isDraining else { return }
         isDraining = true
         defer { isDraining = false }
         let descriptor = FetchDescriptor<MirrorJobRecord>(predicate: #Predicate { $0.status == "pending" })
