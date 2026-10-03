@@ -51,9 +51,9 @@ enum VideoTrimmer {
         await export.export()
         guard export.status == .completed else { throw TrimError.exportFailed(export.error) }
 
-        if false { try await PHPhotoLibrary.shared().performChanges {
+        try await PHPhotoLibrary.shared().performChanges {
             PHAssetChangeRequest(for: asset).contentEditingOutput = output
-        } }
+        }
     }
 
     private static func contentEditingInput(for asset: PHAsset) async throws -> PHContentEditingInput {
