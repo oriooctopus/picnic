@@ -594,7 +594,6 @@ struct DeckView: View {
             .overlay(Capsule().stroke(Self.outfitLilac.opacity(0.5), lineWidth: 1))
             .padding(.top, 60)
             .transition(.opacity)
-            .accessibilityIdentifier("deck.outfitToast")
         }
     }
 
