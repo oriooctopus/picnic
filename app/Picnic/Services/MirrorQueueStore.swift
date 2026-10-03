@@ -24,6 +24,12 @@ final class MirrorQueueStore: ObservableObject {
     // drain overlapping the fire-and-forget one from a delete commit) would
     // otherwise fetch the same still-"pending" jobs and double-POST them.
     private var isDraining = false
+    // Set by a call that arrives mid-drain: the in-flight pass already
+    // fetched its job list, so a job enqueued since (e.g. a delete commit
+    // during a hung foreground drain) would otherwise sit "pending" until
+    // the next launch/foreground. Only an explicit request triggers another
+    // pass -- a failed job never does, so a dead network can't spin.
+    private var rerunRequested = false
     // 5 minutes: the banner's own threshold is a full HOUR of backlog, so
     // polling faster than that buys no earlier signal, only battery/data.
     private static let pollIntervalNanoseconds: UInt64 = 5 * 60 * 1_000_000_000
@@ -81,9 +87,19 @@ final class MirrorQueueStore: ObservableObject {
     }
 
     func drainQueue() async {
-        guard !isDraining else { return }
+        guard !isDraining else {
+            rerunRequested = true
+            return
+        }
         isDraining = true
         defer { isDraining = false }
+        repeat {
+            rerunRequested = false
+            await drainPass()
+        } while rerunRequested
+    }
+
+    private func drainPass() async {
         let descriptor = FetchDescriptor<MirrorJobRecord>(predicate: #Predicate { $0.status == "pending" })
         guard let jobs = try? context.fetch(descriptor), !jobs.isEmpty else { return }
 

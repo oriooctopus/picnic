@@ -81,6 +81,37 @@ final class MirrorQueueStoreTests: XCTestCase {
         XCTAssertEqual(store.pendingCount, 0)
     }
 
+    func testJobEnqueuedDuringDrainIsPickedUpByRerun() async throws {
+        let poster = GatedPoster()
+        let (store, context) = try makeStore(poster: poster)
+        let job1 = insertJob(context, store: store)
+
+        let a = Task { await store.drainQueue() }
+        await waitUntil { poster.calls.count == 1 }
+        let job2 = insertJob(context, store: store)
+        await store.drainQueue()  // returns immediately, requests a rerun
+        XCTAssertEqual(poster.calls, [job1.id])
+
+        poster.release()
+        await waitUntil { poster.calls.count == 2 }
+        poster.release()
+        await a.value
+        XCTAssertEqual(poster.calls, [job1.id, job2.id])
+        XCTAssertEqual(job1.status, "sent")
+        XCTAssertEqual(job2.status, "sent")
+        XCTAssertEqual(store.pendingCount, 0)
+    }
+
+    func testFailedPostIsNotRetriedWithoutRerunRequest() async throws {
+        let poster = GatedPoster()
+        poster.shouldThrow = true
+        let (store, context) = try makeStore(poster: poster)
+        _ = insertJob(context, store: store)
+
+        await store.drainQueue()
+        XCTAssertEqual(poster.calls.count, 1)
+    }
+
     func testScheduleDrainReturnsWhilePosterIsSuspended() async throws {
         let poster = GatedPoster()
         let (store, context) = try makeStore(poster: poster)
