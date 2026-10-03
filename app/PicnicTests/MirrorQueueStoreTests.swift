@@ -65,12 +65,17 @@ final class MirrorQueueStoreTests: XCTestCase {
 
         let a = Task { await store.drainQueue() }
         await waitUntil { poster.calls.count == 1 }
-        // A is suspended inside the poster; B must return without posting.
-        await store.drainQueue()
+        // A is suspended inside the poster. B runs as its own Task and is
+        // given time to reach the poster; without the guard it would post
+        // the same pending job and then also suspend (so the assertion fails
+        // instead of the test hanging on a never-released B).
+        let b = Task { await store.drainQueue() }
+        try await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(poster.calls, [job.id])
 
         poster.release()
         await a.value
+        await b.value
         XCTAssertEqual(poster.calls.count, 1)
         XCTAssertEqual(job.status, "sent")
         XCTAssertEqual(store.pendingCount, 0)
