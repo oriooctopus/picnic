@@ -172,6 +172,7 @@ final class MirrorQueueStoreTests: XCTestCase {
 
     func testArmedJobIsNotDrained() async throws {
         let poster = GatedPoster()
+        poster.shouldThrow = true  // a wrongly-drained job fails fast instead of hanging on the gate
         let (store, _) = try makeStore(poster: poster)
         _ = try store.arm([info("A")], filenames: [:], thumbnails: [:])
 
