@@ -219,31 +219,40 @@ final class ReconcileViewModel: ObservableObject {
     // MARK: Confirm
 
     /// Runs the confirmed plan. ORDER MATTERS:
+    ///   0. The whole confirm is persisted first (ReconcileConfirmStore,
+    ///      "armed") so a kill or an unreachable server after step 1 cannot
+    ///      lose the Google trash request: it re-runs automatically.
     ///   1. Phone first, as ONE PhotoKit batch (`deletePhone`), so iOS shows a
     ///      single system prompt and deleted photos land in Recently Deleted.
     ///      If the user declines it (or the library changed), the call throws,
-    ///      NOTHING has been deleted anywhere, and we return to the grid with
-    ///      `actionMessage` set -- Google copies are never trashed for photos
-    ///      that are still on the phone.
+    ///      NOTHING has been deleted anywhere, the armed job is removed, and we
+    ///      return to the grid with `actionMessage` set -- Google copies are
+    ///      never trashed for photos that are still on the phone.
     ///   2. Then the Google trash request with the phone indexes just deleted,
     ///      which the server needs because its trash gate refuses photos that
     ///      are still on the phone.
     /// If step 2 fails after step 1 succeeded, the phone photos are gone but
-    /// their Google copies remain; the error says so, and a rescan will list
-    /// them as Google-only.
-    func confirm(deletePhone: ([(index: Int, filename: String)]) async throws -> Void) async {
+    /// the job stays pending and is retried on the next launch/foreground.
+    func confirm(
+        queue: ReconcileConfirmStore,
+        assetID: (Int) -> String,
+        deletePhone: ([(index: Int, filename: String)]) async throws -> Void
+    ) async {
         let plan = deletePlan
         guard !plan.isEmpty, state != .confirming else { return }
         state = .confirming
         actionMessage = nil
-        if !plan.phone.isEmpty {
-            do {
-                try await deletePhone(plan.phone)
-            } catch {
-                actionMessage = "Nothing was deleted. The phone deletion did not go through (\(error)); Google copies were left alone."
-                state = .loaded
-                return
-            }
+        let jobID: UUID
+        do {
+            jobID = try await queue.submit(
+                month: monthKey, googleIds: plan.googleIds,
+                phone: plan.phone.map { (index: $0.index, assetID: assetID($0.index)) },
+                deletePhone: { try await deletePhone(plan.phone) }
+            )
+        } catch {
+            actionMessage = "Nothing was deleted. The phone deletion did not go through (\(error)); Google copies were left alone."
+            state = .loaded
+            return
         }
         phoneDeletedCount = plan.phone.count
         confirmedGoogleIds = plan.googleIds
@@ -253,12 +262,12 @@ final class ReconcileViewModel: ObservableObject {
             return
         }
         do {
-            _ = try await ReconcileClient.confirm(month: monthKey, ids: plan.googleIds, phoneDeleted: plan.phone.map(\.index))
+            try await queue.deliver(jobID)
             results = try await pollResults()
             state = .results
         } catch {
             let prefix = plan.phone.isEmpty ? "" : "Deleted \(plan.phone.count) from the phone, but "
-            state = .failed("\(prefix)moving to Google trash failed: \(error)")
+            state = .failed("\(prefix)moving to Google trash failed: \(error). It will retry automatically.")
         }
     }
 

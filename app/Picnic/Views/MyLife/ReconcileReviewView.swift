@@ -130,7 +130,13 @@ struct ReconcileReviewView: View {
             titleVisibility: .visible
         ) {
             Button("Delete \(plan.phone.count) from phone, \(plan.googleIds.count) from Google", role: .destructive) {
-                Task { await viewModel.confirm(deletePhone: deletePhoneAssets) }
+                Task {
+                    await viewModel.confirm(
+                        queue: appState.reconcileConfirm,
+                        assetID: { month.assets[$0].localIdentifier },
+                        deletePhone: deletePhoneAssets
+                    )
+                }
             }
             .accessibilityIdentifier("reconcile.confirmDelete")
             Button("Cancel", role: .cancel) {}

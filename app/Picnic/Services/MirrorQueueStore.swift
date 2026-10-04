@@ -2,6 +2,37 @@ import Foundation
 import SwiftData
 import Photos
 
+/// The PHAsset fields a mirror job needs, copied out so tests can build them
+/// without a PhotoKit library.
+struct MirrorAssetInfo {
+    let localID: String
+    let creationDate: Date?
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let isVideo: Bool
+    let isLivePhoto: Bool
+}
+
+extension MirrorAssetInfo {
+    init(_ asset: PHAsset) {
+        self.init(
+            localID: asset.localIdentifier, creationDate: asset.creationDate,
+            pixelWidth: asset.pixelWidth, pixelHeight: asset.pixelHeight,
+            isVideo: asset.mediaType == .video, isLivePhoto: asset.mediaSubtypes.contains(.photoLive)
+        )
+    }
+}
+
+/// Production existence check for resolving armed jobs at launch.
+func existingPhotoAssetIDs(_ ids: [String]) -> Set<String> {
+    guard !ids.isEmpty else { return [] }
+    var found = Set<String>()
+    PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in
+        found.insert(asset.localIdentifier)
+    }
+    return found
+}
+
 /// Persists mirror jobs so a failed POST is never silently dropped: it stays
 /// "pending" in SwiftData and is retried the next time drainQueue() runs
 /// (app launch or foreground — see PicnicApp.swift).
@@ -20,6 +51,8 @@ final class MirrorQueueStore: ObservableObject {
     // Injected so tests can drive drainQueue() with a controllable poster
     // instead of hitting the network; production uses MirrorClient.post.
     private let post: (MirrorJobRecord) async throws -> Void
+    // Injected so tests can say which assets still exist; production asks PhotoKit.
+    private let existingAssetIDs: ([String]) -> Set<String>
     // drainQueue() suspends at every POST, so a second call (foreground
     // drain overlapping the fire-and-forget one from a delete commit) would
     // otherwise fetch the same still-"pending" jobs and double-POST them.
@@ -36,40 +69,100 @@ final class MirrorQueueStore: ObservableObject {
 
     init(
         context: ModelContext,
-        post: @escaping (MirrorJobRecord) async throws -> Void = MirrorClient.post(job:)
+        post: @escaping (MirrorJobRecord) async throws -> Void = MirrorClient.post(job:),
+        existingAssetIDs: @escaping ([String]) -> Set<String> = existingPhotoAssetIDs
     ) {
         self.context = context
         self.post = post
+        self.existingAssetIDs = existingAssetIDs
         refreshCount()
     }
 
-    // thumbnails is keyed the same way filenames is (localIdentifier →
-    // value) and is likewise gathered by the caller before the asset was
-    // deleted — this method itself only ever sees already-deleted assets, so
-    // it has no way to produce a thumbnail on its own. A missing entry (nil
-    // via subscript below) means PhotoKit couldn't produce one; that's a
-    // normal, expected outcome, not something to retry or flag here.
-    func enqueue(assets: [PHAsset], filenames: [String: String], thumbnails: [String: String]) {
+    /// The delete commit's durable sequence: persist the mirror jobs "armed"
+    /// (ignored by the drain), run `delete`, then flip them to "pending". If
+    /// `delete` throws (user declined the system confirm, or it failed) the
+    /// armed jobs are removed and the error rethrown. A kill between the
+    /// delete and the flip leaves armed jobs that resolveArmedJobs() settles
+    /// on next launch. Order is the whole point: enqueueing AFTER the delete
+    /// loses the Google mirror if the app dies in between.
+    ///
+    /// filenames/thumbnails are keyed by localIdentifier and gathered by the
+    /// caller BEFORE the delete (PhotoKit cannot produce an image afterwards);
+    /// a missing thumbnail is a normal outcome, not something to retry.
+    func deleteWithMirror(
+        _ assets: [MirrorAssetInfo],
+        filenames: [String: String],
+        thumbnails: [String: String],
+        delete: () async throws -> Void
+    ) async throws {
+        let ids = try arm(assets, filenames: filenames, thumbnails: thumbnails)
+        do {
+            try await delete()
+        } catch {
+            disarm(ids)
+            throw error
+        }
+        promote(ids)
+    }
+
+    func arm(_ assets: [MirrorAssetInfo], filenames: [String: String], thumbnails: [String: String]) throws -> [UUID] {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withTimeZone]
-
+        var ids: [UUID] = []
         for asset in assets {
-            let creationDate = asset.creationDate ?? Date()
             let job = MirrorJobRecord(
                 id: UUID(),
-                filename: filenames[asset.localIdentifier] ?? asset.localIdentifier,
-                creationDateISO8601: formatter.string(from: creationDate),
+                filename: filenames[asset.localID] ?? asset.localID,
+                creationDateISO8601: formatter.string(from: asset.creationDate ?? Date()),
                 pixelWidth: asset.pixelWidth,
                 pixelHeight: asset.pixelHeight,
-                mediaType: asset.mediaType == .video ? "video" : "image",
-                isLivePhoto: asset.mediaSubtypes.contains(.photoLive),
-                status: "pending",
-                thumbnailBase64: thumbnails[asset.localIdentifier]
+                mediaType: asset.isVideo ? "video" : "image",
+                isLivePhoto: asset.isLivePhoto,
+                status: "armed",
+                thumbnailBase64: thumbnails[asset.localID],
+                assetLocalID: asset.localID
             )
             context.insert(job)
+            ids.append(job.id)
+        }
+        try context.save()
+        return ids
+    }
+
+    /// Delete confirmed: armed -> pending, which makes the drain pick them up.
+    func promote(_ ids: [UUID]) {
+        for job in armedJobs() where ids.contains(job.id) { job.status = "pending" }
+        try? context.save()
+        refreshCount()
+    }
+
+    /// Delete declined or failed: the asset is still on the phone, drop the jobs.
+    func disarm(_ ids: [UUID]) {
+        for job in armedJobs() where ids.contains(job.id) { context.delete(job) }
+        try? context.save()
+    }
+
+    /// Launch-time cleanup of armed jobs left by a kill mid-delete: asset gone
+    /// from PhotoKit means the delete happened (-> pending, mirror it); asset
+    /// still there means it did not (-> drop the job). Call once at launch,
+    /// after photo authorization, before drainQueue().
+    func resolveArmedJobs() {
+        let armed = armedJobs()
+        let present = existingAssetIDs(armed.compactMap(\.assetLocalID))
+        for job in armed {
+            if let id = job.assetLocalID, present.contains(id) {
+                context.delete(job)
+            } else {
+                job.status = "pending"
+            }
         }
         try? context.save()
         refreshCount()
+    }
+
+    private func armedJobs() -> [MirrorJobRecord] {
+        let descriptor = FetchDescriptor<MirrorJobRecord>(predicate: #Predicate { $0.status == "armed" })
+        return (try? context.fetch(descriptor)) ?? []
     }
 
     func refreshCount() {

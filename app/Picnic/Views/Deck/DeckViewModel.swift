@@ -378,7 +378,7 @@ final class DeckViewModel: ObservableObject {
     }
 
     /// The single X commit: one PhotoKit batch delete (system confirm dialog
-    /// is automatic), then every deleted asset is queued for the mirror POST.
+    /// is automatic); every asset's mirror job is armed before it and promoted after.
     func commitDeletions() async {
         let toDelete = orderedAssets.filter { pendingDeleteIDs.contains($0.localIdentifier) }
         guard !toDelete.isEmpty else { return }
@@ -395,7 +395,7 @@ final class DeckViewModel: ObservableObject {
             // Recently Deleted the way the Photos app can show it — this app
             // has no access to that surface). Reading thumbnails after the
             // delete, the way it might look "cleaner" to fold this loop in
-            // next to the mirrorQueue.enqueue call below, would silently ship
+            // next to the deleteWithMirror call below, would silently ship
             // a mirror queue with every thumbnail nil.
             //
             // Uses deletionThumbnail(s) — a network-disabled path — not the
@@ -411,8 +411,14 @@ final class DeckViewModel: ObservableObject {
             let thumbnails = await ThumbnailLoader.deletionThumbnails(
                 for: toDelete, targetSize: CGSize(width: 200, height: 200)
             )
-            try await photoLibrary.deleteAssets(toDelete)
-            mirrorQueue.enqueue(assets: toDelete, filenames: filenames, thumbnails: thumbnails)
+            // Mirror jobs are persisted "armed" BEFORE the delete and flipped
+            // to pending after it (see MirrorQueueStore.deleteWithMirror), so
+            // a kill mid-commit cannot lose the Google mirror.
+            try await mirrorQueue.deleteWithMirror(
+                toDelete.map(MirrorAssetInfo.init), filenames: filenames, thumbnails: thumbnails
+            ) {
+                try await self.photoLibrary.deleteAssets(toDelete)
+            }
             for asset in toDelete {
                 sortStore.setState(.deleted, for: asset, monthKey: month.key)
             }

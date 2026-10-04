@@ -9,6 +9,7 @@ final class AppState: ObservableObject {
     let photoLibrary = PhotoLibraryService()
     let sortStore: SortStore
     let mirrorQueue: MirrorQueueStore
+    let reconcileConfirm: ReconcileConfirmStore
     let outfitLog: OutfitLogStore
 
     @Published var monthBuckets: [MonthBucket] = []
@@ -113,6 +114,7 @@ final class AppState: ObservableObject {
         // LOAD-BEARING ORDERING comment at the top of init().
         sortStore = SortStore(context: modelContext)
         mirrorQueue = MirrorQueueStore(context: modelContext)
+        reconcileConfirm = ReconcileConfirmStore(context: modelContext)
         #if DEBUG
         // UI-test mode (every UI test launches with --seed-library) must never
         // reach the real Outfits server: inject an uploader that just succeeds.
@@ -177,7 +179,12 @@ final class AppState: ObservableObject {
         #else
         refreshMonths()
         #endif
+        // Settle armed jobs from a kill mid-delete BEFORE draining, so the ones
+        // whose delete went through are mirrored on this very launch.
+        mirrorQueue.resolveArmedJobs()
+        reconcileConfirm.resolveArmedJobs()
         await mirrorQueue.drainQueue()
+        await reconcileConfirm.drain()
         await outfitLog.drainQueue()
         // Launch counts as a foreground -- see PicnicApp.swift's scenePhase
         // handler for the background/re-foreground case. Fetch once

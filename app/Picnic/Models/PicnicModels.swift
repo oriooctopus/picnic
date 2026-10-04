@@ -62,7 +62,9 @@ final class StreakRecord {
 }
 
 /// One pending (or already-sent) POST to the Google Photos mirror queue.
-/// Created only after a PhotoKit delete has actually succeeded.
+/// Persisted "armed" BEFORE the PhotoKit delete runs (so a kill between the
+/// delete and the enqueue cannot lose the mirror job), then flipped to
+/// "pending" once the delete has actually succeeded.
 @Model
 final class MirrorJobRecord {
     @Attribute(.unique) var id: UUID
@@ -75,8 +77,11 @@ final class MirrorJobRecord {
     var createdAt: Date
     var attemptCount: Int
     var lastError: String?
-    /// "pending" | "sent"
+    /// "armed" (delete not yet confirmed; ignored by the drain) | "pending" | "sent"
     var status: String
+    /// PHAsset.localIdentifier, so a launch can tell whether an armed job's
+    /// delete went through. Optional for lightweight migration of old rows.
+    var assetLocalID: String?
     /// JPEG thumbnail (~200x200, ~0.7 quality), base64-encoded, captured from
     /// PhotoKit BEFORE the asset was deleted (see DeckViewModel
     /// .commitDeletions's ordering comment — this is the only chance to ever
@@ -99,9 +104,11 @@ final class MirrorJobRecord {
         mediaType: String,
         isLivePhoto: Bool,
         status: String,
-        thumbnailBase64: String? = nil
+        thumbnailBase64: String? = nil,
+        assetLocalID: String? = nil
     ) {
         self.id = id
+        self.assetLocalID = assetLocalID
         self.filename = filename
         self.creationDateISO8601 = creationDateISO8601
         self.pixelWidth = pixelWidth
@@ -126,5 +133,32 @@ final class CompareGroupResolution {
     init(groupKey: String) {
         self.groupKey = groupKey
         self.resolvedAt = Date()
+    }
+}
+
+/// A durable "Clean up" confirm: delete these phone photos, then ask the
+/// server to move these Google copies to trash. Persisted "armed" before the
+/// phone delete, flipped to "pending" once it succeeds, "sent" after the POST.
+@Model
+final class ReconcileConfirmJob {
+    @Attribute(.unique) var id: UUID
+    var month: String
+    var googleIds: [String]
+    var phoneIndexes: [Int]
+    var phoneAssetIDs: [String]
+    /// "armed" | "pending" | "sent" | "failed" (server rejected with a 4xx; not retried)
+    var status: String
+    var attemptCount: Int
+    var lastError: String?
+
+    init(id: UUID, month: String, googleIds: [String], phoneIndexes: [Int], phoneAssetIDs: [String], status: String) {
+        self.id = id
+        self.month = month
+        self.googleIds = googleIds
+        self.phoneIndexes = phoneIndexes
+        self.phoneAssetIDs = phoneAssetIDs
+        self.status = status
+        self.attemptCount = 0
+        self.lastError = nil
     }
 }

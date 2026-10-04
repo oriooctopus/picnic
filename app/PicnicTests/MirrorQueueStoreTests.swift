@@ -3,8 +3,10 @@ import SwiftData
 @testable import Picnic
 
 /// Covers MirrorQueueStore's drain behavior with an injected poster and an
-/// in-memory SwiftData store. DeckViewModel.commitDeletions's call to
-/// scheduleDrain() is not covered here (it needs PhotoKit).
+/// in-memory SwiftData store, plus the armed-before-delete sequence
+/// (deleteWithMirror) and launch resolution of armed jobs. DeckViewModel
+/// .commitDeletions itself is not covered (it needs PhotoKit assets); it only
+/// forwards to deleteWithMirror.
 @MainActor
 final class MirrorQueueStoreTests: XCTestCase {
 
@@ -28,13 +30,20 @@ final class MirrorQueueStoreTests: XCTestCase {
         }
     }
 
+    /// Asset ids PhotoKit "still has", for resolveArmedJobs.
+    private var present: Set<String> = []
+    private var container: ModelContainer!
+
     private func makeStore(poster: GatedPoster) throws -> (MirrorQueueStore, ModelContext) {
-        let container = try ModelContainer(
+        container = try ModelContainer(
             for: PersistenceController.schema,
             configurations: [ModelConfiguration(schema: PersistenceController.schema, isStoredInMemoryOnly: true)]
         )
         let context = ModelContext(container)
-        let store = MirrorQueueStore(context: context, post: poster.post)
+        let store = MirrorQueueStore(
+            context: context, post: poster.post,
+            existingAssetIDs: { [unowned self] ids in Set(ids).intersection(self.present) }
+        )
         return (store, context)
     }
 
@@ -148,5 +157,90 @@ final class MirrorQueueStoreTests: XCTestCase {
         XCTAssertEqual(job.attemptCount, 1)
         XCTAssertNotNil(job.lastError)
         XCTAssertEqual(store.pendingCount, 1)
+    }
+
+    // MARK: Armed-before-delete
+
+    private func info(_ id: String) -> MirrorAssetInfo {
+        MirrorAssetInfo(localID: id, creationDate: nil, pixelWidth: 10, pixelHeight: 10, isVideo: false, isLivePhoto: false)
+    }
+
+    /// Statuses as persisted, read through a fresh context on the same store.
+    private func persistedStatuses() throws -> [String] {
+        try ModelContext(container).fetch(FetchDescriptor<MirrorJobRecord>()).map(\.status).sorted()
+    }
+
+    func testArmedJobIsNotDrained() async throws {
+        let poster = GatedPoster()
+        let (store, _) = try makeStore(poster: poster)
+        _ = try store.arm([info("A")], filenames: [:], thumbnails: [:])
+
+        await store.drainQueue()
+        XCTAssertTrue(poster.calls.isEmpty, "drain POSTed an armed job")
+        XCTAssertEqual(store.pendingCount, 0)
+        XCTAssertEqual(try persistedStatuses(), ["armed"])
+    }
+
+    func testJobIsPersistedArmedBeforeDeleteAndPromotedAfter() async throws {
+        let poster = GatedPoster()
+        let (store, _) = try makeStore(poster: poster)
+        var duringDelete: [String] = []
+
+        try await store.deleteWithMirror([info("A")], filenames: ["A": "IMG_A.JPG"], thumbnails: [:]) {
+            duringDelete = try self.persistedStatuses()
+        }
+
+        XCTAssertEqual(duringDelete, ["armed"], "mirror job must already be persisted when the delete runs")
+        XCTAssertEqual(try persistedStatuses(), ["pending"])
+        XCTAssertEqual(store.pendingCount, 1)
+        let rows = try ModelContext(container).fetch(FetchDescriptor<MirrorJobRecord>())
+        XCTAssertEqual(rows.first?.filename, "IMG_A.JPG")
+        XCTAssertEqual(rows.first?.assetLocalID, "A")
+    }
+
+    func testDeclinedDeleteRemovesArmedJob() async throws {
+        let poster = GatedPoster()
+        let (store, _) = try makeStore(poster: poster)
+        var duringDelete: [String] = []
+
+        do {
+            try await store.deleteWithMirror([info("A")], filenames: [:], thumbnails: [:]) {
+                duringDelete = try self.persistedStatuses()
+                throw URLError(.cancelled)
+            }
+            XCTFail("deleteWithMirror swallowed the delete error")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .cancelled)
+        }
+
+        XCTAssertEqual(duringDelete, ["armed"])
+        XCTAssertEqual(try persistedStatuses(), [], "declined delete left a mirror job behind")
+        XCTAssertEqual(store.pendingCount, 0)
+        await store.drainQueue()
+        XCTAssertTrue(poster.calls.isEmpty)
+    }
+
+    func testLeftoverArmedJobWithAssetGoneBecomesPendingOnLaunch() async throws {
+        let poster = GatedPoster()
+        let (store, _) = try makeStore(poster: poster)
+        _ = try store.arm([info("A")], filenames: [:], thumbnails: [:])
+        present = []  // PhotoKit no longer has A: the delete happened, the app died before promote
+
+        store.resolveArmedJobs()
+
+        XCTAssertEqual(try persistedStatuses(), ["pending"])
+        XCTAssertEqual(store.pendingCount, 1)
+    }
+
+    func testLeftoverArmedJobWithAssetPresentIsRemovedOnLaunch() async throws {
+        let poster = GatedPoster()
+        let (store, _) = try makeStore(poster: poster)
+        _ = try store.arm([info("A")], filenames: [:], thumbnails: [:])
+        present = ["A"]  // the user declined (or the delete failed): photo is still on the phone
+
+        store.resolveArmedJobs()
+
+        XCTAssertEqual(try persistedStatuses(), [])
+        XCTAssertEqual(store.pendingCount, 0)
     }
 }
