@@ -133,7 +133,7 @@ struct ReconcileReviewView: View {
                 Task {
                     await viewModel.confirm(
                         queue: appState.reconcileConfirm,
-                        assetID: { month.assets[$0].localIdentifier },
+                        monthAssetIDs: month.assets.map(\.localIdentifier),
                         deletePhone: deletePhoneAssets
                     )
                 }

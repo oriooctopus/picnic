@@ -33,13 +33,34 @@ final class RemoteThumbLoaderTests: XCTestCase {
     }
 
     private var loader: RemoteThumbLoader!
+
+    private final class WaitCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func next() -> Int { lock.lock(); defer { lock.unlock() }; n += 1; return n }
+    }
+
+    /// A loader whose backoff is bounded: if it is still retrying after `maxWaits`
+    /// waits the test FAILS and the loader's task is cancelled, instead of the
+    /// regression hanging the whole test run.
+    private func makeLoader(maxWaits: Int = 30, sleepNs: UInt64 = 0) -> RemoteThumbLoader {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FakeProtocol.self]
+        let counter = WaitCounter()
+        return RemoteThumbLoader(session: URLSession(configuration: config), wait: { _ in
+            if counter.next() > maxWaits {
+                XCTFail("loader still retrying after \(maxWaits) waits")
+                withUnsafeCurrentTask { $0?.cancel() }
+                return
+            }
+            if sleepNs == 0 { await Task.yield() } else { try? await Task.sleep(nanoseconds: sleepNs) }
+        })
+    }
     private let url = URL(string: "http://mirror.test/thumb/1")!
 
     override func setUp() {
         FakeProtocol.requests = 0
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [FakeProtocol.self]
-        loader = RemoteThumbLoader(session: URLSession(configuration: config), wait: { _ in await Task.yield() })
+        loader = makeLoader()
     }
 
     private func png() -> Data {
@@ -72,6 +93,7 @@ final class RemoteThumbLoaderTests: XCTestCase {
 
     func testCancelledTaskStopsRetrying() async throws {
         FakeProtocol.script = { _ in .failure(URLError(.timedOut)) }
+        loader = makeLoader(maxWaits: 100, sleepNs: 10_000_000)  // would fail after ~1s of uncancelled retrying
         let task = Task { await self.loader.load(self.url) }
         try await Task.sleep(nanoseconds: 50_000_000)
         task.cancel()

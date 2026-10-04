@@ -227,7 +227,7 @@ final class MirrorQueueStoreTests: XCTestCase {
         _ = try store.arm([info("A")], filenames: [:], thumbnails: [:])
         present = []  // PhotoKit no longer has A: the delete happened, the app died before promote
 
-        store.resolveArmedJobs()
+        store.resolveArmedJobs(authorization: .authorized)
 
         XCTAssertEqual(try persistedStatuses(), ["pending"])
         XCTAssertEqual(store.pendingCount, 1)
@@ -239,9 +239,23 @@ final class MirrorQueueStoreTests: XCTestCase {
         _ = try store.arm([info("A")], filenames: [:], thumbnails: [:])
         present = ["A"]  // the user declined (or the delete failed): photo is still on the phone
 
-        store.resolveArmedJobs()
+        store.resolveArmedJobs(authorization: .authorized)
 
         XCTAssertEqual(try persistedStatuses(), [])
         XCTAssertEqual(store.pendingCount, 0)
+    }
+
+    func testLimitedAuthorizationLeavesArmedJobsArmed() async throws {
+        let poster = GatedPoster()
+        let (store, _) = try makeStore(poster: poster)
+        _ = try store.arm([info("A")], filenames: [:], thumbnails: [:])
+        present = []  // under .limited, an asset outside the selection reads as gone while still on the phone
+
+        store.resolveArmedJobs(authorization: .limited)
+        XCTAssertEqual(try persistedStatuses(), ["armed"], "limited access must not promote armed jobs")
+        XCTAssertEqual(store.pendingCount, 0)
+
+        store.resolveArmedJobs(authorization: .authorized)
+        XCTAssertEqual(try persistedStatuses(), ["pending"])
     }
 }

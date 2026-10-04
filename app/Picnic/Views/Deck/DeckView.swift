@@ -33,6 +33,8 @@ struct DeckView: View {
     /// `dragState`: this publishes a ~10Hz time update that must repaint
     /// only VideoTimeLabel/VideoControlBar, never this view's own body.
     @State private var videoController = VideoPlaybackController()
+    /// Bumped by the video card's "tap to retry"; part of the load task's id so it re-runs.
+    @State private var videoRetryNonce = 0
     /// Long-press the month title to reveal the frame-rate readout. Hidden by
     /// default so it never intrudes on normal use, but present in the ad-hoc
     /// build because the phone is the only place the stutter reproduces.
@@ -119,7 +121,8 @@ struct DeckView: View {
                         onDismiss: { Task { await exitDeck() } },
                         dragState: dragState,
                         cardAspectRatio: cardAspectRatio,
-                        videoController: videoController
+                        videoController: videoController,
+                        onVideoRetry: { videoRetryNonce += 1 }
                     )
                     .id(asset.localIdentifier)
                     // The photo itself is still assigned synchronously in
@@ -172,7 +175,7 @@ struct DeckView: View {
         // needing the HUD itself shown.
         .overlay(alignment: .topLeading) { PerfStatsProbe() }
         .overlay(alignment: .top) { toastView }
-        .task(id: viewModel.currentAsset?.localIdentifier) {
+        .task(id: "\(viewModel.currentAsset?.localIdentifier ?? "")#\(videoRetryNonce)") {
             await loadCurrentImage()
         }
         // Swiping or tapping the filmstrip away mid-trim abandons the trim;
@@ -302,14 +305,29 @@ struct DeckView: View {
         let startIndex = viewModel.currentIndex
 
         if asset.mediaType == .video {
-            // Poster frame first (cheap, shows immediately), then swap the
-            // shared player onto this asset's item once PhotoKit hands one
-            // back.
-            currentImage = await ThumbnailLoader.thumbnail(for: asset, targetSize: ThumbnailLoader.screenPixelSize)
-            if let item = await VideoLoader.playerItem(for: asset) {
-                videoController.load(item: item)
-            } else {
-                videoController.clear()
+            // Poster first, local data only so it shows at once, upgraded by a
+            // network-allowed fetch that runs alongside the video item (never
+            // queued behind an iCloud download). The poster stays on screen
+            // until the video has a frame; a failed load keeps it and offers
+            // retry instead of going black. Every async result is gated on
+            // this card still being current (A2), and the controller gates
+            // the item itself by asset id.
+            videoController.beginLoading(assetID: loadingID)
+            if let local = await ThumbnailLoader.localThumbnail(for: asset, targetSize: ThumbnailLoader.screenPixelSize),
+               viewModel.currentAsset?.localIdentifier == loadingID {
+                currentImage = local
+            }
+            async let upgraded = ThumbnailLoader.thumbnail(for: asset, targetSize: ThumbnailLoader.screenPixelSize)
+            let controller = videoController
+            let result = await VideoLoader.load(for: asset) { value in
+                Task { @MainActor in controller.reportDownloadProgress(value, for: loadingID) }
+            }
+            switch result {
+            case .item(let item): videoController.loadItem(item, for: loadingID)
+            case .failed: videoController.failLoading(for: loadingID)
+            }
+            if let poster = await upgraded, viewModel.currentAsset?.localIdentifier == loadingID {
+                currentImage = poster
             }
         } else {
             // Not a video card: make sure nothing keeps playing/decoding
@@ -676,6 +694,7 @@ private struct DeckCard: View {
     /// added as a separate observing view below) — only asset.mediaType
     /// switching what's passed to `ShuffleCardRepresentable` is read here.
     let videoController: VideoPlaybackController
+    let onVideoRetry: () -> Void
 
     var body: some View {
         // Same order as the dimmed peek card below it (aspectRatio, THEN
@@ -713,6 +732,11 @@ private struct DeckCard: View {
         .overlay(alignment: .bottomLeading) {
             if isVideo {
                 VideoTimeLabel(controller: videoController)
+            }
+        }
+        .overlay {
+            if isVideo {
+                VideoLoadOverlay(controller: videoController, onRetry: onVideoRetry)
             }
         }
     }

@@ -59,6 +59,25 @@ enum ThumbnailLoader {
         }
     }
 
+    /// Poster for a video card, local data only (no iCloud fetch), so the card
+    /// shows something immediately; the network-allowed `thumbnail` then upgrades it.
+    static func localThumbnail(for asset: PHAsset, targetSize: CGSize) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            let options = PHImageRequestOptions()
+            options.deliveryMode = .opportunistic
+            options.isNetworkAccessAllowed = false
+            options.resizeMode = .fast
+            var didResume = false
+            PHImageManager.default().requestImage(
+                for: asset, targetSize: targetSize, contentMode: .aspectFill, options: options
+            ) { image, _ in
+                guard !didResume else { return }
+                didResume = true
+                continuation.resume(returning: image)
+            }
+        }
+    }
+
     /// Best-effort, LOCAL-ONLY capture used only for the pre-delete mirror-
     /// queue thumbnail (DeckViewModel.commitDeletions). Deliberately does NOT
     /// call the `thumbnail(for:targetSize:)` above and reuse its options:
@@ -205,7 +224,41 @@ enum LivePhotoLoader {
 
 /// Fetches a directly-playable `AVPlayerItem` for a video `PHAsset`, same
 /// checked-continuation shape as `ThumbnailLoader`/`LivePhotoLoader` above.
+enum VideoItemResult {
+    case item(AVPlayerItem)
+    case failed
+}
+
 enum VideoLoader {
+    /// A request failed when PhotoKit returned no item, or reports an error or a cancel.
+    static func didFail(hasItem: Bool, info: [AnyHashable: Any]?) -> Bool {
+        if !hasItem { return true }
+        if info?[PHImageErrorKey] != nil { return true }
+        if (info?[PHImageCancelledKey] as? Bool) == true { return true }
+        return false
+    }
+
+    /// Like `playerItem(for:)` but surfaces iCloud download progress (0...1) and
+    /// distinguishes failure from success instead of returning a bare nil.
+    static func load(for asset: PHAsset, progress: @escaping @Sendable (Double) -> Void) async -> VideoItemResult {
+        await withCheckedContinuation { continuation in
+            let options = PHVideoRequestOptions()
+            options.deliveryMode = .automatic
+            options.isNetworkAccessAllowed = true
+            options.progressHandler = { value, _, _, _ in progress(value) }
+            var didResume = false
+            PHImageManager.default().requestPlayerItem(forVideo: asset, options: options) { item, info in
+                guard !didResume else { return }
+                didResume = true
+                if let item, !didFail(hasItem: true, info: info) {
+                    continuation.resume(returning: .item(item))
+                } else {
+                    continuation.resume(returning: .failed)
+                }
+            }
+        }
+    }
+
     static func playerItem(for asset: PHAsset) async -> AVPlayerItem? {
         await withCheckedContinuation { continuation in
             let options = PHVideoRequestOptions()

@@ -1,6 +1,61 @@
 import SwiftUI
 import AVFoundation
 
+/// Where a video card is in getting its first frame on screen. The poster
+/// stays visible in every state; the overlay only adds a hint on top of it.
+enum VideoLoadState: Equatable {
+    /// Not a video card.
+    case idle
+    /// Waiting for PhotoKit's item and then for AVPlayer's readyToPlay.
+    /// `downloadProgress` (0...1) is non-nil only while PhotoKit reports an iCloud download.
+    case loading(downloadProgress: Double?)
+    case ready
+    /// PhotoKit gave no item (or an error/cancel), or the item failed to load.
+    case failed
+
+    var overlayText: String? {
+        switch self {
+        case .loading(let p?): return "Downloading from iCloud \(Int((min(max(p, 0), 1) * 100).rounded()))%"
+        case .failed: return "Couldn't load video, tap to retry"
+        default: return nil
+        }
+    }
+}
+
+/// Pure state machine for one deck video card's load, keyed by asset id so a
+/// slow result for card N can never apply to card N+1 (the same "A2" gate the
+/// photo path uses in DeckView.loadCurrentImage).
+struct VideoLoadTracker {
+    private(set) var state: VideoLoadState = .idle
+    private(set) var assetID: String?
+
+    mutating func begin(_ id: String) { assetID = id; state = .loading(downloadProgress: nil) }
+    mutating func reset() { assetID = nil; state = .idle }
+
+    mutating func progress(_ value: Double, for id: String) {
+        guard id == assetID, case .loading = state else { return }
+        state = .loading(downloadProgress: value)
+    }
+
+    /// True when `id` is the card still being loaded, i.e. the item may be given to the player.
+    func accepts(itemFor id: String) -> Bool {
+        if case .loading = state { return id == assetID }
+        return false
+    }
+
+    /// Player reported readyToPlay (or failed) for the current load.
+    mutating func playerReady() { if case .loading = state { state = .ready } }
+    mutating func playerFailed() { if case .loading = state { state = .failed } }
+
+    /// PhotoKit failed for `id`; ignored if that card is no longer current. Returns whether it applied.
+    @discardableResult
+    mutating func fail(for id: String) -> Bool {
+        guard accepts(itemFor: id) else { return false }
+        state = .failed
+        return true
+    }
+}
+
 /// Owns the single AVPlayer used for whichever video is the deck's current
 /// top card. One instance lives for the whole deck session (see DeckView's
 /// `@State private var videoController`) and has its item swapped per
@@ -20,6 +75,9 @@ final class VideoPlaybackController: ObservableObject {
     @Published private(set) var duration: Double = 0
     @Published private(set) var isPlaying: Bool = false
     @Published private(set) var isMuted: Bool = false
+
+    @Published private(set) var loadState: VideoLoadState = .idle
+    private var tracker = VideoLoadTracker() { didSet { loadState = tracker.state } }
 
     let player = AVPlayer()
 
@@ -41,10 +99,20 @@ final class VideoPlaybackController: ObservableObject {
         player.isMuted = isMuted
 
         statusObservation = item.observe(\.status, options: [.new]) { [weak self] observedItem, _ in
+            if observedItem.status == .failed {
+                Task { @MainActor in
+                    guard let self, self.player.currentItem === observedItem else { return }
+                    self.tracker.playerFailed()
+                }
+                return
+            }
             guard observedItem.status == .readyToPlay else { return }
             let seconds = CMTimeGetSeconds(observedItem.duration)
-            guard seconds.isFinite else { return }
-            Task { @MainActor in self?.duration = seconds }
+            Task { @MainActor in
+                guard let self, self.player.currentItem === observedItem else { return }
+                self.tracker.playerReady()
+                if seconds.isFinite { self.duration = seconds }
+            }
         }
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
@@ -74,6 +142,38 @@ final class VideoPlaybackController: ObservableObject {
     /// AVPlayer itself — called whenever the top card isn't a video (a
     /// plain photo) so nothing keeps playing/decoding behind it.
     func clear() {
+        detachItem()
+        tracker.reset()
+    }
+
+    /// Starts tracking a new video card: drops the previous card's item (its
+    /// last frame would otherwise stay painted over this card's poster) and
+    /// goes to `.loading`.
+    func beginLoading(assetID: String) {
+        detachItem()
+        tracker.begin(assetID)
+    }
+
+    func reportDownloadProgress(_ value: Double, for assetID: String) {
+        tracker.progress(value, for: assetID)
+    }
+
+    /// Gives `item` to the player only if `assetID` is still the card being
+    /// loaded. Returns whether it was applied.
+    @discardableResult
+    func loadItem(_ item: AVPlayerItem, for assetID: String) -> Bool {
+        guard tracker.accepts(itemFor: assetID) else { return false }
+        load(item: item)
+        return true
+    }
+
+    /// PhotoKit could not produce an item for `assetID`: leave the poster up with a retry hint.
+    func failLoading(for assetID: String) {
+        guard tracker.fail(for: assetID) else { return }
+        detachItem()
+    }
+
+    private func detachItem() {
         teardownItemObservers()
         if let timeObserverToken {
             player.removeTimeObserver(timeObserverToken)
@@ -240,5 +340,42 @@ struct VideoControlBar: View {
             )
         }
         .frame(height: barHeight)
+    }
+}
+
+/// Hint laid over a video card's poster while its video loads: iCloud download
+/// progress, a spinner, or a tap-to-retry button after a failure. Observes the
+/// controller itself so the (rare) state changes repaint only this view.
+struct VideoLoadOverlay: View {
+    @ObservedObject var controller: VideoPlaybackController
+    let onRetry: () -> Void
+
+    var body: some View {
+        switch controller.loadState {
+        case .failed:
+            Button(action: onRetry) {
+                Text(controller.loadState.overlayText ?? "")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Capsule().fill(.black.opacity(0.65)))
+            }
+            .accessibilityIdentifier("deck.videoRetry")
+        case .loading(let progress):
+            Group {
+                if let text = controller.loadState.overlayText {
+                    Text(text)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(Capsule().fill(.black.opacity(0.65)))
+                } else if progress == nil {
+                    ProgressView().tint(.white)
+                }
+            }
+            .allowsHitTesting(false)
+        case .idle, .ready:
+            EmptyView()
+        }
     }
 }

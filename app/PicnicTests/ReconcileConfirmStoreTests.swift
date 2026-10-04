@@ -96,7 +96,7 @@ final class ReconcileConfirmStoreTests: XCTestCase {
                                        phoneIndexes: [3], phoneAssetIDs: ["A"], status: "armed"))
         try ctx.save()
         present = []
-        store.resolveArmedJobs()
+        store.resolveArmedJobs(authorization: .authorized)
         XCTAssertEqual(try persistedStatuses(), ["pending"])
     }
 
@@ -107,7 +107,67 @@ final class ReconcileConfirmStoreTests: XCTestCase {
                                        phoneIndexes: [3], phoneAssetIDs: ["A"], status: "armed"))
         try ctx.save()
         present = ["A"]
-        store.resolveArmedJobs()
+        store.resolveArmedJobs(authorization: .authorized)
         XCTAssertEqual(try persistedStatuses(), [])
+    }
+
+    private func insertArmed(phoneAssetIDs: [String]) throws {
+        let ctx = ModelContext(container)
+        ctx.insert(ReconcileConfirmJob(id: UUID(), month: "2026-03", googleIds: ["g1"],
+                                       phoneIndexes: [3], phoneAssetIDs: phoneAssetIDs, status: "armed"))
+        try ctx.save()
+    }
+
+    func testLimitedAuthorizationLeavesArmedJobsArmed() async throws {
+        let store = try makeStore()
+        try insertArmed(phoneAssetIDs: ["A"])
+        present = []  // outside the limited selection: reads as gone, is still on the phone
+
+        store.resolveArmedJobs(authorization: .limited)
+        XCTAssertEqual(try persistedStatuses(), ["armed"], "limited access must not promote armed jobs")
+
+        store.resolveArmedJobs(authorization: .authorized)
+        XCTAssertEqual(try persistedStatuses(), ["pending"])
+    }
+
+    /// The PhotoKit confirm alert flips scenePhase inactive -> active, which
+    /// fires drain() while the job is armed. It must not POST it.
+    func testDrainIgnoresArmedJobs() async throws {
+        let store = try makeStore()
+        try insertArmed(phoneAssetIDs: ["A"])
+        await store.drain()
+        XCTAssertEqual(sendCalls, 0, "drain POSTed an armed job")
+        XCTAssertEqual(try persistedStatuses(), ["armed"])
+    }
+
+    func testDeliverRacingADrainPostsOnce() async throws {
+        container = try ModelContainer(
+            for: PersistenceController.schema,
+            configurations: [ModelConfiguration(schema: PersistenceController.schema, isStoredInMemoryOnly: true)]
+        )
+        var waiters: [CheckedContinuation<Void, Never>] = []
+        var calls = 0
+        let store = ReconcileConfirmStore(
+            context: ModelContext(container),
+            send: { _ in
+                calls += 1
+                await withCheckedContinuation { waiters.append($0) }
+            },
+            existingAssetIDs: { _ in [] }
+        )
+        let id = try await store.submit(month: "2026-03", googleIds: ["g1"], phone: []) {}
+
+        let first = Task { try? await store.deliver(id) }
+        for _ in 0..<200 where calls < 1 { await Task.yield(); try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(calls, 1)
+        let second = Task { try? await store.deliver(id) }
+        let drain = Task { await store.drain() }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(calls, 1, "a second deliver/drain POSTed a job that is already in flight")
+
+        waiters.forEach { $0.resume() }
+        waiters = []
+        await first.value; await second.value; await drain.value
+        XCTAssertEqual(try persistedStatuses(), ["sent"])
     }
 }

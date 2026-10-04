@@ -236,19 +236,22 @@ final class PicnicSwipeCard: SwipeCard {
         dragView.bringSubviewToFront(comparePill)
     }
 
+    /// Whether the poster is shown (test hook; see configure).
+    var isPosterVisible: Bool { !imageView.isHidden }
+
     func configure(image: UIImage?, isLivePhoto: Bool, compareCount: Int?, videoPlayer: AVPlayer?) {
         imageView.image = image
-        // .fit, not .fill (same reasoning as the imageView's own contentMode
-        // above): the poster still shows through for the instant before the
-        // player has a frame ready.
+        // The poster (imageView) is NEVER hidden: the transparent video layer sits
+        // above it and covers it only once it has a frame. Hiding it while a
+        // player is attached left the card fully black until the video loaded
+        // (and forever if it never did).
+        imageView.isHidden = false
         if let videoPlayer {
             videoLayerView.playerLayer.player = videoPlayer
             videoLayerView.isHidden = false
-            imageView.isHidden = true
         } else {
             videoLayerView.playerLayer.player = nil
             videoLayerView.isHidden = true
-            imageView.isHidden = false
         }
         liveBadge.isHidden = !isLivePhoto
         if let compareCount {

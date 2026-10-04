@@ -235,7 +235,7 @@ final class ReconcileViewModel: ObservableObject {
     /// the job stays pending and is retried on the next launch/foreground.
     func confirm(
         queue: ReconcileConfirmStore,
-        assetID: (Int) -> String,
+        monthAssetIDs: [String],
         deletePhone: ([(index: Int, filename: String)]) async throws -> Void
     ) async {
         let plan = deletePlan
@@ -244,9 +244,16 @@ final class ReconcileViewModel: ObservableObject {
         actionMessage = nil
         let jobID: UUID
         do {
+            // Resolved here, before anything is persisted or deleted: a stale
+            // index must surface as ReconcilePhoneMismatch, not crash.
+            let phone = try plan.phone.map { target -> (index: Int, assetID: String) in
+                guard monthAssetIDs.indices.contains(target.index) else {
+                    throw ReconcilePhoneMismatch(index: target.index, expected: target.filename)
+                }
+                return (index: target.index, assetID: monthAssetIDs[target.index])
+            }
             jobID = try await queue.submit(
-                month: monthKey, googleIds: plan.googleIds,
-                phone: plan.phone.map { (index: $0.index, assetID: assetID($0.index)) },
+                month: monthKey, googleIds: plan.googleIds, phone: phone,
                 deletePhone: { try await deletePhone(plan.phone) }
             )
         } catch {

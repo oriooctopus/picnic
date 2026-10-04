@@ -145,8 +145,13 @@ final class MirrorQueueStore: ObservableObject {
     /// Launch-time cleanup of armed jobs left by a kill mid-delete: asset gone
     /// from PhotoKit means the delete happened (-> pending, mirror it); asset
     /// still there means it did not (-> drop the job). Call once at launch,
-    /// after photo authorization, before drainQueue().
-    func resolveArmedJobs() {
+    /// before drainQueue(). Does nothing unless access is FULL (.authorized):
+    /// under .limited an asset outside the user's selection reads as "gone"
+    /// though it is still on the phone, which would promote the job and mirror
+    /// (and later trash in Google) a photo that was never deleted. Armed jobs
+    /// simply stay armed until full access is granted.
+    func resolveArmedJobs(authorization: PHAuthorizationStatus) {
+        guard authorization == .authorized else { return }
         let armed = armedJobs()
         let present = existingAssetIDs(armed.compactMap(\.assetLocalID))
         for job in armed {

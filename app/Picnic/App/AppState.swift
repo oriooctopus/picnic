@@ -181,8 +181,8 @@ final class AppState: ObservableObject {
         #endif
         // Settle armed jobs from a kill mid-delete BEFORE draining, so the ones
         // whose delete went through are mirrored on this very launch.
-        mirrorQueue.resolveArmedJobs()
-        reconcileConfirm.resolveArmedJobs()
+        mirrorQueue.resolveArmedJobs(authorization: photoLibrary.authorizationStatus)
+        reconcileConfirm.resolveArmedJobs(authorization: photoLibrary.authorizationStatus)
         await mirrorQueue.drainQueue()
         await reconcileConfirm.drain()
         await outfitLog.drainQueue()

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import Photos
 
 /// Durable "Clean up" confirm, same armed -> pending -> sent pattern as
 /// MirrorQueueStore: the job is persisted BEFORE the phone delete so a kill or
@@ -56,7 +57,9 @@ final class ReconcileConfirmStore {
     /// (retried by drain) except a 4xx, which the server will never accept and
     /// is parked as "failed". Rethrows so the caller can show the error.
     func deliver(_ id: UUID) async throws {
-        guard let job = jobs(status: "pending").first(where: { $0.id == id }) else { return }
+        // A foreground drain (or the view's own deliver) already POSTing this job.
+        guard !inFlight.contains(id),
+              let job = jobs(status: "pending").first(where: { $0.id == id }) else { return }
         inFlight.insert(id)
         defer { inFlight.remove(id) }
         do {
@@ -85,8 +88,12 @@ final class ReconcileConfirmStore {
     /// Launch-time cleanup of armed jobs left by a kill mid-delete: every phone
     /// asset gone means the delete happened (-> pending); any still present
     /// means it did not (-> drop). A job with no phone assets was Google-only
-    /// and is simply promoted. Call once at launch, before drain().
-    func resolveArmedJobs() {
+    /// and is simply promoted. Call once at launch, before drain(). Does
+    /// nothing unless access is FULL (.authorized): under .limited an asset
+    /// outside the selection reads as gone though it is still on the phone, and
+    /// promoting would trash its Google copy. See MirrorQueueStore.resolveArmedJobs.
+    func resolveArmedJobs(authorization: PHAuthorizationStatus) {
+        guard authorization == .authorized else { return }
         for job in jobs(status: "armed") {
             if existingAssetIDs(job.phoneAssetIDs).isEmpty {
                 job.status = "pending"
