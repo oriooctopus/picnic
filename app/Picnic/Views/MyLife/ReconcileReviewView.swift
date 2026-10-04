@@ -473,38 +473,51 @@ private struct PhoneAssetImage: View {
 /// which in a LazyVGrid left whole rows permanently blank on device: a load
 /// cancelled by scrolling (or a transient tailnet error) settles in `.failure`
 /// and AsyncImage never retries it, though the server served every thumb fine.
-/// Here `.task` re-runs each time the tile reappears, a failed fetch retries
-/// with backoff, and decoded images are cached so scrolling back is instant.
+/// Here `.task` re-runs each time the tile reappears, RemoteThumbLoader keeps
+/// retrying with backoff while the tile is on screen (and immediately when
+/// connectivity returns), a spinner shows meanwhile, and only a real 404 ends
+/// in the "no preview" icon. Decoded images are cached so scrolling back is instant.
 private struct RemoteThumbImage: View {
     let url: URL?
     let fill: Bool
     @State private var image: UIImage?
+    @State private var missingURL: URL?
+    @ObservedObject private var connectivity = Connectivity.shared
 
     private static let cache = NSCache<NSURL, UIImage>()
+
+    private struct LoadKey: Hashable {
+        let url: URL?
+        let epoch: Int
+    }
 
     var body: some View {
         Group {
             if let image {
                 if fill { Image(uiImage: image).resizable().scaledToFill() } else { Image(uiImage: image).resizable().scaledToFit() }
+            } else if let url, missingURL == url {
+                ZStack {
+                    Color(white: 0.15)
+                    Image(systemName: "eye.slash").foregroundStyle(.white.opacity(0.4))
+                }
             } else {
-                Color(white: 0.15)
+                ZStack {
+                    Color(white: 0.15)
+                    ProgressView().tint(.white.opacity(0.6))
+                }
             }
         }
-        .task(id: url) {
-            guard let url else { return }
+        .task(id: LoadKey(url: url, epoch: connectivity.epoch)) {
+            guard let url, missingURL != url else { return }
             if let cached = Self.cache.object(forKey: url as NSURL) { image = cached; return }
-            // 3 attempts, 0.5s then 1s apart: enough to ride out a dropped
-            // tailnet request without hammering a server that's really down.
-            for attempt in 0..<3 {
-                if attempt > 0 { try? await Task.sleep(for: .milliseconds(500 * attempt)) }
-                if Task.isCancelled { return }
-                if let (data, response) = try? await URLSession.shared.data(from: url),
-                   (response as? HTTPURLResponse)?.statusCode == 200,
-                   let loaded = UIImage(data: data) {
-                    Self.cache.setObject(loaded, forKey: url as NSURL)
-                    image = loaded
-                    return
-                }
+            switch await RemoteThumbLoader().load(url) {
+            case .image(let loaded)?:
+                Self.cache.setObject(loaded, forKey: url as NSURL)
+                image = loaded
+            case .noPreview?:
+                missingURL = url
+            case nil:
+                break  // tile left the screen; .task re-runs on reappear
             }
         }
     }
