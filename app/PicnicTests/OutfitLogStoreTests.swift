@@ -111,7 +111,11 @@ final class OutfitLogStoreTests: XCTestCase {
         // A new store over the same context (relaunch) sees the job and the logged set.
         let relaunched = OutfitLogStore(context: context, upload: makeUploader().upload)
         XCTAssertTrue(relaunched.loggedIDs.contains(assetID))
+        // The 500 set a backoff, so an ordinary drain right away leaves the job alone;
+        // a network-restored/Retry drain ignores it.
         await relaunched.drainQueue()
+        XCTAssertEqual(StubProtocol.requests.count, 1, "job still in backoff must not be retried by an ordinary drain")
+        await relaunched.drainQueue(ignoreBackoff: true)
 
         XCTAssertEqual(StubProtocol.requests.count, 2)
         XCTAssertEqual(StubProtocol.requests[1].request.value(forHTTPHeaderField: "X-Op-Id"),
