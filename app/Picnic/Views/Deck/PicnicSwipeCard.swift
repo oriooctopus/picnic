@@ -123,6 +123,7 @@ final class PicnicSwipeCard: SwipeCard {
         let button = UIButton(configuration: config)
         button.isUserInteractionEnabled = false
         button.isHidden = true
+        button.accessibilityIdentifier = "deck.iCloudBadge"
         return button
     }()
 
@@ -274,6 +275,20 @@ final class PicnicSwipeCard: SwipeCard {
     /// Whether the poster is shown (test hook; see configure).
     var isPosterVisible: Bool { !imageView.isHidden }
 
+    /// Shuffle only commits a swipe in a listed direction, so a blocked card
+    /// simply does not list `.left`.
+    static func swipeDirections(deleteBlocked: Bool) -> [SwipeDirection] {
+        deleteBlocked ? [.right, .down] : [.left, .right, .down]
+    }
+
+    static func allowsDeleteSwipe(deleteBlocked: Bool) -> Bool {
+        swipeDirections(deleteBlocked: deleteBlocked).contains(.left)
+    }
+
+    /// Test hooks: what the configured card currently lets and shows.
+    var allowsDeleteSwipe: Bool { swipeDirections.contains(.left) }
+    var isICloudBadgeVisible: Bool { !iCloudBadge.isHidden }
+
     func configure(
         image: UIImage?, isLivePhoto: Bool, compareCount: Int?, videoPlayer: AVPlayer?,
         showsICloudBadge: Bool = false, deleteBlocked: Bool = false
@@ -283,7 +298,7 @@ final class PicnicSwipeCard: SwipeCard {
         self.deleteBlocked = deleteBlocked
         // Shuffle only commits a swipe in a listed direction; leaving .left out
         // makes a left drag a cancelled swipe (spring back) while keep stays live.
-        swipeDirections = deleteBlocked ? [.right, .down] : [.left, .right, .down]
+        swipeDirections = Self.swipeDirections(deleteBlocked: deleteBlocked)
         // The poster (imageView) is NEVER hidden: the transparent video layer sits
         // above it and covers it only once it has a frame. Hiding it while a
         // player is attached left the card fully black until the video loaded
@@ -386,13 +401,21 @@ final class PicnicSwipeCard: SwipeCard {
         }
     }
 
-    override func didCancelSwipe(_ recognizer: UIPanGestureRecognizer) {
-        super.didCancelSwipe(recognizer)
-        // A left drag that would have deleted but was refused: say why.
-        if deleteBlocked, lastTranslation.width <= -DeckSwipeMetrics.threshold {
+    /// A cancelled drag on a delete-blocked card that was reaching for delete (any
+    /// leftward drag or flick, not just one past the commit threshold): say why.
+    func handleCancelledDrag(velocity: CGPoint) {
+        if deleteBlocked, DeckSwipeMetrics.isDeleteAttempt(translation: lastTranslation, velocity: velocity) {
             onBlockedDelete?()
         }
         lastTranslation = .zero
+    }
+
+    /// Test hook: feed a drag translation as `continueSwiping` would.
+    func recordDragForTest(_ translation: CGSize) { lastTranslation = translation }
+
+    override func didCancelSwipe(_ recognizer: UIPanGestureRecognizer) {
+        super.didCancelSwipe(recognizer)
+        handleCancelledDrag(velocity: recognizer.velocity(in: superview))
         // super's reset animation (CardAnimator.animateReset) springs
         // `self.transform` back to `.identity` — a no-op now that `self`
         // never leaves `.identity` in the first place. The real spring-back

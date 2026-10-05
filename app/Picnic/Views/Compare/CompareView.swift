@@ -43,7 +43,8 @@ struct CompareView: View {
                         isFavorite: viewModel.favoritedAssetIDs.contains(asset.localIdentifier),
                         onReject: { if viewModel.reject(asset) { advancePastMarkedCard() } },
                         onAccept: { if viewModel.accept(asset) { advancePastMarkedCard() } },
-                        onFavorite: { Task { await viewModel.toggleFavorite(asset) } }
+                        onFavorite: { Task { await viewModel.toggleFavorite(asset) } },
+                        onImageQuality: { viewModel.imageQualityChanged(asset.localIdentifier, $0) }
                     )
                     .tag(index)
                 }
@@ -56,6 +57,14 @@ struct CompareView: View {
         .task { viewModel.loadFileSizes() }
         .onChange(of: viewModel.isResolved) { _, resolved in
             if resolved { dismiss() }
+        }
+        .alert("Some photos kept", isPresented: Binding(
+            get: { viewModel.resolveNotice != nil },
+            set: { if !$0 { viewModel.acknowledgeNotice() } }
+        )) {
+            Button("OK") { viewModel.acknowledgeNotice() }
+        } message: {
+            Text(viewModel.resolveNotice ?? "")
         }
         .alert("Couldn't resolve group", isPresented: Binding(
             get: { viewModel.resolveError != nil },
@@ -135,7 +144,9 @@ struct CompareView: View {
                 HStack(spacing: 8) {
                     ForEach(Array(viewModel.group.assets.enumerated()), id: \.element.localIdentifier) { index, asset in
                         VStack(spacing: 4) {
-                            CompareThumbnailView(asset: asset)
+                            CompareThumbnailView(asset: asset, onDisplayed: {
+                                viewModel.imageQualityChanged(asset.localIdentifier, .partial)
+                            })
                                 .frame(width: 44, height: 60)
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                                 .overlay(
@@ -203,6 +214,8 @@ struct CompareView: View {
 
 private struct CompareThumbnailView: View {
     let asset: PHAsset
+    /// The strip thumbnail has pixels on screen: the user can see this photo.
+    let onDisplayed: () -> Void
     @State private var image: UIImage?
 
     var body: some View {
@@ -220,6 +233,7 @@ private struct CompareThumbnailView: View {
         .clipped()
         .task {
             image = await ThumbnailLoader.thumbnail(for: asset, targetSize: CGSize(width: 88, height: 120))
+            if image != nil { onDisplayed() }
         }
     }
 }

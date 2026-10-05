@@ -39,7 +39,46 @@ enum ThumbnailLoader {
     /// + prefetch, sequential awaits — see DeckView.loadCurrentImage)
     /// doesn't balloon CI time.
     static let slowImageLoadDelay: UInt64 = 2_500_000_000
+
+    /// UI-test-only: a simulator library is always local, so the offline-iCloud
+    /// card states can never occur naturally. `--simulate-undownloaded-images`
+    /// answers every load with "no pixels, image lives in iCloud";
+    /// `--simulate-icloud-lowres` answers deck loads with only a degraded
+    /// stand-in. Same DEBUG-only, read-once pattern as `--slow-image-loads`.
+    static let simulateUndownloaded = ProcessInfo.processInfo.arguments.contains("--simulate-undownloaded-images")
+    static let simulateICloudLowRes = ProcessInfo.processInfo.arguments.contains("--simulate-icloud-lowres")
+
+    static func simulatedUpdates() -> [DeckImageUpdate]? {
+        if simulateUndownloaded {
+            return [DeckImageUpdate(image: nil, isDegraded: false, isInCloud: true)]
+        }
+        if simulateICloudLowRes {
+            let standIn = UIGraphicsImageRenderer(size: CGSize(width: 60, height: 80)).image { ctx in
+                UIColor.gray.setFill()
+                ctx.fill(CGRect(x: 0, y: 0, width: 60, height: 80))
+            }
+            return [
+                DeckImageUpdate(image: standIn, isDegraded: true, isInCloud: true),
+                DeckImageUpdate(image: nil, isDegraded: false, isInCloud: true),
+            ]
+        }
+        return nil
+    }
     #endif
+
+    /// The request options for `imageUpdates`: opportunistic so a cached low-res
+    /// image arrives first (an iCloud-only photo offline still shows something),
+    /// network allowed so the full image can follow. Extracted so the choice is
+    /// pinned by a test: `.highQualityFormat` here would leave an offline
+    /// iCloud card blank instead of low-res.
+    static func opportunisticOptions() -> PHImageRequestOptions {
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .opportunistic
+        options.isNetworkAccessAllowed = true
+        // Same reason as fullImage: without .exact the card holds a full-resolution bitmap.
+        options.resizeMode = .exact
+        return options
+    }
 
     /// The device's real physical pixel dimensions (not points) — the
     /// correct upper-bound targetSize for any card that renders close to
@@ -54,6 +93,9 @@ enum ThumbnailLoader {
 
     static func thumbnail(for asset: PHAsset?, targetSize: CGSize) async -> UIImage? {
         guard let asset else { return nil }
+        #if DEBUG
+        if simulateUndownloaded { return nil }
+        #endif
         return await withCheckedContinuation { continuation in
             let options = PHImageRequestOptions()
             options.deliveryMode = .highQualityFormat
@@ -175,11 +217,14 @@ enum ThumbnailLoader {
     /// so a card that is swiped away stops downloading.
     static func imageUpdates(for asset: PHAsset, targetSize: CGSize) -> AsyncStream<DeckImageUpdate> {
         AsyncStream { continuation in
-            let options = PHImageRequestOptions()
-            options.deliveryMode = .opportunistic
-            options.isNetworkAccessAllowed = true
-            // Same reason as fullImage: without .exact the card holds a full-resolution bitmap.
-            options.resizeMode = .exact
+            #if DEBUG
+            if let simulated = simulatedUpdates() {
+                for update in simulated { continuation.yield(update) }
+                continuation.finish()
+                return
+            }
+            #endif
+            let options = opportunisticOptions()
             let started = CACurrentMediaTime()
             let requestID = PHImageManager.default().requestImage(
                 for: asset, targetSize: targetSize, contentMode: .aspectFit, options: options

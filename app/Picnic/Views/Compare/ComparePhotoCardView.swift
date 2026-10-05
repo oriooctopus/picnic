@@ -11,6 +11,8 @@ struct ComparePhotoCardView: View {
     let onReject: () -> Void
     let onAccept: () -> Void
     let onFavorite: () -> Void
+    /// Reports what displayed, so the confirm can refuse to delete unseen photos.
+    let onImageQuality: (DeckCardImagePolicy.Quality) -> Void
 
     @State private var image: UIImage?
 
@@ -95,7 +97,12 @@ struct ComparePhotoCardView: View {
             .font(.system(size: 20))
         }
         .task {
-            image = await ThumbnailLoader.fullImage(for: asset, targetSize: ThumbnailLoader.screenPixelSize)
+            var quality = DeckCardImagePolicy.Quality.loading
+            for await update in ThumbnailLoader.imageUpdates(for: asset, targetSize: ThumbnailLoader.screenPixelSize) {
+                if let img = update.image { image = img }
+                quality = DeckCardImagePolicy.next(after: quality, hasImage: update.image != nil, isDegraded: update.isDegraded)
+                onImageQuality(quality)
+            }
         }
     }
 }

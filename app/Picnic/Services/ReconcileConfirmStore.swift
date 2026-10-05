@@ -15,17 +15,20 @@ final class ReconcileConfirmStore: ObservableObject {
     private let send: (ReconcileConfirmJob) async throws -> Void
     private let existingAssetIDs: ([String]) -> Set<String>
     private var inFlight: Set<UUID> = []
+    private let now: () -> Date
 
     init(
         context: ModelContext,
         send: @escaping (ReconcileConfirmJob) async throws -> Void = { job in
             _ = try await ReconcileClient.confirm(month: job.month, ids: job.googleIds, phoneDeleted: job.phoneIndexes)
         },
-        existingAssetIDs: @escaping ([String]) -> Set<String> = existingPhotoAssetIDs
+        existingAssetIDs: @escaping ([String]) -> Set<String> = existingPhotoAssetIDs,
+        now: @escaping () -> Date = Date.init
     ) {
         self.context = context
         self.send = send
         self.existingAssetIDs = existingAssetIDs
+        self.now = now
         refreshFailedCount()
     }
 
@@ -38,11 +41,12 @@ final class ReconcileConfirmStore: ObservableObject {
         for job in jobs(status: "failed") {
             job.status = "pending"
             job.attemptCount = 0
+            job.nextAttemptAt = nil
             job.lastError = nil
         }
         try? context.save()
         refreshFailedCount()
-        await drain()
+        await drain(ignoreBackoff: true)
     }
 
     /// The user's explicit choice to leave the Google copies untrashed.
@@ -92,11 +96,14 @@ final class ReconcileConfirmStore: ObservableObject {
             try await send(job)
             job.status = "sent"
             job.lastError = nil
+            job.nextAttemptAt = nil
         } catch {
             job.attemptCount += 1
             job.lastError = "\(error)"
             if JobRetryPolicy.classify(error) == .permanent {
                 job.status = "failed"
+            } else {
+                job.nextAttemptAt = now().addingTimeInterval(JobRetryPolicy.backoff(attempt: job.attemptCount))
             }
             try? context.save()
             refreshFailedCount()
@@ -105,10 +112,13 @@ final class ReconcileConfirmStore: ObservableObject {
         try? context.save()
     }
 
-    /// Retries every pending job not already being delivered; stops at the
-    /// first transport failure (offline: the rest would fail the same way).
-    func drain() async {
+    /// Retries every pending job not already being delivered and not waiting
+    /// out a backoff (unless `ignoreBackoff`: network restored / user Retry);
+    /// stops at the first transport failure (offline: the rest would fail the
+    /// same way).
+    func drain(ignoreBackoff: Bool = false) async {
         for job in jobs(status: "pending") where !inFlight.contains(job.id) {
+            if !ignoreBackoff, let next = job.nextAttemptAt, next > now() { continue }
             do {
                 try await deliver(job.id)
             } catch {

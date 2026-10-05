@@ -236,6 +236,9 @@ final class OutfitLogStore: ObservableObject {
                 job.status = "sent"
                 job.lastError = nil
                 job.nextAttemptAt = nil
+                // Durable per job: a kill mid-pass must not forget the 2xx and re-send it.
+                try? context.save()
+                refreshCounts()
             } catch {
                 job.attemptCount += 1
                 job.lastError = "\(error)"
@@ -246,6 +249,7 @@ final class OutfitLogStore: ObservableObject {
                     job.nextAttemptAt = now().addingTimeInterval(JobRetryPolicy.backoff(attempt: job.attemptCount))
                 }
                 // See MirrorQueueStore.drainPass: offline ends the pass.
+                try? context.save()
                 if kind == .transport { break }
             }
         }

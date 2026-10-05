@@ -155,6 +155,8 @@ final class ReconcileConfirmJob {
     var status: String
     var attemptCount: Int
     var lastError: String?
+    /// Backoff gate, see MirrorJobRecord.nextAttemptAt. Optional for lightweight migration.
+    var nextAttemptAt: Date?
 
     init(id: UUID, month: String, googleIds: [String], phoneIndexes: [Int], phoneAssetIDs: [String], status: String) {
         self.id = id

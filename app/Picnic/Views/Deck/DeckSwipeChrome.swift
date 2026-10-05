@@ -29,6 +29,19 @@ enum DeckSwipeMetrics {
 
     /// Drag-down dismiss distance, matching the old `dismissThreshold`.
     static let dismissThreshold: CGFloat = 140
+
+    /// A leftward drag this far (or a leftward flick this fast) on a delete-blocked
+    /// card counts as an attempt to delete and earns the explanation toast. Well
+    /// under `threshold`: a short fast flick commits on a normal card, so it must
+    /// be explained on a blocked one instead of cancelling silently.
+    static let blockedAttemptTravel: CGFloat = 30
+    static let blockedAttemptVelocity: CGFloat = 400
+
+    static func isDeleteAttempt(translation: CGSize, velocity: CGPoint) -> Bool {
+        let leftward = translation.width <= -blockedAttemptTravel || velocity.x <= -blockedAttemptVelocity
+        // Mostly-horizontal only: a vertical scroll-like drag is not a delete gesture.
+        return leftward && abs(translation.width) >= abs(translation.height) * 0.5
+    }
 }
 
 /// Black, washed with red or green as the card is thrown toward archive or

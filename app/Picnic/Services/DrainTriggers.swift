@@ -50,19 +50,26 @@ final class DrainCoordinator {
     }
 }
 
+/// Where "is the network reachable" updates come from; injected so the wiring
+/// is testable without a real NWPathMonitor.
+protocol NetworkPathSource: AnyObject {
+    /// Calls `onUpdate(satisfied)` for every path update, starting with the current state.
+    @MainActor func start(onUpdate: @escaping @Sendable (_ satisfied: Bool) -> Void)
+}
+
 /// Thin NWPathMonitor wrapper; all logic lives in DrainCoordinator.pathUpdated.
-final class NetworkPathWatcher {
+final class NetworkPathWatcher: NetworkPathSource {
     private let monitor = NWPathMonitor()
     private var started = false
 
+    /// Only `.satisfied` is reachable; `.requiresConnection` and `.unsatisfied` are not.
+    static func isSatisfied(_ status: NWPath.Status) -> Bool { status == .satisfied }
+
     @MainActor
-    func start(_ coordinator: DrainCoordinator) {
+    func start(onUpdate: @escaping @Sendable (_ satisfied: Bool) -> Void) {
         guard !started else { return }
         started = true
-        monitor.pathUpdateHandler = { path in
-            let satisfied = path.status == .satisfied
-            Task { @MainActor in await coordinator.pathUpdated(satisfied: satisfied) }
-        }
+        monitor.pathUpdateHandler = { path in onUpdate(Self.isSatisfied(path.status)) }
         monitor.start(queue: DispatchQueue(label: "picnic.network-path"))
     }
 }

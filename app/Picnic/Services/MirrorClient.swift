@@ -64,11 +64,15 @@ enum MirrorClient {
     /// the same endpoint POST uses rather than adding a new one; the ?token=
     /// query param that /issues and /thumb accept does NOT work here, this
     /// route only checks the bearer header (server/lib/auth.mjs).
-    static func fetchStatus() async throws -> MirrorQueueStatus {
+    static func statusRequest() -> URLRequest {
         var request = URLRequest(url: Config.mirrorQueueURL)
         request.timeoutInterval = Config.requestTimeout
         request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
+        return request
+    }
 
+    static func fetchStatus() async throws -> MirrorQueueStatus {
+        let request = statusRequest()
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1

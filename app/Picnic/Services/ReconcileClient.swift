@@ -109,6 +109,15 @@ enum ReconcileClient {
     /// client's perspective: a non-2xx throws and the caller surfaces the
     /// error state rather than silently continuing with stale candidates.
     static func postManifest(month: String, assets: [ReconcileManifestAsset]) async throws {
+        let request = try manifestRequest(month: month, assets: assets)
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw MirrorClientError.badStatus(code)
+        }
+    }
+
+    static func manifestRequest(month: String, assets: [ReconcileManifestAsset]) throws -> URLRequest {
         var request = URLRequest(url: Config.reconcileURL(for: "/reconcile"))
         request.timeoutInterval = Config.requestTimeout
         request.httpMethod = "POST"
@@ -127,20 +136,26 @@ enum ReconcileClient {
             },
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        return request
+    }
 
-        let (_, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw MirrorClientError.badStatus(code)
-        }
+    static func candidatesRequest(month: String) -> URLRequest {
+        var request = URLRequest(url: Config.reconcileURL(for: "/reconcile/\(month)"))
+        request.timeoutInterval = Config.requestTimeout
+        request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    static func resultsRequest(month: String) -> URLRequest {
+        var request = URLRequest(url: Config.reconcileURL(for: "/reconcile/\(month)/results"))
+        request.timeoutInterval = Config.requestTimeout
+        request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
+        return request
     }
 
     /// GET /reconcile/:month — the review screen's candidate source.
     static func fetchCandidates(month: String) async throws -> ReconcileResponse {
-        var request = URLRequest(url: Config.reconcileURL(for: "/reconcile/\(month)"))
-        request.timeoutInterval = Config.requestTimeout
-        request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
-
+        let request = candidatesRequest(month: month)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
@@ -178,10 +193,7 @@ enum ReconcileClient {
     /// GET /reconcile/:month/results — per-candidate terminal state after
     /// the trash worker ran, polled by the review screen until `done`.
     static func fetchResults(month: String) async throws -> ReconcileResults {
-        var request = URLRequest(url: Config.reconcileURL(for: "/reconcile/\(month)/results"))
-        request.timeoutInterval = Config.requestTimeout
-        request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
-
+        let request = resultsRequest(month: month)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1

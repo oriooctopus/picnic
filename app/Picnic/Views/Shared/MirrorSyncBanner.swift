@@ -29,15 +29,18 @@ struct MirrorSyncBanner: View {
     }
 }
 
-struct MirrorSyncBannerContent: View {
-    @ObservedObject var mirror: MirrorQueueStore
-    @ObservedObject var reconcile: ReconcileConfirmStore
-    @ObservedObject var outfit: OutfitLogStore
-    @State private var showingFailedActions = false
+/// What the banner shows and what its Retry/Discard buttons do, across all
+/// three durable queues (mirror, Clean up Google, outfits). Separate from the
+/// view so tests can check both the state and that each action reaches every store.
+@MainActor
+struct SyncBannerModel {
+    let mirror: MirrorQueueStore
+    let reconcile: ReconcileConfirmStore
+    let outfit: OutfitLogStore
 
-    private var failedTotal: Int { mirror.failedCount + reconcile.failedCount + outfit.failedCount }
+    var failedTotal: Int { mirror.failedCount + reconcile.failedCount + outfit.failedCount }
 
-    private var state: MirrorBannerState {
+    var state: MirrorBannerState {
         MirrorBannerLogic.state(
             pendingCount: mirror.pendingCount,
             outfitPendingCount: outfit.pendingUploads,
@@ -47,6 +50,29 @@ struct MirrorSyncBannerContent: View {
             oldestQueuedWaitMs: mirror.serverStatus?.autoDrain.oldestQueuedWaitMs
         )
     }
+
+    /// Mirror and outfit retries start their own forced drain; reconcile's is awaited.
+    func retryAll() async {
+        mirror.retryFailed()
+        outfit.retryFailed()
+        await reconcile.retryFailed()
+    }
+
+    func discardAll() {
+        mirror.discardFailed()
+        outfit.discardFailed()
+        reconcile.discardFailed()
+    }
+}
+
+struct MirrorSyncBannerContent: View {
+    @ObservedObject var mirror: MirrorQueueStore
+    @ObservedObject var reconcile: ReconcileConfirmStore
+    @ObservedObject var outfit: OutfitLogStore
+    @State private var showingFailedActions = false
+
+    private var model: SyncBannerModel { SyncBannerModel(mirror: mirror, reconcile: reconcile, outfit: outfit) }
+    private var state: MirrorBannerState { model.state }
 
     var body: some View {
         VStack {
@@ -71,16 +97,8 @@ struct MirrorSyncBannerContent: View {
                     "The server rejected \(count) \(count == 1 ? "sync" : "syncs")",
                     isPresented: $showingFailedActions, titleVisibility: .visible
                 ) {
-                    Button("Retry") {
-                        mirror.retryFailed()
-                        outfit.retryFailed()
-                        Task { await reconcile.retryFailed() }
-                    }
-                    Button("Discard", role: .destructive) {
-                        mirror.discardFailed()
-                        outfit.discardFailed()
-                        reconcile.discardFailed()
-                    }
+                    Button("Retry") { Task { await model.retryAll() } }
+                    Button("Discard", role: .destructive) { model.discardAll() }
                     Button("Cancel", role: .cancel) {}
                 } message: {
                     Text("Discard gives up: deleted photos will not be mirrored to Google.")

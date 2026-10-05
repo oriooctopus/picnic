@@ -23,6 +23,24 @@ final class CompareViewModel: ObservableObject {
     @Published var isResolving = false
     @Published var resolveError: String?
     @Published var isResolved = false
+    /// What actually displayed for each member, reported by its card. Absent = never loaded.
+    @Published private(set) var imageQuality: [String: DeckCardImagePolicy.Quality] = [:]
+    /// Set when a confirm kept members because their image never displayed;
+    /// the view shows it, then `acknowledgeNotice()` finishes the dismiss.
+    @Published var resolveNotice: String?
+
+    /// Reported by a member's page card and by its bottom-strip thumbnail. A
+    /// member that displayed pixels in either place stays "seen": a later
+    /// no-pixels report from the other place never un-sees it.
+    func imageQualityChanged(_ assetID: String, _ quality: DeckCardImagePolicy.Quality) {
+        if let existing = imageQuality[assetID], existing.hasPixels, !quality.hasPixels { return }
+        imageQuality[assetID] = quality
+    }
+
+    func acknowledgeNotice() {
+        resolveNotice = nil
+        isResolved = true
+    }
 
     var bestAssetID: String? {
         fileSizes.max(by: { $0.value < $1.value })?.key
@@ -123,15 +141,19 @@ final class CompareViewModel: ObservableObject {
         isResolving = true
         defer { isResolving = false }
 
-        let deleteUnmarked = rejectedAssetIDs.isEmpty
-        let toDelete = group.assets.filter {
-            let id = $0.localIdentifier
-            return rejectedAssetIDs.contains(id)
-                || (deleteUnmarked && !acceptedAssetIDs.contains(id))
-        }
-        let kept = group.assets.filter { acceptedAssetIDs.contains($0.localIdentifier) }
+        // Gate on what actually displayed (imageQuality), never a fresh PhotoKit query.
+        let plan = CompareResolutionPlan.make(
+            memberIDs: group.assets.map(\.localIdentifier),
+            accepted: acceptedAssetIDs, rejected: rejectedAssetIDs, quality: imageQuality
+        )
+        let toDelete = group.assets.filter { plan.deleteIDs.contains($0.localIdentifier) }
+        let kept = group.assets.filter { plan.keptIDs.contains($0.localIdentifier) }
 
         onResolve(toDelete, kept, group.id)
-        isResolved = true
+        if let notice = plan.notice {
+            resolveNotice = notice
+        } else {
+            isResolved = true
+        }
     }
 }

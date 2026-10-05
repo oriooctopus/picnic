@@ -233,6 +233,9 @@ final class ReconcileViewModel: ObservableObject {
     ///      are still on the phone.
     /// If step 2 fails after step 1 succeeded, the phone photos are gone but
     /// the job stays pending and is retried on the next launch/foreground.
+    static let permanentFailureFollowUp = "Close this screen, then tap Retry or Discard on the red sync banner."
+    static let transientFailureFollowUp = "It will retry automatically."
+
     func confirm(
         queue: ReconcileConfirmStore,
         monthAssetIDs: [String],
@@ -276,9 +279,11 @@ final class ReconcileViewModel: ObservableObject {
             let prefix = plan.phone.isEmpty ? "" : "Deleted \(plan.phone.count) from the phone, but "
             // The job is durable either way: a transient failure retries by
             // itself, a rejected one waits for Retry/Discard in the sync banner.
+            // That banner lives in the tab root, behind this full-screen cover,
+            // so the message says to close the screen first.
             let followUp = JobRetryPolicy.classify(error) == .permanent
-                ? "Use Retry or Discard in the banner at the bottom."
-                : "It will retry automatically."
+                ? Self.permanentFailureFollowUp
+                : Self.transientFailureFollowUp
             state = .failed("\(prefix)moving to Google trash failed. \(ReconcileErrorMessage.plain(error)) \(followUp)")
         }
     }

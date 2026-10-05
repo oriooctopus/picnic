@@ -68,6 +68,7 @@ final class MirrorQueueStore: ObservableObject {
     private var rerunIgnoresBackoff = false
     // Injected clock so backoff is testable.
     private let now: () -> Date
+    private let fetchStatus: () async throws -> MirrorQueueStatus
     // 5 minutes: the banner's own threshold is a full HOUR of backlog, so
     // polling faster than that buys no earlier signal, only battery/data.
     private static let pollIntervalNanoseconds: UInt64 = 5 * 60 * 1_000_000_000
@@ -76,12 +77,14 @@ final class MirrorQueueStore: ObservableObject {
         context: ModelContext,
         post: @escaping (MirrorJobRecord) async throws -> Void = MirrorClient.post(job:),
         existingAssetIDs: @escaping ([String]) -> Set<String> = existingPhotoAssetIDs,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        fetchStatus: @escaping () async throws -> MirrorQueueStatus = MirrorClient.fetchStatus
     ) {
         self.context = context
         self.post = post
         self.existingAssetIDs = existingAssetIDs
         self.now = now
+        self.fetchStatus = fetchStatus
         refreshCount()
     }
 
@@ -251,6 +254,9 @@ final class MirrorQueueStore: ObservableObject {
                 job.status = "sent"
                 job.lastError = nil
                 job.nextAttemptAt = nil
+                // Durable per job: a kill mid-pass must not forget the 2xx and re-send it.
+                try? context.save()
+                refreshCount()
             } catch {
                 // No defensive fallback: the failure is surfaced via
                 // lastError/pendingCount/failedCount, never swallowed.
@@ -265,6 +271,7 @@ final class MirrorQueueStore: ObservableObject {
                 }
                 // Offline/timeout: every remaining job would fail the same way
                 // (and each costs a full request timeout), so end the pass.
+                try? context.save()
                 if kind == .transport { break }
             }
         }
@@ -276,7 +283,7 @@ final class MirrorQueueStore: ObservableObject {
     /// periodic poll below; also safe to call ad hoc.
     func refreshServerStatus() async {
         do {
-            serverStatus = try await MirrorClient.fetchStatus()
+            serverStatus = try await fetchStatus()
         } catch {
             // Printed, not stored: an unreachable status endpoint must not
             // paint a scary banner out of nothing (see MirrorBannerLogic),

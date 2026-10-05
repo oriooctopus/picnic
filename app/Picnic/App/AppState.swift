@@ -8,11 +8,11 @@ import SwiftData
 final class AppState: ObservableObject {
     let photoLibrary = PhotoLibraryService()
     let sortStore: SortStore
-    let mirrorQueue: MirrorQueueStore
-    let reconcileConfirm: ReconcileConfirmStore
-    let outfitLog: OutfitLogStore
-    let drainCoordinator: DrainCoordinator
-    private let pathWatcher = NetworkPathWatcher()
+    /// Composition root of the durable job queues; see JobRuntime.
+    let jobs: JobRuntime
+    var mirrorQueue: MirrorQueueStore { jobs.mirrorQueue }
+    var reconcileConfirm: ReconcileConfirmStore { jobs.reconcileConfirm }
+    var outfitLog: OutfitLogStore { jobs.outfitLog }
 
     @Published var monthBuckets: [MonthBucket] = []
     // Set by MonthCardView's "Clean up Google" context-menu button; MyLifeView
@@ -115,36 +115,34 @@ final class AppState: ObservableObject {
         // Constructed here, after the reset block above — see the
         // LOAD-BEARING ORDERING comment at the top of init().
         sortStore = SortStore(context: modelContext)
-        mirrorQueue = MirrorQueueStore(context: modelContext)
-        reconcileConfirm = ReconcileConfirmStore(context: modelContext)
         #if DEBUG
         // UI-test mode (every UI test launches with --seed-library) must never
         // reach the real Outfits server: inject an uploader that just succeeds.
         if args.contains("--seed-library") {
-            outfitLog = OutfitLogStore(context: modelContext, upload: { _ in })
+            jobs = JobRuntime(context: modelContext, pathSource: NetworkPathWatcher(), outfitUpload: { _ in })
         } else {
-            outfitLog = OutfitLogStore(context: modelContext)
+            jobs = JobRuntime(context: modelContext, pathSource: NetworkPathWatcher())
         }
         #else
-        outfitLog = OutfitLogStore(context: modelContext)
+        jobs = JobRuntime(context: modelContext, pathSource: NetworkPathWatcher())
         #endif
-        let mirror = mirrorQueue, reconcile = reconcileConfirm, outfit = outfitLog
-        drainCoordinator = DrainCoordinator(drain: { ignoreBackoff in
-            async let m: Void = mirror.drainQueue(ignoreBackoff: ignoreBackoff)
-            async let r: Void = reconcile.drain()
-            async let o: Void = outfit.drainQueue(ignoreBackoff: ignoreBackoff)
-            _ = await (m, r, o)
-        })
     }
 
     func bootstrap() async {
-        pathWatcher.start(drainCoordinator)
-        await photoLibrary.requestAuthorization()
-        guard photoLibrary.authorizationStatus == .authorized
-                || photoLibrary.authorizationStatus == .limited else {
-            drainCoordinator.launchWithoutDrain()
-            return
-        }
+        // The job-side sequence (listen for network, settle armed jobs, first
+        // drain, or just allow foreground drains without photo access) lives in
+        // JobRuntime.bootstrap, which is tested; only the library work is here.
+        await jobs.bootstrap(
+            requestAuthorization: { [photoLibrary] in
+                await photoLibrary.requestAuthorization()
+                return photoLibrary.authorizationStatus
+            },
+            settleLibrary: { [self] in await settleLibrary() }
+        )
+    }
+
+    /// Seeding (debug) and the first month load, once photo access is granted.
+    private func settleLibrary() async {
         #if DEBUG
         // Debug-only seed path for the visual-walk CI job — never compiled
         // into the ad-hoc/Release build. See SeedLibrary.swift.
@@ -192,18 +190,6 @@ final class AppState: ObservableObject {
         #else
         refreshMonths()
         #endif
-        // Settle armed jobs from a kill mid-delete BEFORE draining, so the ones
-        // whose delete went through are mirrored on this very launch.
-        mirrorQueue.resolveArmedJobs(authorization: photoLibrary.authorizationStatus)
-        reconcileConfirm.resolveArmedJobs(authorization: photoLibrary.authorizationStatus)
-        await drainCoordinator.drainAtLaunch()
-        // Launch counts as a foreground -- see PicnicApp.swift's scenePhase
-        // handler for the background/re-foreground case. Fetch once
-        // immediately rather than waiting out the first poll interval so a
-        // launch after the app's been backgrounded for hours doesn't show
-        // stale data for 5 minutes.
-        await mirrorQueue.refreshServerStatus()
-        mirrorQueue.startPolling()
     }
 
     func refreshMonths() {
