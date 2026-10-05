@@ -22,6 +22,10 @@ struct DeckView: View {
     /// markKept skip whenever hideSorted has already removed the swiped
     /// asset — see DeckViewModel.markForDelete's guard comment).
     @State private var nextImageAssetID: String?
+    /// What the current photo card shows (see DeckCardImagePolicy). Drives the
+    /// "in iCloud" badge and whether a delete swipe is allowed.
+    @State private var imageQuality: DeckCardImagePolicy.Quality = .loading
+    @State private var imageInCloud = false
     @State private var showHidePopover = false
     /// Plain @State on purpose: it holds the object without subscribing to it,
     /// so a drag repaints the tint and labels but never this view's body (and
@@ -56,6 +60,7 @@ struct DeckView: View {
     enum DeckToast: Equatable {
         case logged(assetID: String)
         case openFailed
+        case deleteBlocked
     }
 
     static let outfitLilac = Color(red: 201 / 255, green: 162 / 255, blue: 255 / 255)
@@ -116,6 +121,9 @@ struct DeckView: View {
                         },
                         onCompare: { presentation = .compare($0, startAssetID: asset.localIdentifier) },
                         onLongPress: { presentLivePhotoIfNeeded(asset) },
+                        showsICloudBadge: DeckCardImagePolicy.showsICloudBadge(quality: imageQuality, isInCloud: imageInCloud),
+                        deleteBlocked: DeckCardImagePolicy.deleteBlocked(quality: imageQuality),
+                        onBlockedDelete: { showToast(.deleteBlocked, seconds: 3) },
                         onDelete: { viewModel.markForDelete() },
                         onKeep: { viewModel.markKept() },
                         onDismiss: { Task { await exitDeck() } },
@@ -207,6 +215,8 @@ struct DeckView: View {
             // correct, a brief WRONG photo is the bug this fixes.
             viewModel.onAdvance = {
                 currentImage = nextImage
+                imageQuality = nextImage == nil ? .loading : .partial
+                imageInCloud = false
                 nextImage = nil
                 nextImageAssetID = nil
             }
@@ -294,8 +304,11 @@ struct DeckView: View {
         // A1: see this function's doc comment. Must run before any `await`
         // — the whole point is closing the gap between currentAsset changing
         // and the first suspension point below, not just shortening it.
+        imageQuality = .loading
+        imageInCloud = false
         if nextImageAssetID == asset.localIdentifier, let prefetched = nextImage {
             currentImage = prefetched
+            imageQuality = .partial  // the 600x800 prefetch: pixels, but not the final image
             nextImage = nil
             nextImageAssetID = nil
         }
@@ -312,6 +325,8 @@ struct DeckView: View {
             // retry instead of going black. Every async result is gated on
             // this card still being current (A2), and the controller gates
             // the item itself by asset id.
+            // Video cards have their own load/retry UI; never delete-blocked.
+            imageQuality = .full
             videoController.beginLoading(assetID: loadingID)
             if let local = await ThumbnailLoader.localThumbnail(for: asset, targetSize: ThumbnailLoader.screenPixelSize),
                viewModel.currentAsset?.localIdentifier == loadingID {
@@ -333,12 +348,22 @@ struct DeckView: View {
             // Not a video card: make sure nothing keeps playing/decoding
             // behind a plain photo.
             videoController.clear()
-            let fetched = await ThumbnailLoader.fullImage(for: asset, targetSize: ThumbnailLoader.screenPixelSize)
-            // A2 gate: only trust this fetch if it's still for the asset
-            // actually on screen — see the doc comment above.
-            if viewModel.currentAsset?.localIdentifier == loadingID {
-                currentImage = fetched
+            await ThumbnailLoader.applySlowLoadDelayIfEnabled()
+            // Low-res first, then full: each update replaces currentImage. The
+            // stream ends on the final result, and cancelling this task (the
+            // card changed) cancels the PhotoKit request behind it.
+            for await update in ThumbnailLoader.imageUpdates(for: asset, targetSize: ThumbnailLoader.screenPixelSize) {
+                // A2 gate: only trust this fetch if it's still for the asset
+                // actually on screen — see the doc comment above.
+                guard viewModel.currentAsset?.localIdentifier == loadingID else { break }
+                if let image = update.image { currentImage = image }
+                imageQuality = DeckCardImagePolicy.next(
+                    after: imageQuality, hasImage: update.image != nil, isDegraded: update.isDegraded
+                )
+                imageInCloud = update.isInCloud
             }
+            // Cancelled mid-load: the card changed and a new load owns the state.
+            if Task.isCancelled { return }
         }
 
         // The card behind is dimmed and partly covered, so it is fetched at a
@@ -352,7 +377,7 @@ struct DeckView: View {
             return
         }
         let nextAsset = viewModel.visibleAssets[nextIndex]
-        let fetchedNext = await ThumbnailLoader.fullImage(for: nextAsset, targetSize: CGSize(width: 600, height: 800))
+        let fetchedNext = await ThumbnailLoader.bestAvailableImage(for: nextAsset, targetSize: CGSize(width: 600, height: 800))
         // A2 gate, same reasoning as the currentImage assignment above.
         if viewModel.currentAsset?.localIdentifier == loadingID {
             nextImage = fetchedNext
@@ -604,6 +629,8 @@ struct DeckView: View {
                     .accessibilityIdentifier("deck.outfitToast.review")
                 case .openFailed:
                     Text("Couldn't open Overland").foregroundStyle(Color(red: 240 / 255, green: 234 / 255, blue: 251 / 255))
+                case .deleteBlocked:
+                    Text(DeckCardImagePolicy.blockedDeleteMessage).foregroundStyle(Color(red: 240 / 255, green: 234 / 255, blue: 251 / 255))
                 }
             }
             .font(.system(size: 15, weight: .semibold))
@@ -682,6 +709,9 @@ private struct DeckCard: View {
     let compareGroup: CompareGroup?
     let onCompare: (CompareGroup) -> Void
     let onLongPress: () -> Void
+    let showsICloudBadge: Bool
+    let deleteBlocked: Bool
+    let onBlockedDelete: () -> Void
     let onDelete: () -> Void
     let onKeep: () -> Void
     let onDismiss: () -> Void
@@ -717,6 +747,9 @@ private struct DeckCard: View {
             videoPlayer: isVideo ? videoController.player : nil,
             onCompare: { if let compareGroup { onCompare(compareGroup) } },
             onLongPress: onLongPress,
+            showsICloudBadge: showsICloudBadge,
+            deleteBlocked: deleteBlocked,
+            onBlockedDelete: onBlockedDelete,
             onDelete: onDelete,
             onKeep: onKeep,
             onDismiss: onDismiss,
@@ -755,6 +788,9 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
     let videoPlayer: AVPlayer?
     let onCompare: () -> Void
     let onLongPress: () -> Void
+    let showsICloudBadge: Bool
+    let deleteBlocked: Bool
+    let onBlockedDelete: () -> Void
     let onDelete: () -> Void
     let onKeep: () -> Void
     let onDismiss: () -> Void
@@ -765,7 +801,11 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ card: PicnicSwipeCard, context: Context) {
-        card.configure(image: image, isLivePhoto: isLivePhoto, compareCount: compareCount, videoPlayer: videoPlayer)
+        card.configure(
+            image: image, isLivePhoto: isLivePhoto, compareCount: compareCount, videoPlayer: videoPlayer,
+            showsICloudBadge: showsICloudBadge, deleteBlocked: deleteBlocked
+        )
+        card.onBlockedDelete = onBlockedDelete
         card.onCompare = onCompare
         card.onLongPress = onLongPress
         card.onDelete = onDelete

@@ -8,7 +8,9 @@ import Photos
 /// lose the trash request. Anything that cannot run now re-runs on the next
 /// launch/foreground via drain().
 @MainActor
-final class ReconcileConfirmStore {
+final class ReconcileConfirmStore: ObservableObject {
+    /// Jobs parked as "failed": shown with Retry/Discard, never dropped silently.
+    @Published private(set) var failedCount: Int = 0
     private let context: ModelContext
     private let send: (ReconcileConfirmJob) async throws -> Void
     private let existingAssetIDs: ([String]) -> Set<String>
@@ -24,6 +26,30 @@ final class ReconcileConfirmStore {
         self.context = context
         self.send = send
         self.existingAssetIDs = existingAssetIDs
+        refreshFailedCount()
+    }
+
+    func refreshFailedCount() {
+        failedCount = jobs(status: "failed").count
+    }
+
+    /// Retry on the user's say-so: failed jobs go back to pending and are re-sent.
+    func retryFailed() async {
+        for job in jobs(status: "failed") {
+            job.status = "pending"
+            job.attemptCount = 0
+            job.lastError = nil
+        }
+        try? context.save()
+        refreshFailedCount()
+        await drain()
+    }
+
+    /// The user's explicit choice to leave the Google copies untrashed.
+    func discardFailed() {
+        for job in jobs(status: "failed") { context.delete(job) }
+        try? context.save()
+        refreshFailedCount()
     }
 
     /// Arms the job, runs `deletePhone` (skipped when there are no phone
@@ -69,19 +95,25 @@ final class ReconcileConfirmStore {
         } catch {
             job.attemptCount += 1
             job.lastError = "\(error)"
-            if case MirrorClientError.badStatus(let code) = error, (400..<500).contains(code) {
+            if JobRetryPolicy.classify(error) == .permanent {
                 job.status = "failed"
             }
             try? context.save()
+            refreshFailedCount()
             throw error
         }
         try? context.save()
     }
 
-    /// Retries every pending job not already being delivered.
+    /// Retries every pending job not already being delivered; stops at the
+    /// first transport failure (offline: the rest would fail the same way).
     func drain() async {
         for job in jobs(status: "pending") where !inFlight.contains(job.id) {
-            try? await deliver(job.id)
+            do {
+                try await deliver(job.id)
+            } catch {
+                if JobRetryPolicy.classify(error) == .transport { break }
+            }
         }
     }
 

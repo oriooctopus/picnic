@@ -3,9 +3,20 @@ import UIKit
 import QuartzCore
 import AVFoundation
 
-/// PHImageManager wrappers. Both use `.highQualityFormat` deliberately —
-/// `.opportunistic` calls its result handler twice (low-res, then high-res),
-/// which would resume a checked continuation more than once and crash.
+/// One delivery from `ThumbnailLoader.imageUpdates`.
+struct DeckImageUpdate: @unchecked Sendable {
+    let image: UIImage?
+    /// PhotoKit's low-res stand-in; the full image may still follow.
+    let isDegraded: Bool
+    /// The full image lives in iCloud and is not on the device.
+    let isInCloud: Bool
+}
+
+/// PHImageManager wrappers. The continuation-based ones use `.highQualityFormat`
+/// deliberately — `.opportunistic` calls its result handler twice (low-res,
+/// then high-res), which would resume a checked continuation more than once
+/// and crash. `imageUpdates` is the opportunistic one and is a stream for
+/// exactly that reason.
 enum ThumbnailLoader {
     #if DEBUG
     /// UI-test-only fault injection for the hideSorted-flicker bug (see
@@ -145,6 +156,66 @@ enum ThumbnailLoader {
             }
             return result
         }
+    }
+
+    /// Debug-only `--slow-image-loads` delay, see `slowImageLoadsEnabled`.
+    static func applySlowLoadDelayIfEnabled() async {
+        #if DEBUG
+        if slowImageLoadsEnabled {
+            try? await Task.sleep(nanoseconds: slowImageLoadDelay)
+        }
+        #endif
+    }
+
+    /// Deck card loading: the cached low-res image first (an iCloud-only photo
+    /// on a phone with no signal still shows something), then the full image,
+    /// each as one update. The stream finishes after the final result (or when
+    /// PhotoKit reports a cancel); cancelling the consuming task, or dropping
+    /// out of the `for await`, cancels the underlying PHImageManager request,
+    /// so a card that is swiped away stops downloading.
+    static func imageUpdates(for asset: PHAsset, targetSize: CGSize) -> AsyncStream<DeckImageUpdate> {
+        AsyncStream { continuation in
+            let options = PHImageRequestOptions()
+            options.deliveryMode = .opportunistic
+            options.isNetworkAccessAllowed = true
+            // Same reason as fullImage: without .exact the card holds a full-resolution bitmap.
+            options.resizeMode = .exact
+            let started = CACurrentMediaTime()
+            let requestID = PHImageManager.default().requestImage(
+                for: asset, targetSize: targetSize, contentMode: .aspectFit, options: options
+            ) { image, info in
+                if (info?[PHImageCancelledKey] as? Bool) == true {
+                    continuation.finish()
+                    return
+                }
+                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                let isInCloud = (info?[PHImageResultIsInCloudKey] as? Bool) ?? false
+                continuation.yield(DeckImageUpdate(image: image, isDegraded: isDegraded, isInCloud: isInCloud))
+                // A degraded image is followed by another callback; anything else is final.
+                if !(isDegraded && image != nil) {
+                    let pixels = image.map { CGSize(width: $0.size.width * $0.scale,
+                                                    height: $0.size.height * $0.scale) } ?? .zero
+                    PerfMonitor.shared.recordImageLoad(
+                        seconds: CACurrentMediaTime() - started, fromICloud: isInCloud, pixelSize: pixels
+                    )
+                    continuation.finish()
+                }
+            }
+            continuation.onTermination = { _ in
+                PHImageManager.default().cancelImageRequest(requestID)
+            }
+        }
+    }
+
+    /// The best image PhotoKit can give for `asset` right now: the final one
+    /// if it arrives, else the low-res stand-in. For the dimmed card behind
+    /// the deck, which must show something offline too.
+    static func bestAvailableImage(for asset: PHAsset, targetSize: CGSize) async -> UIImage? {
+        var best: UIImage?
+        for await update in imageUpdates(for: asset, targetSize: targetSize) {
+            if let image = update.image { best = image }
+        }
+        return best
     }
 
     static func fullImage(for asset: PHAsset, targetSize: CGSize) async -> UIImage? {

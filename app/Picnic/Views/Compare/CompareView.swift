@@ -53,7 +53,7 @@ struct CompareView: View {
             bottomBar
         }
         .background(Color.black.ignoresSafeArea())
-        .task { await viewModel.loadFileSizes() }
+        .task { viewModel.loadFileSizes() }
         .onChange(of: viewModel.isResolved) { _, resolved in
             if resolved { dismiss() }
         }

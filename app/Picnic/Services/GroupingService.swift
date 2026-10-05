@@ -41,36 +41,31 @@ enum GroupingService {
 }
 
 /// BEST heuristic = largest file size in the group (matches the ★ BEST
-/// display in the reference screenshots). Sizes are only fetched for the
-/// small handful of assets in an open Compare group, never the whole library.
+/// display in the reference screenshots). Sizes come from PHAssetResource
+/// metadata, which PhotoKit knows without the bytes: this used to call
+/// requestImageDataAndOrientation with network access allowed, i.e. downloaded
+/// every full-size original of an iCloud-only group just to count its bytes,
+/// and never produced a star offline.
 enum BestPhotoResolver {
-    static func fileSizes(for assets: [PHAsset]) async -> [String: Int64] {
-        var sizes: [String: Int64] = [:]
-        await withTaskGroup(of: (String, Int64).self) { group in
-            for asset in assets {
-                group.addTask {
-                    (asset.localIdentifier, await fileSize(for: asset))
-                }
-            }
-            for await (id, size) in group {
-                sizes[id] = size
-            }
-        }
-        return sizes
+    static func fileSizes(for assets: [PHAsset]) -> [String: Int64] {
+        Dictionary(uniqueKeysWithValues: assets.map { ($0.localIdentifier, fileSize(for: $0)) })
     }
 
-    static func fileSize(for asset: PHAsset) async -> Int64 {
-        await withCheckedContinuation { continuation in
-            let options = PHImageRequestOptions()
-            options.isNetworkAccessAllowed = true
-            options.version = .current
-            options.deliveryMode = .highQualityFormat
-            var didResume = false
-            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
-                guard !didResume else { return }
-                didResume = true
-                continuation.resume(returning: Int64(data?.count ?? 0))
-            }
+    static func fileSize(for asset: PHAsset) -> Int64 {
+        // `fileSize` is not a public PHAssetResource property; reading it via
+        // KVC is the long-standing way to get it without fetching the data.
+        primarySize(of: PHAssetResource.assetResources(for: asset).map {
+            (type: $0.type, size: ($0.value(forKey: "fileSize") as? NSNumber)?.int64Value ?? 0)
+        })
+    }
+
+    /// The original's size: the main photo/video resource if the asset has
+    /// one, else the largest resource. Edits add `fullSizePhoto` and
+    /// adjustment resources that must not outrank the original.
+    static func primarySize(of resources: [(type: PHAssetResourceType, size: Int64)]) -> Int64 {
+        if let main = resources.first(where: { $0.type == .photo || $0.type == .video }) {
+            return main.size
         }
+        return resources.map(\.size).max() ?? 0
     }
 }

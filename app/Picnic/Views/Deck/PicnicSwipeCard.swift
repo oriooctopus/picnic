@@ -27,6 +27,8 @@ final class PicnicSwipeCard: SwipeCard {
     var onDismiss: (() -> Void)?
     var onLongPress: (() -> Void)?
     var onCompare: (() -> Void)?
+    /// Called when a delete-length left drag was refused because the card is delete-blocked.
+    var onBlockedDelete: (() -> Void)?
 
     private let imageView = UIImageView()
     /// Video's card-filling layer. A sibling of `imageView` inside
@@ -102,6 +104,32 @@ final class PicnicSwipeCard: SwipeCard {
         return container
     }()
 
+    /// Shown while only the cached low-res image is on screen and the full one
+    /// lives in iCloud. Not interactive.
+    private let iCloudBadge: UIButton = {
+        var config = UIButton.Configuration.filled()
+        config.baseBackgroundColor = UIColor.black.withAlphaComponent(0.55)
+        config.baseForegroundColor = .white
+        config.image = UIImage(systemName: "icloud")
+        config.title = "In iCloud"
+        config.imagePadding = 4
+        config.cornerStyle = .capsule
+        config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 10, bottom: 4, trailing: 10)
+        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
+            var attrs = attrs
+            attrs.font = UIFont.preferredFont(forTextStyle: .caption1)
+            return attrs
+        }
+        let button = UIButton(configuration: config)
+        button.isUserInteractionEnabled = false
+        button.isHidden = true
+        return button
+    }()
+
+    /// While true a left drag cannot commit a delete; it springs back (see didCancelSwipe).
+    private var deleteBlocked = false
+    private var lastTranslation: CGSize = .zero
+
     private let comparePill: UIButton = {
         var config = UIButton.Configuration.filled()
         config.baseBackgroundColor = UIColor.black.withAlphaComponent(0.55)
@@ -174,6 +202,7 @@ final class PicnicSwipeCard: SwipeCard {
         dragView.addSubview(videoLayerView)
         dragView.addSubview(liveBadge)
         dragView.addSubview(comparePill)
+        dragView.addSubview(iCloudBadge)
         comparePill.accessibilityIdentifier = "deck.comparePill"
         comparePill.addTarget(self, action: #selector(handleCompareTap), for: .touchUpInside)
 
@@ -232,15 +261,29 @@ final class PicnicSwipeCard: SwipeCard {
             width: pillSize.width,
             height: pillSize.height
         )
+        let badgeSize = iCloudBadge.sizeThatFits(CGSize(width: dragView.bounds.width, height: 32))
+        iCloudBadge.frame = CGRect(
+            x: dragView.bounds.width - badgeSize.width - 12, y: 12,
+            width: badgeSize.width, height: badgeSize.height
+        )
         dragView.bringSubviewToFront(liveBadge)
         dragView.bringSubviewToFront(comparePill)
+        dragView.bringSubviewToFront(iCloudBadge)
     }
 
     /// Whether the poster is shown (test hook; see configure).
     var isPosterVisible: Bool { !imageView.isHidden }
 
-    func configure(image: UIImage?, isLivePhoto: Bool, compareCount: Int?, videoPlayer: AVPlayer?) {
+    func configure(
+        image: UIImage?, isLivePhoto: Bool, compareCount: Int?, videoPlayer: AVPlayer?,
+        showsICloudBadge: Bool = false, deleteBlocked: Bool = false
+    ) {
         imageView.image = image
+        iCloudBadge.isHidden = !showsICloudBadge
+        self.deleteBlocked = deleteBlocked
+        // Shuffle only commits a swipe in a listed direction; leaving .left out
+        // makes a left drag a cancelled swipe (spring back) while keep stays live.
+        swipeDirections = deleteBlocked ? [.right, .down] : [.left, .right, .down]
         // The poster (imageView) is NEVER hidden: the transparent video layer sits
         // above it and covers it only once it has a frame. Hiding it while a
         // player is attached left the card fully black until the video loaded
@@ -323,6 +366,7 @@ final class PicnicSwipeCard: SwipeCard {
         // transformed, and which coordinate space the translation is
         // measured in, changes.
         let t = recognizer.translation(in: superview)
+        lastTranslation = CGSize(width: t.x, height: t.y)
         let rotationStrength = min(t.x / UIScreen.main.bounds.width, 1)
         let angle = rotationDirectionY * rotationStrength * animationOptions.maximumRotationAngle
         dragView.transform = CGAffineTransform(translationX: t.x, y: t.y)
@@ -344,6 +388,11 @@ final class PicnicSwipeCard: SwipeCard {
 
     override func didCancelSwipe(_ recognizer: UIPanGestureRecognizer) {
         super.didCancelSwipe(recognizer)
+        // A left drag that would have deleted but was refused: say why.
+        if deleteBlocked, lastTranslation.width <= -DeckSwipeMetrics.threshold {
+            onBlockedDelete?()
+        }
+        lastTranslation = .zero
         // super's reset animation (CardAnimator.animateReset) springs
         // `self.transform` back to `.identity` — a no-op now that `self`
         // never leaves `.identity` in the first place. The real spring-back

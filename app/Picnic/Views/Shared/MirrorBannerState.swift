@@ -9,7 +9,11 @@ enum MirrorBannerState: Equatable {
     case none
     /// Device-side outbound queue: jobs PhotoKit deleted locally that the
     /// app has not yet successfully POSTed to the server at all.
-    case devicePending(count: Int, lastError: String?)
+    case devicePending(count: Int, outfitCount: Int, lastError: String?)
+    /// Jobs a server will never accept (4xx), parked until the user chooses
+    /// Retry or Discard. Outranks everything: the only state that needs the
+    /// user to act, and it is never dropped silently.
+    case failedJobs(count: Int)
     /// Server-side backlog: jobs the phone HAS posted, but the server's
     /// auto-drain hasn't cleared in over an hour. See
     /// MirrorSyncBanner.swift's header comment for why pendingCount alone
@@ -26,6 +30,10 @@ enum MirrorBannerLogic {
 
     /// - Parameters:
     ///   - pendingCount: MirrorQueueStore.pendingCount (device-side).
+    ///   - outfitPendingCount: OutfitLogStore.pendingUploads, shown in the
+    ///     same device-pending banner (an outfit upload is also "not yet
+    ///     delivered").
+    ///   - failedCount: failed mirror + outfit + reconcile jobs.
     ///   - lastError: MirrorQueueStore.lastError, shown only alongside the
     ///     device-pending banner.
     ///   - serverQueuedCount: last known-good GET /queue counts.queued, or
@@ -39,16 +47,21 @@ enum MirrorBannerLogic {
     ///     same nil-means-never-fetched contract as serverQueuedCount.
     static func state(
         pendingCount: Int,
+        outfitPendingCount: Int = 0,
+        failedCount: Int = 0,
         lastError: String?,
         serverQueuedCount: Int?,
         oldestQueuedWaitMs: Int?
     ) -> MirrorBannerState {
+        if failedCount > 0 {
+            return .failedJobs(count: failedCount)
+        }
         // Device-pending wins outright when both are true: it's a stronger,
         // more actionable signal (the app itself knows for certain these
         // haven't reached the server yet), and showing both at once would
         // read as two contradictory counts rather than one clear one.
-        if pendingCount > 0 {
-            return .devicePending(count: pendingCount, lastError: lastError)
+        if pendingCount > 0 || outfitPendingCount > 0 {
+            return .devicePending(count: pendingCount, outfitCount: outfitPendingCount, lastError: lastError)
         }
         guard let queued = serverQueuedCount, let waitMs = oldestQueuedWaitMs,
               waitMs > serverBacklogThresholdMs else {

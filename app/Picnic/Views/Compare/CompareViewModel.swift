@@ -42,8 +42,8 @@ final class CompareViewModel: ObservableObject {
         self.onResolve = onResolve
     }
 
-    func loadFileSizes() async {
-        fileSizes = await BestPhotoResolver.fileSizes(for: group.assets)
+    func loadFileSizes() {
+        fileSizes = BestPhotoResolver.fileSizes(for: group.assets)
     }
 
     /// Thumbs-up: a per-photo toggle, not a group-wide keeper election.

@@ -164,7 +164,7 @@ final class ReconcileViewModel: ObservableObject {
             phoneAssetCount = manifestAssets.count
             try await pollUntilReady()
         } catch {
-            state = .failed("\(error)")
+            state = .failed(ReconcileErrorMessage.plain(error))
         }
     }
 
@@ -257,7 +257,7 @@ final class ReconcileViewModel: ObservableObject {
                 deletePhone: { try await deletePhone(plan.phone) }
             )
         } catch {
-            actionMessage = "Nothing was deleted. The phone deletion did not go through (\(error)); Google copies were left alone."
+            actionMessage = "Nothing was deleted. \(ReconcileErrorMessage.plain(error)) The Google copies were left alone."
             state = .loaded
             return
         }
@@ -274,7 +274,12 @@ final class ReconcileViewModel: ObservableObject {
             state = .results
         } catch {
             let prefix = plan.phone.isEmpty ? "" : "Deleted \(plan.phone.count) from the phone, but "
-            state = .failed("\(prefix)moving to Google trash failed: \(error). It will retry automatically.")
+            // The job is durable either way: a transient failure retries by
+            // itself, a rejected one waits for Retry/Discard in the sync banner.
+            let followUp = JobRetryPolicy.classify(error) == .permanent
+                ? "Use Retry or Discard in the banner at the bottom."
+                : "It will retry automatically."
+            state = .failed("\(prefix)moving to Google trash failed. \(ReconcileErrorMessage.plain(error)) \(followUp)")
         }
     }
 

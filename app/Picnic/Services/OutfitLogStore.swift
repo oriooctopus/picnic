@@ -16,8 +16,11 @@ final class OutfitImportJob {
     var createdAt: Date
     var attemptCount: Int
     var lastError: String?
-    /// "pending" | "sent"
+    /// "pending" | "sent" | "failed" (a 4xx the server will never accept, or the
+    /// photo is gone; parked until the user taps Retry or Discard)
     var status: String
+    /// Backoff gate, see MirrorJobRecord.nextAttemptAt. Optional for lightweight migration.
+    var nextAttemptAt: Date?
 
     init(assetID: String, opID: UUID = UUID(), takenAt: String, status: String = "pending") {
         self.assetID = assetID
@@ -52,6 +55,7 @@ struct OutfitUploader {
 
     func request(for job: OutfitImportJob, jpeg: Data) -> URLRequest {
         var request = URLRequest(url: url)
+        request.timeoutInterval = Config.requestTimeout
         request.httpMethod = "POST"
         request.httpBody = jpeg
         request.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
@@ -107,17 +111,64 @@ final class OutfitLogStore: ObservableObject {
     private let context: ModelContext
     private let upload: (OutfitImportJob) async throws -> Void
     @Published private(set) var loggedIDs: Set<String> = []
+    /// Logged outfits whose upload has not succeeded yet (shown in the pending banner).
+    @Published private(set) var pendingUploads: Int = 0
+    /// Uploads parked as "failed": shown with Retry/Discard, never dropped silently.
+    @Published private(set) var failedCount: Int = 0
     private var isDraining = false
     private var rerunRequested = false
+    private var rerunIgnoresBackoff = false
+    private let now: () -> Date
 
     init(
         context: ModelContext,
-        upload: @escaping (OutfitImportJob) async throws -> Void = OutfitUploader().upload
+        upload: @escaping (OutfitImportJob) async throws -> Void = OutfitUploader().upload,
+        now: @escaping () -> Date = Date.init
     ) {
         self.context = context
         self.upload = upload
+        self.now = now
         let all = (try? context.fetch(FetchDescriptor<OutfitImportJob>())) ?? []
         loggedIDs = Set(all.map(\.assetID))
+        refreshCounts()
+    }
+
+    private func refreshCounts() {
+        pendingUploads = count(status: "pending")
+        failedCount = count(status: "failed")
+    }
+
+    private func count(status: String) -> Int {
+        let descriptor = FetchDescriptor<OutfitImportJob>(predicate: #Predicate { $0.status == status })
+        return (try? context.fetchCount(descriptor)) ?? 0
+    }
+
+    /// Retry on the user's say-so: failed uploads go back to pending and a forced drain runs.
+    func retryFailed() {
+        for job in failedJobs() {
+            job.status = "pending"
+            job.attemptCount = 0
+            job.nextAttemptAt = nil
+            job.lastError = nil
+        }
+        try? context.save()
+        refreshCounts()
+        Task { await drainQueue(ignoreBackoff: true) }
+    }
+
+    /// The user's explicit choice to give up: the row goes, so the photo reads as not logged.
+    func discardFailed() {
+        for job in failedJobs() {
+            loggedIDs.remove(job.assetID)
+            context.delete(job)
+        }
+        try? context.save()
+        refreshCounts()
+    }
+
+    private func failedJobs() -> [OutfitImportJob] {
+        let descriptor = FetchDescriptor<OutfitImportJob>(predicate: #Predicate { $0.status == "failed" })
+        return (try? context.fetch(descriptor)) ?? []
     }
 
     func isLogged(_ asset: PHAsset) -> Bool { loggedIDs.contains(asset.localIdentifier) }
@@ -134,6 +185,7 @@ final class OutfitLogStore: ObservableObject {
         context.insert(OutfitImportJob(assetID: assetID, takenAt: formatter.string(from: takenAt)))
         try? context.save()
         loggedIDs.insert(assetID)
+        refreshCounts()
         Task { await drainQueue() }
     }
 
@@ -148,37 +200,57 @@ final class OutfitLogStore: ObservableObject {
         job.status = "pending"
         job.attemptCount = 0
         job.lastError = nil
+        job.nextAttemptAt = nil
         try? context.save()
+        refreshCounts()
         Task { await drainQueue() }
     }
 
-    func drainQueue() async {
+    /// `ignoreBackoff`: network restored / user Retry. See MirrorQueueStore.drainQueue.
+    func drainQueue(ignoreBackoff: Bool = false) async {
         guard !isDraining else {
             rerunRequested = true
+            if ignoreBackoff { rerunIgnoresBackoff = true }
             return
         }
         isDraining = true
         defer { isDraining = false }
+        var ignore = ignoreBackoff
         repeat {
             rerunRequested = false
-            await drainPass()
+            if rerunIgnoresBackoff { ignore = true }
+            rerunIgnoresBackoff = false
+            await drainPass(ignoreBackoff: ignore)
         } while rerunRequested
     }
 
-    private func drainPass() async {
-        let descriptor = FetchDescriptor<OutfitImportJob>(predicate: #Predicate { $0.status == "pending" })
+    private func drainPass(ignoreBackoff: Bool) async {
+        let descriptor = FetchDescriptor<OutfitImportJob>(
+            predicate: #Predicate { $0.status == "pending" }, sortBy: [SortDescriptor(\.createdAt)]
+        )
         guard let jobs = try? context.fetch(descriptor), !jobs.isEmpty else { return }
         for job in jobs {
+            if !ignoreBackoff, let next = job.nextAttemptAt, next > now() { continue }
             do {
                 try await upload(job)
                 job.status = "sent"
                 job.lastError = nil
+                job.nextAttemptAt = nil
             } catch {
                 job.attemptCount += 1
                 job.lastError = "\(error)"
+                let kind = JobRetryPolicy.classify(error)
+                if kind == .permanent {
+                    job.status = "failed"
+                } else {
+                    job.nextAttemptAt = now().addingTimeInterval(JobRetryPolicy.backoff(attempt: job.attemptCount))
+                }
+                // See MirrorQueueStore.drainPass: offline ends the pass.
+                if kind == .transport { break }
             }
         }
         try? context.save()
+        refreshCounts()
     }
 
     func pendingCount() -> Int {

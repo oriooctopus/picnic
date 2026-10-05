@@ -22,7 +22,7 @@ final class MirrorBannerLogicTests: XCTestCase {
             pendingCount: 2, lastError: "mirror server returned HTTP 500",
             serverQueuedCount: 40, oldestQueuedWaitMs: 5_000_000
         )
-        XCTAssertEqual(state, .devicePending(count: 2, lastError: "mirror server returned HTTP 500"))
+        XCTAssertEqual(state, .devicePending(count: 2, outfitCount: 0, lastError: "mirror server returned HTTP 500"))
     }
 
     func testServerBacklogJustUnderThresholdShowsNothing() {

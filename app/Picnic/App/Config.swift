@@ -5,6 +5,13 @@ import Foundation
 /// time (see .github/workflows/ota.yml) — never commit either here.
 enum Config {
     static let mirrorHost = MirrorToken.host
+
+    /// Per-request timeout for every call to the mirror/outfits/reconcile
+    /// servers. A GUESS, not a measurement: URLSession's 60s default made one
+    /// dead-network POST stall a whole drain pass for a minute, and these are
+    /// tiny JSON/JPEG bodies to a tailnet host, so 10s should cover a slow
+    /// link without waiting out a dead one. Tune if real uploads time out.
+    static let requestTimeout: TimeInterval = 10
     // NOTE: SPEC.md originally said 8306; the mirror server ended up on 8307
     // because 8306 was already taken on the host machine. This is the port
     // the actual `picnic-mirror` service listens on.

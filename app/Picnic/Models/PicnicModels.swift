@@ -77,7 +77,8 @@ final class MirrorJobRecord {
     var createdAt: Date
     var attemptCount: Int
     var lastError: String?
-    /// "armed" (delete not yet confirmed; ignored by the drain) | "pending" | "sent"
+    /// "armed" (delete not yet confirmed; ignored by the drain) | "pending" | "sent" |
+    /// "failed" (a 4xx the server will never accept; parked until the user taps Retry or Discard)
     var status: String
     /// PHAsset.localIdentifier, so a launch can tell whether an armed job's
     /// delete went through. Optional for lightweight migration of old rows.
@@ -94,6 +95,10 @@ final class MirrorJobRecord {
     /// "PhotoKit couldn't produce a thumbnail for this asset" case — nil here
     /// is never itself a sign of a bug.
     var thumbnailBase64: String?
+    /// Backoff gate: a drain that is not forced (foreground) skips this job
+    /// until this time. Optional so SwiftData's lightweight migration adds the
+    /// column to existing installs (rows come back nil = retry any time).
+    var nextAttemptAt: Date?
 
     init(
         id: UUID,

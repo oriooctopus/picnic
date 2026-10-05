@@ -26,7 +26,17 @@ struct MirrorQueueStatus: Decodable {
 /// callers persist the job and only mark it sent after a 2xx response.
 enum MirrorClient {
     static func post(job: MirrorJobRecord) async throws {
+        let request = try request(for: job)
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw MirrorClientError.badStatus(code)
+        }
+    }
+
+    static func request(for job: MirrorJobRecord) throws -> URLRequest {
         var request = URLRequest(url: Config.mirrorQueueURL)
+        request.timeoutInterval = Config.requestTimeout
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
@@ -46,12 +56,7 @@ enum MirrorClient {
             payload["thumbnailBase64"] = thumbnailBase64
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-
-        let (_, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw MirrorClientError.badStatus(code)
-        }
+        return request
     }
 
     /// GET /queue -- the server-side backlog status the device-side pending
@@ -61,6 +66,7 @@ enum MirrorClient {
     /// route only checks the bearer header (server/lib/auth.mjs).
     static func fetchStatus() async throws -> MirrorQueueStatus {
         var request = URLRequest(url: Config.mirrorQueueURL)
+        request.timeoutInterval = Config.requestTimeout
         request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await URLSession.shared.data(for: request)

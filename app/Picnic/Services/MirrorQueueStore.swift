@@ -40,6 +40,8 @@ func existingPhotoAssetIDs(_ ids: [String]) -> Set<String> {
 final class MirrorQueueStore: ObservableObject {
     private let context: ModelContext
     @Published var pendingCount: Int = 0
+    /// Jobs parked as "failed" (permanent 4xx): shown with Retry/Discard, never dropped silently.
+    @Published private(set) var failedCount: Int = 0
     @Published var lastError: String?
     // Last known-good GET /queue response. Deliberately never reset to nil
     // by a failed poll (see refreshServerStatus()) -- MirrorBannerLogic
@@ -63,6 +65,9 @@ final class MirrorQueueStore: ObservableObject {
     // the next launch/foreground. Only an explicit request triggers another
     // pass -- a failed job never does, so a dead network can't spin.
     private var rerunRequested = false
+    private var rerunIgnoresBackoff = false
+    // Injected clock so backoff is testable.
+    private let now: () -> Date
     // 5 minutes: the banner's own threshold is a full HOUR of backlog, so
     // polling faster than that buys no earlier signal, only battery/data.
     private static let pollIntervalNanoseconds: UInt64 = 5 * 60 * 1_000_000_000
@@ -70,11 +75,13 @@ final class MirrorQueueStore: ObservableObject {
     init(
         context: ModelContext,
         post: @escaping (MirrorJobRecord) async throws -> Void = MirrorClient.post(job:),
-        existingAssetIDs: @escaping ([String]) -> Set<String> = existingPhotoAssetIDs
+        existingAssetIDs: @escaping ([String]) -> Set<String> = existingPhotoAssetIDs,
+        now: @escaping () -> Date = Date.init
     ) {
         self.context = context
         self.post = post
         self.existingAssetIDs = existingAssetIDs
+        self.now = now
         refreshCount()
     }
 
@@ -173,6 +180,34 @@ final class MirrorQueueStore: ObservableObject {
     func refreshCount() {
         let descriptor = FetchDescriptor<MirrorJobRecord>(predicate: #Predicate { $0.status == "pending" })
         pendingCount = (try? context.fetchCount(descriptor)) ?? 0
+        let failed = FetchDescriptor<MirrorJobRecord>(predicate: #Predicate { $0.status == "failed" })
+        failedCount = (try? context.fetchCount(failed)) ?? 0
+    }
+
+    /// Retry on the user's say-so: failed jobs go back to pending (backoff and
+    /// attempt count cleared) and a forced drain runs.
+    func retryFailed() {
+        for job in failedJobs() {
+            job.status = "pending"
+            job.attemptCount = 0
+            job.nextAttemptAt = nil
+            job.lastError = nil
+        }
+        try? context.save()
+        refreshCount()
+        scheduleDrain(ignoreBackoff: true)
+    }
+
+    /// The user's explicit choice to give up on mirroring these deletions.
+    func discardFailed() {
+        for job in failedJobs() { context.delete(job) }
+        try? context.save()
+        refreshCount()
+    }
+
+    private func failedJobs() -> [MirrorJobRecord] {
+        let descriptor = FetchDescriptor<MirrorJobRecord>(predicate: #Predicate { $0.status == "failed" })
+        return (try? context.fetch(descriptor)) ?? []
     }
 
     /// Fire-and-forget drain. The delete commit uses this instead of awaiting
@@ -180,39 +215,57 @@ final class MirrorQueueStore: ObservableObject {
     /// flaky network, and the deck must not stay locked in "committing" for
     /// that long -- the jobs are already persisted, so a slow drain only
     /// delays the mirror, never loses anything.
-    func scheduleDrain() {
-        Task { await drainQueue() }
+    func scheduleDrain(ignoreBackoff: Bool = false) {
+        Task { await drainQueue(ignoreBackoff: ignoreBackoff) }
     }
 
-    func drainQueue() async {
+    /// `ignoreBackoff`: network restored / user Retry, where waiting out a
+    /// backoff that an outage caused would only delay the mirror.
+    func drainQueue(ignoreBackoff: Bool = false) async {
         guard !isDraining else {
             rerunRequested = true
+            if ignoreBackoff { rerunIgnoresBackoff = true }
             return
         }
         isDraining = true
         defer { isDraining = false }
+        var ignore = ignoreBackoff
         repeat {
             rerunRequested = false
-            await drainPass()
+            if rerunIgnoresBackoff { ignore = true }
+            rerunIgnoresBackoff = false
+            await drainPass(ignoreBackoff: ignore)
         } while rerunRequested
     }
 
-    private func drainPass() async {
-        let descriptor = FetchDescriptor<MirrorJobRecord>(predicate: #Predicate { $0.status == "pending" })
+    private func drainPass(ignoreBackoff: Bool) async {
+        let descriptor = FetchDescriptor<MirrorJobRecord>(
+            predicate: #Predicate { $0.status == "pending" }, sortBy: [SortDescriptor(\.createdAt)]
+        )
         guard let jobs = try? context.fetch(descriptor), !jobs.isEmpty else { return }
 
         for job in jobs {
+            if !ignoreBackoff, let next = job.nextAttemptAt, next > now() { continue }
             do {
                 try await post(job)
                 job.status = "sent"
                 job.lastError = nil
+                job.nextAttemptAt = nil
             } catch {
-                // No defensive fallback: leave it "pending" so it keeps
-                // retrying, and surface the failure via lastError/pendingCount
-                // rather than swallowing it.
+                // No defensive fallback: the failure is surfaced via
+                // lastError/pendingCount/failedCount, never swallowed.
                 job.attemptCount += 1
                 job.lastError = "\(error)"
                 lastError = "\(error)"
+                let kind = JobRetryPolicy.classify(error)
+                if kind == .permanent {
+                    job.status = "failed"
+                } else {
+                    job.nextAttemptAt = now().addingTimeInterval(JobRetryPolicy.backoff(attempt: job.attemptCount))
+                }
+                // Offline/timeout: every remaining job would fail the same way
+                // (and each costs a full request timeout), so end the pass.
+                if kind == .transport { break }
             }
         }
         try? context.save()

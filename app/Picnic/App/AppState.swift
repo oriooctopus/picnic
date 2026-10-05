@@ -11,6 +11,8 @@ final class AppState: ObservableObject {
     let mirrorQueue: MirrorQueueStore
     let reconcileConfirm: ReconcileConfirmStore
     let outfitLog: OutfitLogStore
+    let drainCoordinator: DrainCoordinator
+    private let pathWatcher = NetworkPathWatcher()
 
     @Published var monthBuckets: [MonthBucket] = []
     // Set by MonthCardView's "Clean up Google" context-menu button; MyLifeView
@@ -126,12 +128,23 @@ final class AppState: ObservableObject {
         #else
         outfitLog = OutfitLogStore(context: modelContext)
         #endif
+        let mirror = mirrorQueue, reconcile = reconcileConfirm, outfit = outfitLog
+        drainCoordinator = DrainCoordinator(drain: { ignoreBackoff in
+            async let m: Void = mirror.drainQueue(ignoreBackoff: ignoreBackoff)
+            async let r: Void = reconcile.drain()
+            async let o: Void = outfit.drainQueue(ignoreBackoff: ignoreBackoff)
+            _ = await (m, r, o)
+        })
     }
 
     func bootstrap() async {
+        pathWatcher.start(drainCoordinator)
         await photoLibrary.requestAuthorization()
         guard photoLibrary.authorizationStatus == .authorized
-                || photoLibrary.authorizationStatus == .limited else { return }
+                || photoLibrary.authorizationStatus == .limited else {
+            drainCoordinator.launchWithoutDrain()
+            return
+        }
         #if DEBUG
         // Debug-only seed path for the visual-walk CI job — never compiled
         // into the ad-hoc/Release build. See SeedLibrary.swift.
@@ -183,9 +196,7 @@ final class AppState: ObservableObject {
         // whose delete went through are mirrored on this very launch.
         mirrorQueue.resolveArmedJobs(authorization: photoLibrary.authorizationStatus)
         reconcileConfirm.resolveArmedJobs(authorization: photoLibrary.authorizationStatus)
-        await mirrorQueue.drainQueue()
-        await reconcileConfirm.drain()
-        await outfitLog.drainQueue()
+        await drainCoordinator.drainAtLaunch()
         // Launch counts as a foreground -- see PicnicApp.swift's scenePhase
         // handler for the background/re-foreground case. Fetch once
         // immediately rather than waiting out the first poll interval so a

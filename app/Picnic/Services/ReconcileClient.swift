@@ -110,6 +110,7 @@ enum ReconcileClient {
     /// error state rather than silently continuing with stale candidates.
     static func postManifest(month: String, assets: [ReconcileManifestAsset]) async throws {
         var request = URLRequest(url: Config.reconcileURL(for: "/reconcile"))
+        request.timeoutInterval = Config.requestTimeout
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
@@ -137,6 +138,7 @@ enum ReconcileClient {
     /// GET /reconcile/:month — the review screen's candidate source.
     static func fetchCandidates(month: String) async throws -> ReconcileResponse {
         var request = URLRequest(url: Config.reconcileURL(for: "/reconcile/\(month)"))
+        request.timeoutInterval = Config.requestTimeout
         request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -153,12 +155,7 @@ enum ReconcileClient {
     /// is not listed, because the trash gate only trashes photos that are off
     /// the phone. Returns the server-reported number of jobs actually queued.
     static func confirm(month: String, ids: [String], phoneDeleted: [Int]) async throws -> Int {
-        var request = URLRequest(url: Config.reconcileURL(for: "/reconcile/\(month)/confirm"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["ids": ids, "phoneDeleted": phoneDeleted])
-
+        let request = try confirmRequest(month: month, ids: ids, phoneDeleted: phoneDeleted)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
@@ -168,10 +165,21 @@ enum ReconcileClient {
         return try JSONDecoder().decode(ConfirmResponse.self, from: data).queued
     }
 
+    static func confirmRequest(month: String, ids: [String], phoneDeleted: [Int]) throws -> URLRequest {
+        var request = URLRequest(url: Config.reconcileURL(for: "/reconcile/\(month)/confirm"))
+        request.timeoutInterval = Config.requestTimeout
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["ids": ids, "phoneDeleted": phoneDeleted])
+        return request
+    }
+
     /// GET /reconcile/:month/results — per-candidate terminal state after
     /// the trash worker ran, polled by the review screen until `done`.
     static func fetchResults(month: String) async throws -> ReconcileResults {
         var request = URLRequest(url: Config.reconcileURL(for: "/reconcile/\(month)/results"))
+        request.timeoutInterval = Config.requestTimeout
         request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await URLSession.shared.data(for: request)
