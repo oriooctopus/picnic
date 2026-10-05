@@ -137,6 +137,21 @@ final class OutfitLogStore: ObservableObject {
         Task { await drainQueue() }
     }
 
+    /// Filled-button tap: the photo may have been deleted in Outfits, so queue
+    /// a fresh import (new op id; the server returns the existing outfit or
+    /// recreates it). Skipped while this asset's job is still pending. The row
+    /// is reused because assetID is unique.
+    func relog(assetID: String) {
+        let descriptor = FetchDescriptor<OutfitImportJob>(predicate: #Predicate { $0.assetID == assetID })
+        guard let job = try? context.fetch(descriptor).first, job.status != "pending" else { return }
+        job.opID = UUID()
+        job.status = "pending"
+        job.attemptCount = 0
+        job.lastError = nil
+        try? context.save()
+        Task { await drainQueue() }
+    }
+
     func drainQueue() async {
         guard !isDraining else {
             rerunRequested = true

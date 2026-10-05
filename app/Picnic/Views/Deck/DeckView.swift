@@ -555,6 +555,7 @@ struct DeckView: View {
         return Button {
             guard let asset else { return }
             if isLogged {
+                outfitLog.relog(assetID: asset.localIdentifier)
                 openReview(assetID: asset.localIdentifier)
             } else {
                 outfitLog.log(assetID: asset.localIdentifier, takenAt: asset.creationDate ?? Date())

@@ -128,6 +128,35 @@ final class OutfitLogStoreTests: XCTestCase {
         XCTAssertEqual(try jobs(context).count, 1)
     }
 
+    func testRelogEnqueuesNewOpIdUnlessJobPending() async throws {
+        let (store, context) = try makeStore()
+        store.log(assetID: assetID, takenAt: Date())
+        let job = try XCTUnwrap(jobs(context).first)
+        await waitUntil { job.status == "sent" }
+        let firstOp = job.opID
+
+        // Sent job: filled-button tap queues a fresh import with a new op id.
+        store.relog(assetID: assetID)
+        XCTAssertEqual(job.status, "pending")
+        XCTAssertNotEqual(job.opID, firstOp)
+        await waitUntil { StubProtocol.requests.count == 2 }
+        XCTAssertEqual(StubProtocol.requests[1].request.value(forHTTPHeaderField: "X-Op-Id"), job.opID.uuidString)
+        await waitUntil { job.status == "sent" }
+        XCTAssertEqual(try jobs(context).count, 1)
+
+        // Pending job: no second job, op id untouched.
+        StubProtocol.statuses = [500]
+        store.relog(assetID: assetID)
+        await waitUntil { job.attemptCount == 1 }
+        XCTAssertEqual(job.status, "pending")
+        let pendingOp = job.opID
+        let calls = StubProtocol.requests.count
+        store.relog(assetID: assetID)
+        XCTAssertEqual(job.opID, pendingOp)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(StubProtocol.requests.count, calls)
+    }
+
     func testReviewURLPercentEncodesSlashes() {
         XCTAssertEqual(OutfitReview.url(forAssetID: assetID).absoluteString,
                        "overland://outfits/media/ABC-123%2FL0%2F001")
