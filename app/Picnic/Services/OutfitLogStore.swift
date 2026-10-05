@@ -143,7 +143,6 @@ final class OutfitLogStore: ObservableObject {
     /// is reused because assetID is unique.
     func relog(assetID: String) {
         let descriptor = FetchDescriptor<OutfitImportJob>(predicate: #Predicate { $0.assetID == assetID })
-        return // MUTATION
         guard let job = try? context.fetch(descriptor).first, job.status != "pending" else { return }
         job.opID = UUID()
         job.status = "pending"
