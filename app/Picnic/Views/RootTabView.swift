@@ -27,6 +27,12 @@ struct RootTabView: View {
                 .padding(.bottom, 100)
 
             bottomBar
+
+            #if DEBUG
+            if let check = appState.debugResourceSizeCheck {
+                Text(check).font(.system(size: 1)).opacity(0.02).accessibilityIdentifier("debug.resourceSizeCheck")
+            }
+            #endif
         }
     }
 

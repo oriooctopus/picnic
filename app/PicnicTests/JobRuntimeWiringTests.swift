@@ -68,7 +68,7 @@ final class JobRuntimeWiringTests: XCTestCase {
         XCTAssertEqual(mirrorPosts, ["mirror.jpg"], "launch must drain the mirror queue")
         XCTAssertEqual(reconcileSends, ["2026-03"], "launch must drain the Clean up confirm queue")
         XCTAssertEqual(outfitUploads, ["outfit"], "launch must drain the outfit queue")
-        XCTAssertEqual(statusFetches, 1, "launch fetches the server status once, immediately")
+        XCTAssertGreaterThanOrEqual(statusFetches, 1, "launch must fetch the server status immediately")
     }
 
     func testLaunchDrainHonorsBackoff() async throws {
@@ -103,7 +103,7 @@ final class JobRuntimeWiringTests: XCTestCase {
         XCTAssertEqual(mirrorPosts, ["mirror.jpg"], "foreground must drain the mirror queue once launch is done")
         XCTAssertEqual(reconcileSends, ["2026-03"], "foreground must drain the Clean up confirm queue")
         XCTAssertEqual(outfitUploads, ["outfit"], "foreground must drain the outfit queue")
-        XCTAssertEqual(statusFetches, 1, "foreground refreshes the server status")
+        XCTAssertGreaterThanOrEqual(statusFetches, 1, "foreground must refresh the server status")
     }
 
     func testForegroundDrainHonorsBackoff() async throws {

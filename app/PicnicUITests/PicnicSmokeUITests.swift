@@ -6,6 +6,8 @@ import XCTest
 final class PicnicSmokeUITests: XCTestCase {
     func testLaunchesAndShowsMyLifeTab() {
         let app = XCUIApplication()
+        // Other UI tests seed the simulator library; a launch would auto-open the newest deck over the tabs.
+        app.launchArguments = ["--skip-auto-open-deck"]
         app.launch()
 
         let title = app.staticTexts["My life"]
@@ -14,6 +16,8 @@ final class PicnicSmokeUITests: XCTestCase {
 
     func testUtilitiesTabSwitchesScreens() {
         let app = XCUIApplication()
+        // Other UI tests seed the simulator library; a launch would auto-open the newest deck over the tabs.
+        app.launchArguments = ["--skip-auto-open-deck"]
         app.launch()
 
         let utilitiesTab = app.buttons["tab.utilities"]
@@ -26,6 +30,8 @@ final class PicnicSmokeUITests: XCTestCase {
 
     func testProfileTabShowsPlaceholder() {
         let app = XCUIApplication()
+        // Other UI tests seed the simulator library; a launch would auto-open the newest deck over the tabs.
+        app.launchArguments = ["--skip-auto-open-deck"]
         app.launch()
 
         let profileTab = app.buttons["tab.profile"]

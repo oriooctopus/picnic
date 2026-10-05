@@ -158,6 +158,9 @@ final class PicnicSwipeCard: SwipeCard {
             if !comparePill.isHidden {
                 elements.append(comparePill)
             }
+            if !iCloudBadge.isHidden {
+                elements.append(iCloudBadge)
+            }
             return elements
         }
         set {}

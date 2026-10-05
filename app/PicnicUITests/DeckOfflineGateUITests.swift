@@ -9,7 +9,7 @@ final class DeckOfflineGateUITests: XCTestCase {
 
     private func launch(_ flag: String) -> (XCUIApplication, XCUIElement) {
         let app = XCUIApplication()
-        app.launchArguments = ["--seed-library", flag]
+        app.launchArguments = ["--seed-library", "--reset-sort-state", flag]
         app.launch()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         for container in [app, springboard] {
@@ -54,5 +54,25 @@ final class DeckOfflineGateUITests: XCTestCase {
         let pending = app.staticTexts["deck.pendingCount"]
         XCTAssertTrue(pending.waitForExistence(timeout: 5), "the user can see the low-res photo, so delete must be allowed")
         XCTAssertEqual(pending.label, "1")
+    }
+}
+
+/// BestPhotoResolver reads PHAssetResource's non-public `fileSize` by KVC. The
+/// unit-test host cannot get photo access in CI, so the real-asset check runs
+/// inside the app (DEBUG `--check-resource-sizes`) over the seeded library.
+final class PhotoResourceSizeUITests: XCTestCase {
+    func testRealAssetsReportNonZeroFileSizes() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--seed-library", "--skip-auto-open-deck", "--check-resource-sizes"]
+        app.launch()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        for container in [app, springboard] {
+            let allow = container.buttons["Allow Full Access"]
+            if allow.waitForExistence(timeout: 5) { allow.tap(); break }
+        }
+        let check = app.staticTexts["debug.resourceSizeCheck"]
+        XCTAssertTrue(check.waitForExistence(timeout: 120), "the in-app size check never reported")
+        XCTAssertTrue(check.label.hasPrefix("ok:"),
+                      "BestPhotoResolver.fileSize must read a non-zero size from every real PHAssetResource (got \(check.label))")
     }
 }

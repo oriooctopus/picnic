@@ -45,6 +45,12 @@ final class AppState: ObservableObject {
     // launches WITHOUT this flag.
     let skipAutoOpenDeck: Bool
 
+    #if DEBUG
+    /// UI-test only (`--check-resource-sizes`): "ok:N" when every one of N real
+    /// library assets reports a non-zero PHAssetResource file size.
+    @Published private(set) var debugResourceSizeCheck: String?
+    #endif
+
     private let modelContext: ModelContext
 
     init() {
@@ -176,6 +182,12 @@ final class AppState: ObservableObject {
             }
         }
         refreshMonths()
+        if ProcessInfo.processInfo.arguments.contains("--check-resource-sizes") {
+            let assets = PHAsset.fetchAssets(with: .image, options: nil)
+            var sizes: [Int64] = []
+            assets.enumerateObjects { asset, _, _ in sizes.append(BestPhotoResolver.fileSize(for: asset)) }
+            debugResourceSizeCheck = !sizes.isEmpty && sizes.allSatisfy { $0 > 0 } ? "ok:\(sizes.count)" : "bad:\(sizes)"
+        }
         // Opt-in: only the deck perf test wants a month large enough for
         // per-asset work to be measurable.
         if willSeedLargeMonth {

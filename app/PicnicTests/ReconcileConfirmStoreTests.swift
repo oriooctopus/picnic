@@ -11,6 +11,7 @@ final class ReconcileConfirmStoreTests: XCTestCase {
     private var present: Set<String> = []
     private var sendCalls = 0
     private var sendError: Error?
+    private var clock = Date(timeIntervalSince1970: 1_000_000)
 
     private func makeStore() throws -> ReconcileConfirmStore {
         container = try ModelContainer(
@@ -23,7 +24,8 @@ final class ReconcileConfirmStoreTests: XCTestCase {
                 self.sendCalls += 1
                 if let e = self.sendError { throw e }
             },
-            existingAssetIDs: { [unowned self] ids in Set(ids).intersection(self.present) }
+            existingAssetIDs: { [unowned self] ids in Set(ids).intersection(self.present) },
+            now: { [unowned self] in self.clock }
         )
     }
 
@@ -73,6 +75,7 @@ final class ReconcileConfirmStoreTests: XCTestCase {
         XCTAssertEqual(try persistedStatuses(), ["pending"])
 
         sendError = nil  // server reachable again; next launch/foreground drains
+        clock = clock.addingTimeInterval(JobRetryPolicy.backoff(attempt: 1) + 1)  // the 30s backoff the failure set has passed
         await store.drain()
         XCTAssertEqual(try persistedStatuses(), ["sent"])
         XCTAssertEqual(sendCalls, 2)
