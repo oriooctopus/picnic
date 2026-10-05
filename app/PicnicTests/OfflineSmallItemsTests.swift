@@ -38,9 +38,9 @@ final class OfflineSmallItemsTests: XCTestCase {
     }
 
     func testPendingTextCombinesMirrorAndOutfitCounts() {
-        XCTAssertEqual(MirrorSyncBanner.pendingText(count: 2, outfitCount: 0), "2 not yet mirrored")
-        XCTAssertEqual(MirrorSyncBanner.pendingText(count: 0, outfitCount: 1), "1 outfit not yet uploaded")
-        XCTAssertEqual(MirrorSyncBanner.pendingText(count: 2, outfitCount: 3), "2 not yet mirrored · 3 outfits not yet uploaded")
+        XCTAssertEqual(MirrorSyncBannerContent.pendingText(count: 2, outfitCount: 0), "2 not yet mirrored")
+        XCTAssertEqual(MirrorSyncBannerContent.pendingText(count: 0, outfitCount: 1), "1 outfit not yet uploaded")
+        XCTAssertEqual(MirrorSyncBannerContent.pendingText(count: 2, outfitCount: 3), "2 not yet mirrored · 3 outfits not yet uploaded")
     }
 
     // MARK: Reconcile error sentences

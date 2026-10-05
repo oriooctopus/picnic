@@ -29,7 +29,7 @@ struct MirrorSyncBanner: View {
     }
 }
 
-private struct MirrorSyncBannerContent: View {
+struct MirrorSyncBannerContent: View {
     @ObservedObject var mirror: MirrorQueueStore
     @ObservedObject var reconcile: ReconcileConfirmStore
     @ObservedObject var outfit: OutfitLogStore
