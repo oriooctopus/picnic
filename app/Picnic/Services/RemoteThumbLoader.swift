@@ -51,14 +51,34 @@ struct RemoteThumbLoader {
 final class Connectivity: ObservableObject {
     static let shared = Connectivity()
     @Published private(set) var epoch = 0
+    /// Whether the network path is currently satisfied. Starts true: the
+    /// monitor's first callback arrives within milliseconds of launch, and
+    /// assuming offline before then would flash the deck's offline behaviour
+    /// (skipping videos) at every cold start.
+    @Published private(set) var isOnline = true
     private var wasSatisfied: Bool?
     private let monitor = NWPathMonitor()
 
+    #if DEBUG
+    /// UI-test-only: a CI simulator is always online, so the deck's offline
+    /// behaviour can never occur naturally. `--force-offline` pins `isOnline`
+    /// to false for the process's lifetime. Same DEBUG-only, read-once
+    /// pattern as `--slow-image-loads`.
+    private static let forceOffline = ProcessInfo.processInfo.arguments.contains("--force-offline")
+    #endif
+
     private init() {
+        #if DEBUG
+        if Self.forceOffline { isOnline = false }
+        #endif
         monitor.pathUpdateHandler = { [weak self] path in
             let satisfied = path.status == .satisfied
             Task { @MainActor in
                 guard let self else { return }
+                #if DEBUG
+                if Self.forceOffline { return }
+                #endif
+                self.isOnline = satisfied
                 if satisfied, self.wasSatisfied == false { self.epoch += 1 }
                 self.wasSatisfied = satisfied
             }

@@ -3018,4 +3018,97 @@ final class WalkthroughUITests: XCTestCase {
                        "a remote skip must not become a pending PhotoKit delete")
         capture("72-remote-deck-after-skip")
     }
+
+    // MARK: Offline video skipping
+
+    /// Opens March 2026's deck (seeded P, V, P, V: see SeedLibrary) with the
+    /// network forced offline and a clean sort/hideSorted state, so marks left
+    /// by earlier tests can't change the card order or counts.
+    private func openMarchDeckOffline() -> XCUIElement {
+        relaunch(withExtraArguments: ["--force-offline", "--reset-sort-state", "--reset-hide-sorted"])
+        _ = openMyLifeGrid()
+        let marchMonth = app.descendants(matching: .any)["monthCard.2026-03"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(marchMonth, initialTimeout: 30), "March should appear in the grid")
+        marchMonth.tap()
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 20), "March deck should open")
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10))
+        XCTAssertEqual(position.label, "1 OF 4", "March should open on its first photo of 4 cards (P, V, P, V)")
+        return deckCard
+    }
+
+    private func swipeKeep(_ deckCard: XCUIElement) {
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+    }
+
+    /// Offline, a natural advance passes over video cards (with a toast),
+    /// refuses to advance into a tail of only videos, and a filmstrip tap can
+    /// still land on a video whose swipe then advances normally.
+    func testOfflineDeckSkipsVideos() throws {
+        let deckCard = openMarchDeckOffline()
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        let toast = app.staticTexts["deck.skipToast"]
+
+        // P1 -> (skip V1) -> P2.
+        swipeKeep(deckCard)
+        XCTAssertTrue(toast.waitForExistence(timeout: 5), "Skipping a video should toast")
+        XCTAssertEqual(toast.label, "Skipped video, saved for when you're online")
+        XCTAssertEqual(position.label, "3 OF 4", "Swiping P1 offline should land on P2, not the video between")
+        XCTAssertFalse(app.buttons["deck.trim"].exists, "The deck must not be sitting on a video card")
+        capture("80-offline-skipped-video")
+
+        // P2 -> only V2 ahead: stay put.
+        swipeKeep(deckCard)
+        let onlyVideos = NSPredicate(format: "label == %@", "Only videos left, they'll wait until you're online")
+        expectation(for: onlyVideos, evaluatedWith: toast)
+        waitForExpectations(timeout: 5)
+        XCTAssertEqual(position.label, "3 OF 4", "Must not advance into a tail of only videos")
+        capture("81-offline-only-videos-left")
+
+        // Explicit navigation still reaches a video, and swiping it is normal.
+        let videoThumb = app.descendants(matching: .any)["filmstrip.thumb.1"].firstMatch
+        XCTAssertTrue(videoThumb.waitForExistence(timeout: 10))
+        videoThumb.tap()
+        XCTAssertTrue(app.buttons["deck.trim"].waitForExistence(timeout: 10), "Filmstrip tap should land on the video")
+        XCTAssertEqual(position.label, "2 OF 4")
+        swipeKeep(deckCard)
+        let afterVideo = NSPredicate(format: "label == %@", "3 OF 4")
+        expectation(for: afterVideo, evaluatedWith: position)
+        waitForExpectations(timeout: 10)
+    }
+
+    /// "Mark sorted till here" from the last card (a video) offline must keep
+    /// the earlier photo but leave the earlier video unsorted.
+    func testOfflineMarkSortedLeavesVideosUnsorted() throws {
+        _ = openMarchDeckOffline()
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+
+        let lastThumb = app.descendants(matching: .any)["filmstrip.thumb.3"].firstMatch
+        XCTAssertTrue(lastThumb.waitForExistence(timeout: 10))
+        lastThumb.tap()
+        let onLast = NSPredicate(format: "label == %@", "4 OF 4")
+        expectation(for: onLast, evaluatedWith: position)
+        waitForExpectations(timeout: 10)
+
+        app.buttons["deck.filter"].tap()
+        let markButton = app.descendants(matching: .any)["deck.markSortedToHere"].firstMatch
+        XCTAssertTrue(markButton.waitForExistence(timeout: 5))
+        markButton.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+
+        app.buttons["deck.filter"].tap()
+        let toggle = app.descendants(matching: .any)["deck.hideSortedToggle"].firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        toggle.tap()
+        tapOutside()
+
+        // P1 and P2 were marked kept and are now hidden; both videos remain.
+        XCTAssertEqual(totalCount(fromPosition: position.label), 2,
+                       "Offline, only the two photos should be sorted; the first video must stay unsorted")
+    }
 }

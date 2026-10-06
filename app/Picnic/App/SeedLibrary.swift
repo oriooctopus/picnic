@@ -160,6 +160,9 @@ enum SeedLibrary {
         // 2026-03
         addImage(2026, 3, 2, 9, 0, 0, size: CGSize(width: 600, height: 800))
         addVideo(2026, 3, 10, 9, 0, 0)
+        // A photo after the first video so a photo -> video -> photo sequence
+        // exists for the offline video-skip UI test (March deck: P, V, P, V).
+        addImage(2026, 3, 14, 9, 0, 0, size: CGSize(width: 800, height: 600))
         addVideo(2026, 3, 18, 9, 0, 0)
 
         return items

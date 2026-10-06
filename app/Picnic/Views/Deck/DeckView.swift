@@ -62,6 +62,8 @@ struct DeckView: View {
         case logged(assetID: String)
         case openFailed
         case deleteBlocked
+        case skippedVideos(count: Int)
+        case onlyVideosLeft
     }
 
     static let outfitLilac = Color(red: 201 / 255, green: 162 / 255, blue: 255 / 255)
@@ -267,10 +269,21 @@ struct DeckView: View {
             // to the card's black background instead — a brief blank is
             // correct, a brief WRONG photo is the bug this fixes.
             viewModel.onAdvance = {
-                currentImage = nextImage
-                imageState.begin(prefetched: nextImage != nil)
+                // Offline video skipping can advance by more than one card,
+                // while nextImage was prefetched for index+1: promote it only
+                // when it belongs to the card now showing, else blank to the
+                // card background (a wrong-photo flash is the bug above).
+                let promotable = nextImage != nil && nextImageAssetID == viewModel.currentItem?.id
+                currentImage = promotable ? nextImage : nil
+                imageState.begin(prefetched: promotable)
                 nextImage = nil
                 nextImageAssetID = nil
+            }
+            viewModel.onVideoSkip = { skip in
+                switch skip {
+                case .skipped(let count): showToast(.skippedVideos(count: count), seconds: 2.5)
+                case .onlyVideosLeft: showToast(.onlyVideosLeft, seconds: 2.5)
+                }
             }
         }
         .fullScreenCover(item: $presentation) { item in
@@ -727,6 +740,16 @@ struct DeckView: View {
                     Text("Couldn't open Overland").foregroundStyle(Color(red: 240 / 255, green: 234 / 255, blue: 251 / 255))
                 case .deleteBlocked:
                     Text(DeckCardImagePolicy.blockedDeleteMessage).foregroundStyle(Color(red: 240 / 255, green: 234 / 255, blue: 251 / 255))
+                case .skippedVideos(let count):
+                    Text(count == 1
+                         ? "Skipped video, saved for when you're online"
+                         : "Skipped \(count) videos, saved for when you're online")
+                        .foregroundStyle(Color(red: 240 / 255, green: 234 / 255, blue: 251 / 255))
+                        .accessibilityIdentifier("deck.skipToast")
+                case .onlyVideosLeft:
+                    Text("Only videos left, they'll wait until you're online")
+                        .foregroundStyle(Color(red: 240 / 255, green: 234 / 255, blue: 251 / 255))
+                        .accessibilityIdentifier("deck.skipToast")
                 }
             }
             .font(.system(size: 15, weight: .semibold))

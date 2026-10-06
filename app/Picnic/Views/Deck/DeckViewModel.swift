@@ -83,12 +83,30 @@ final class DeckViewModel: ObservableObject {
     @Published var commitError: String?
 
     /// Fired synchronously, in the same call as `currentIndex` moving forward
-    /// by exactly one (see `advance()`), so the view can promote its already
+    /// (by one, or more when offline skipping passes videos; see `advance()`), so the view can promote its already
     /// -loaded next-image into current-image before any async reload runs.
     /// Without this the new card mounts showing the OLD `currentImage` until
     /// `loadCurrentImage()`'s await returns — a ~0.1s flicker of the wrong
     /// photo.
     var onAdvance: (() -> Void)?
+
+    /// What the offline video-skip did, for the view to toast.
+    enum VideoSkip: Equatable {
+        case skipped(count: Int)
+        case onlyVideosLeft
+    }
+    /// Fired when an offline swipe passed over video cards (or found only
+    /// videos ahead). Never fires online.
+    var onVideoSkip: ((VideoSkip) -> Void)?
+    /// Videos are left alone offline (big iCloud downloads that can't
+    /// complete), so natural advancement and "mark sorted up to here" bypass
+    /// them. A closure rather than a direct singleton read so tests can pin it.
+    var isOffline: () -> Bool = { !Connectivity.shared.isOnline }
+
+    private func isVideo(_ item: DeckItem) -> Bool {
+        // Remote items have no phAsset and are never videos.
+        item.phAsset?.mediaType == .video
+    }
 
     init(month: MonthBucket, sortStore: SortStore, photoLibrary: PhotoLibraryService, mirrorQueue: MirrorQueueStore) {
         self.monthKey = month.key
@@ -317,10 +335,7 @@ final class DeckViewModel: ObservableObject {
         // this asset, the next photo already occupies currentIndex (or the
         // refresh above just clamped onto it), so this check correctly
         // skips a redundant advance that would otherwise double-skip.
-        if visibleItems.indices.contains(currentIndex),
-           visibleItems[currentIndex].id == item.id {
-            advance()
-        }
+        advanceOrSettle(afterSwipeOf: item)
     }
 
     /// Compare's confirm: the deck's single choke point for everything one
@@ -391,10 +406,7 @@ final class DeckViewModel: ObservableObject {
         // When hideSorted filtered this photo out, the slot at currentIndex is
         // already occupied by the next photo, so advancing again would skip
         // one.
-        if visibleItems.indices.contains(currentIndex),
-           visibleItems[currentIndex].id == item.id {
-            advance()
-        }
+        advanceOrSettle(afterSwipeOf: item)
     }
 
     /// Remote-album swipe: writes the SortStore cache optimistically, advances
@@ -436,7 +448,13 @@ final class DeckViewModel: ObservableObject {
         guard let current = currentItem,
               let end = orderedItems.firstIndex(where: { $0.id == current.id })
         else { return 0 }
-        let toMark = orderedItems[..<end].filter { sortStore.state(forID: $0.id) == .unsorted }
+        // Offline, videos are left unsorted: the user never got to see them
+        // (the deck skips them), so marking them kept would silently sort
+        // media they haven't reviewed. Online keeps the original behaviour.
+        let offline = isOffline()
+        let toMark = orderedItems[..<end].filter {
+            sortStore.state(forID: $0.id) == .unsorted && !(offline && isVideo($0))
+        }
         guard !toMark.isEmpty else { return 0 }
         let changes = toMark.map { UndoEntry.Change(assetID: $0.id, previousState: .unsorted) }
         for item in toMark { sortStore.setState(.kept, forID: item.id, monthKey: monthKey) }
@@ -445,21 +463,67 @@ final class DeckViewModel: ObservableObject {
         return toMark.count
     }
 
-    private func advance() {
-        if currentIndex < visibleItems.count - 1 {
-            // withAnimation only wraps the resulting SwiftUI view diff — the
-            // currentIndex mutation and onAdvance() itself still run
-            // synchronously, in this same call, on this same run-loop turn.
-            // That's what keeps this compatible with onAdvance's own
-            // contract (see its doc comment): the new photo is assigned
-            // before any animated frame renders, so the promoted card can
-            // never show the outgoing photo. This only lets DeckView's
-            // `.transition` on the newly-mounted card (see DeckCard's call
-            // site) ease in instead of cutting.
-            withAnimation(.easeOut(duration: 0.28)) {
-                currentIndex += 1
-                onAdvance?()
+    /// Shared tail of a local swipe: advance explicitly when the swiped card
+    /// is still in the deck; otherwise hideSorted already slid the next card
+    /// into `currentIndex` without `advance()` running, so the offline video
+    /// skip has to be applied to that slot here instead.
+    private func advanceOrSettle(afterSwipeOf item: DeckItem) {
+        if visibleItems.indices.contains(currentIndex),
+           visibleItems[currentIndex].id == item.id {
+            advance()
+        } else {
+            settleOffVideoIfOffline()
+        }
+    }
+
+    /// Offline, with a video at `currentIndex` after hideSorted removed the
+    /// swiped card: move to the next non-video ahead, else the nearest one
+    /// behind (the clamp after swiping the last card lands there), else stay
+    /// because the deck is all videos. No `onAdvance()`: the prefetch is for
+    /// the wrong card, and DeckView's per-card load handles a moved
+    /// `currentIndex` the same way it does for the unskipped slide.
+    private func settleOffVideoIfOffline() {
+        guard isOffline(), let current = currentItem, isVideo(current) else { return }
+        if let ahead = visibleItems.indices.dropFirst(currentIndex + 1).first(where: { !isVideo(visibleItems[$0]) }) {
+            let skipped = ahead - currentIndex
+            currentIndex = ahead
+            onVideoSkip?(.skipped(count: skipped))
+        } else {
+            if let behind = visibleItems.indices[..<currentIndex].last(where: { !isVideo(visibleItems[$0]) }) {
+                currentIndex = behind
             }
+            onVideoSkip?(.onlyVideosLeft)
+        }
+    }
+
+    private func advance() {
+        guard currentIndex < visibleItems.count - 1 else { return }
+        var target = currentIndex + 1
+        if isOffline() {
+            // Natural advance passes over videos; only a filmstrip tap (which
+            // sets currentIndex directly) can land on one.
+            while target < visibleItems.count, isVideo(visibleItems[target]) { target += 1 }
+            let skipped = target - (currentIndex + 1)
+            if target == visibleItems.count {
+                // Only videos ahead: stay on the swiped card rather than
+                // advancing into them.
+                onVideoSkip?(.onlyVideosLeft)
+                return
+            }
+            if skipped > 0 { onVideoSkip?(.skipped(count: skipped)) }
+        }
+        // withAnimation only wraps the resulting SwiftUI view diff — the
+        // currentIndex mutation and onAdvance() itself still run
+        // synchronously, in this same call, on this same run-loop turn.
+        // That's what keeps this compatible with onAdvance's own
+        // contract (see its doc comment): the new photo is assigned
+        // before any animated frame renders, so the promoted card can
+        // never show the outgoing photo. This only lets DeckView's
+        // `.transition` on the newly-mounted card (see DeckCard's call
+        // site) ease in instead of cutting.
+        withAnimation(.easeOut(duration: 0.28)) {
+            currentIndex = target
+            onAdvance?()
         }
     }
 
