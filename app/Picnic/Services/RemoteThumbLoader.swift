@@ -67,6 +67,16 @@ final class Connectivity: ObservableObject {
     private static let forceOffline = ProcessInfo.processInfo.arguments.contains("--force-offline")
     #endif
 
+    /// How long the deck's video-skip toasts stay up. The UI test can only
+    /// observe a toast after its swipe's idle-wait returns, which regularly
+    /// outlasts a 2.5s toast on CI, so `--force-offline` (test-only) holds it.
+    static var skipToastSeconds: Double {
+        #if DEBUG
+        if forceOffline { return 8 }
+        #endif
+        return 2.5
+    }
+
     private init() {
         #if DEBUG
         if Self.forceOffline { isOnline = false }

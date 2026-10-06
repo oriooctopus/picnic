@@ -286,10 +286,10 @@ struct DeckView: View {
             }
             viewModel.onVideoSkip = { skip in
                 switch skip {
-                case .skipped(let count): showToast(.skippedVideos(count: count), seconds: 2.5)
+                case .skipped(let count): showToast(.skippedVideos(count: count), seconds: Connectivity.skipToastSeconds)
                 case .onlyVideosLeft:
                     cardResetNonce += 1
-                    showToast(.onlyVideosLeft, seconds: 2.5)
+                    showToast(.onlyVideosLeft, seconds: Connectivity.skipToastSeconds)
                 }
             }
         }
