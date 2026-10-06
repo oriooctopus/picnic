@@ -81,6 +81,16 @@ final class VideoPlaybackController: ObservableObject {
 
     let player = AVPlayer()
 
+    init() {
+        // Load-bearing: without this the app keeps iOS's default session category
+        // (soloAmbient), which the ring/silent switch mutes, so every video played
+        // with no sound for anyone whose phone is on silent. `.playback` ignores the
+        // switch, like Photos/Camera Roll. Failures are ignored: setCategory only
+        // throws on an invalid category/mode combo, which this fixed pair is not.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+    }
+
     private var timeObserverToken: Any?
     private var endObserver: NSObjectProtocol?
     private var statusObservation: NSKeyValueObservation?
