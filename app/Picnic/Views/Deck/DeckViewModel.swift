@@ -26,12 +26,31 @@ struct UndoEntry {
 
 @MainActor
 final class DeckViewModel: ObservableObject {
-    let month: MonthBucket
+    /// SortStore month key and the title shown in the deck header. Local deck:
+    /// the month's own key/title. Remote deck: "remote:<albumId>" (never a My
+    /// Life month, see SortStore.setState) and the album's name.
+    let monthKey: String
+    let title: String
     private let sortStore: SortStore
-    private let photoLibrary: PhotoLibraryService
-    private let mirrorQueue: MirrorQueueStore
+    /// REMOTE GATE: nil for a remote-album deck. Delete and mirror-queue work
+    /// is structurally unreachable there — `commitDeletions` and
+    /// `toggleFavorite` need these, and a remote deck has none to give them.
+    private let photoLibrary: PhotoLibraryService?
+    private let mirrorQueue: MirrorQueueStore?
+    /// Non-nil exactly when this deck triages a remote Google Photos album.
+    private let remote: RemoteAlbumService?
+    var isRemote: Bool { remote != nil }
 
-    @Published var orderedAssets: [PHAsset] { didSet { refresh(follow: nil) } }
+    /// Remote only: the server's own totals (GET /album/:id, then every
+    /// POST .../decision response). The "N kept · M left" counter reads this,
+    /// never SortStore, because the server is the source of truth.
+    @Published private(set) var remoteCounts: RemoteAlbumCounts?
+    /// Remote only: last load/decision failure, shown as an alert.
+    @Published var remoteError: String?
+    /// Remote only: true until the first listing arrives (or fails).
+    @Published private(set) var isLoadingRemote = false
+
+    @Published var orderedItems: [DeckItem] { didSet { refresh(follow: nil) } }
     /// Persisted directly via UserDefaults rather than @AppStorage: this
     /// class is a plain ObservableObject (not a View), and @AppStorage's
     /// dynamic-property machinery only works when hosted inside SwiftUI's
@@ -40,10 +59,10 @@ final class DeckViewModel: ObservableObject {
     @Published var hideSorted = UserDefaults.standard.bool(forKey: DeckViewModel.hideSortedDefaultsKey) {
         didSet {
             UserDefaults.standard.set(hideSorted, forKey: DeckViewModel.hideSortedDefaultsKey)
-            // Read before refresh: visibleAssets/currentIndex still reflect
+            // Read before refresh: visibleItems/currentIndex still reflect
             // the pre-toggle list at this point in didSet — refresh() is
             // what overwrites them, so the read has to happen first.
-            refresh(follow: currentAsset?.localIdentifier)
+            refresh(follow: currentItem?.id)
         }
     }
     @Published var currentIndex = 0
@@ -56,7 +75,7 @@ final class DeckViewModel: ObservableObject {
     /// only place this Set is written). Still a stored Set, not a computed
     /// property: DeckView's body reads `.count` on every render, and a
     /// per-render rebuild over hundreds of assets is exactly the cost
-    /// `visibleAssets` below already exists to avoid.
+    /// `visibleItems` below already exists to avoid.
     @Published private(set) var pendingDeleteIDs: Set<String> = []
     @Published var undoStack: [UndoEntry] = []
     @Published var favoritedOverrides: [String: Bool] = [:]
@@ -72,11 +91,13 @@ final class DeckViewModel: ObservableObject {
     var onAdvance: (() -> Void)?
 
     init(month: MonthBucket, sortStore: SortStore, photoLibrary: PhotoLibraryService, mirrorQueue: MirrorQueueStore) {
-        self.month = month
+        self.monthKey = month.key
+        self.title = month.title
         self.sortStore = sortStore
         self.photoLibrary = photoLibrary
         self.mirrorQueue = mirrorQueue
-        self.orderedAssets = month.assets
+        self.remote = nil
+        self.orderedItems = month.assets.map(DeckItem.local)
         // didSet doesn't fire for assignments inside init, so seed it here.
         // This is also what makes pendingDeleteIDs (and every other mark)
         // survive relaunch for free: refresh() derives them from
@@ -86,14 +107,60 @@ final class DeckViewModel: ObservableObject {
         refresh(follow: nil)
     }
 
+    /// Remote-album deck. Starts empty (`isLoadingRemote`) until `loadRemote()`
+    /// delivers the listing; no PhotoLibraryService / MirrorQueueStore is
+    /// accepted at all (see the REMOTE GATE note on those properties).
+    init(remoteAlbum: RemoteAlbumService, title: String, sortStore: SortStore) {
+        self.monthKey = SortStore.remoteMonthKeyPrefix + remoteAlbum.albumId
+        self.title = title
+        self.sortStore = sortStore
+        self.photoLibrary = nil
+        self.mirrorQueue = nil
+        self.remote = remoteAlbum
+        self.orderedItems = []
+        self.isLoadingRemote = true
+        refresh(follow: nil)
+    }
+
+    /// Fetches the server's listing and makes it the deck. The server is the
+    /// source of truth: every item's SortStore entry is OVERWRITTEN from the
+    /// server's decision (including back to .unsorted), so a stale local cache
+    /// (e.g. the album was reset server-side) can never hide an undecided item.
+    /// Opens on the first undecided item so a resumed triage continues where
+    /// it left off. Failure is surfaced via `remoteError`, not retried.
+    func loadRemote() async {
+        guard let remote else { return }
+        isLoadingRemote = true
+        defer { isLoadingRemote = false }
+        do {
+            let snapshot = try await remote.load()
+            for item in snapshot.items {
+                let state: SortState
+                switch item.decision {
+                case .keep: state = .kept
+                case .skip: state = .skipped
+                case nil: state = .unsorted
+                }
+                sortStore.setState(state, forID: item.id, monthKey: monthKey, recordsActivity: false)
+            }
+            remoteCounts = snapshot.counts
+            // orderedItems' didSet runs refresh(), which rebuilds visibleItems
+            // (honoring hideSorted); the index below is into THAT list.
+            orderedItems = snapshot.items.map(DeckItem.remote)
+            currentIndex = visibleItems.firstIndex { sortStore.state(forID: $0.id) == .unsorted } ?? 0
+        } catch {
+            remoteError = "\(error)"
+        }
+    }
+
     /// Stored, not computed. The deck's view body reads this several times per
     /// evaluation (stack peek, current card, filmstrip, position label), so as
     /// a computed property it re-filtered the entire month's assets on every
     /// one of those reads. Recomputed only when an input actually changes.
-    @Published private(set) var visibleAssets: [PHAsset] = []
+    @Published private(set) var visibleItems: [DeckItem] = []
 
     /// assetLocalIdentifier → the compare group it belongs to. Built with
-    /// visibleAssets because `GroupingService.group(containing:in:)` sorts and
+    /// visibleItems because `GroupingService.group(containing:in:)` sorts and
     /// re-clusters the entire list on each call, which the deck was paying per
     /// card change.
     @Published private(set) var groupByAssetID: [String: CompareGroup] = [:]
@@ -121,8 +188,8 @@ final class DeckViewModel: ObservableObject {
     /// deck should try to keep showing (nil just clamps currentIndex back
     /// into range instead) — see `reanchorCurrentIndex(toFollow:)`.
     private func refresh(follow assetID: String?) {
-        marks = Dictionary(uniqueKeysWithValues: orderedAssets.map {
-            ($0.localIdentifier, sortStore.state(for: $0))
+        marks = Dictionary(uniqueKeysWithValues: orderedItems.map {
+            ($0.id, sortStore.state(forID: $0.id))
         })
         pendingDeleteIDs = Set(marks.filter { $0.value == .markedForDelete }.keys)
 
@@ -132,11 +199,11 @@ final class DeckViewModel: ObservableObject {
         // filmstrip when the toggle is on. With the toggle off, marked
         // photos stay visible (with their badge) so they're still
         // reviewable/undoable up until an explicit commit.
-        visibleAssets = hideSorted
-            ? orderedAssets.filter { (marks[$0.localIdentifier] ?? .unsorted) == .unsorted }
-            : orderedAssets
+        visibleItems = hideSorted
+            ? orderedItems.filter { (marks[$0.id] ?? .unsorted) == .unsorted }
+            : orderedItems
 
-        // Grouped over orderedAssets, NOT visibleAssets: a burst is defined by
+        // Grouped over orderedItems, NOT visibleItems: a burst is defined by
         // when the photos were taken, not by how far through sorting you are.
         // Building this from the filtered list meant that with hideSorted on,
         // a burst of 4 where 2 were already sorted presented as a 2-photo
@@ -147,8 +214,12 @@ final class DeckViewModel: ObservableObject {
         // `viewModel.group.assets` directly), and this is what makes that
         // whole. hideSorted still governs what the DECK steps through; it
         // just no longer redefines what a group is.
+        //
+        // REMOTE GATE (compare groups): GroupingService clusters PHAssets and
+        // CompareView renders them through PhotoKit, so only local items take
+        // part; a remote deck gets an empty lookup and never offers Compare.
         var lookup: [String: CompareGroup] = [:]
-        for group in GroupingService.groups(in: orderedAssets) {
+        for group in GroupingService.groups(in: orderedItems.compactMap(\.phAsset)) {
             for member in group.assets {
                 lookup[member.localIdentifier] = group
             }
@@ -158,9 +229,9 @@ final class DeckViewModel: ObservableObject {
         reanchorCurrentIndex(toFollow: assetID)
     }
 
-    var currentAsset: PHAsset? {
-        guard visibleAssets.indices.contains(currentIndex) else { return nil }
-        return visibleAssets[currentIndex]
+    var currentItem: DeckItem? {
+        guard visibleItems.indices.contains(currentIndex) else { return nil }
+        return visibleItems[currentIndex]
     }
 
     /// Keeps the deck showing the same photo across a hideSorted toggle when
@@ -173,58 +244,71 @@ final class DeckViewModel: ObservableObject {
     /// photos instead of landing on the very next one.
     private func reanchorCurrentIndex(toFollow assetID: String?) {
         guard let assetID else {
-            currentIndex = min(currentIndex, max(0, visibleAssets.count - 1))
+            currentIndex = min(currentIndex, max(0, visibleItems.count - 1))
             return
         }
-        if let newIndex = visibleAssets.firstIndex(where: { $0.localIdentifier == assetID }) {
+        if let newIndex = visibleItems.firstIndex(where: { $0.id == assetID }) {
             currentIndex = newIndex
             return
         }
-        guard let orderedIndex = orderedAssets.firstIndex(where: { $0.localIdentifier == assetID }) else {
-            currentIndex = min(currentIndex, max(0, visibleAssets.count - 1))
+        guard let orderedIndex = orderedItems.firstIndex(where: { $0.id == assetID }) else {
+            currentIndex = min(currentIndex, max(0, visibleItems.count - 1))
             return
         }
-        let orderedIndexByID = Dictionary(uniqueKeysWithValues: orderedAssets.enumerated().map { ($1.localIdentifier, $0) })
-        currentIndex = visibleAssets.firstIndex { asset in
-            (orderedIndexByID[asset.localIdentifier] ?? Int.max) >= orderedIndex
-        } ?? max(0, visibleAssets.count - 1)
+        let orderedIndexByID = Dictionary(uniqueKeysWithValues: orderedItems.enumerated().map { ($1.id, $0) })
+        currentIndex = visibleItems.firstIndex { item in
+            (orderedIndexByID[item.id] ?? Int.max) >= orderedIndex
+        } ?? max(0, visibleItems.count - 1)
     }
 
-    func isFavorite(_ asset: PHAsset) -> Bool {
-        favoritedOverrides[asset.localIdentifier] ?? asset.isFavorite
+    /// REMOTE GATE (favorite): PhotoKit's favorite flag only exists on a
+    /// PHAsset; a remote item is never favorited.
+    func isFavorite(_ item: DeckItem) -> Bool {
+        guard let asset = item.phAsset else { return false }
+        return favoritedOverrides[item.id] ?? asset.isFavorite
     }
 
-    func toggleFavorite(_ asset: PHAsset) async {
-        let newValue = !isFavorite(asset)
+    func toggleFavorite(_ item: DeckItem) async {
+        // Remote items (and a remote deck, which has no photoLibrary) have
+        // nothing to favorite; DeckView also hides the button.
+        guard let asset = item.phAsset, let photoLibrary else { return }
+        let newValue = !isFavorite(item)
         do {
             try await photoLibrary.setFavorite(asset, isFavorite: newValue)
-            favoritedOverrides[asset.localIdentifier] = newValue
+            favoritedOverrides[item.id] = newValue
         } catch {
             commitError = "\(error)"
         }
     }
 
     func shuffle() {
-        orderedAssets.shuffle()
+        orderedItems.shuffle()
         currentIndex = 0
     }
 
     /// Swipe left: mark for delete. This is a CUE ONLY (SPEC.md interaction
     /// semantics #1) — the X commit button performs the real PhotoKit delete.
     func markForDelete() {
-        guard let asset = currentAsset else { return }
+        guard let item = currentItem else { return }
+        // REMOTE GATE (delete): in a remote deck a left swipe is a "skip"
+        // decision POSTed to the server and NOTHING else — never
+        // .markedForDelete, never a PhotoKit delete, never a mirror job.
+        if item.isRemote {
+            decideRemote(.skip, on: item)
+            return
+        }
         undoStack.append(UndoEntry(
-            changes: [.init(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset))],
+            changes: [.init(assetID: item.id, previousState: sortStore.state(forID: item.id))],
             compareGroupID: nil
         ))
-        sortStore.setState(.markedForDelete, for: asset, monthKey: month.key)
+        sortStore.setState(.markedForDelete, forID: item.id, monthKey: monthKey)
         // follow: nil, not this asset's ID: when hideSorted filters it out,
         // reanchorCurrentIndex's nil branch just clamps currentIndex into
         // the (now shorter) range instead of trying to keep showing an
         // asset that's meant to disappear. That clamp is also what fixes
         // the empty-deck bug (D2): if this was the LAST visible asset,
         // currentIndex would otherwise sit one past the end and
-        // `currentAsset` would go nil, flipping the deck to its "All
+        // `currentItem` would go nil, flipping the deck to its "All
         // sorted" empty state while unsorted photos remain.
         refresh(follow: nil)
         // With hideSorted off (or this photo not the one hidden), the next
@@ -233,8 +317,8 @@ final class DeckViewModel: ObservableObject {
         // this asset, the next photo already occupies currentIndex (or the
         // refresh above just clamped onto it), so this check correctly
         // skips a redundant advance that would otherwise double-skip.
-        if visibleAssets.indices.contains(currentIndex),
-           visibleAssets[currentIndex].localIdentifier == asset.localIdentifier {
+        if visibleItems.indices.contains(currentIndex),
+           visibleItems[currentIndex].id == item.id {
             advance()
         }
     }
@@ -255,41 +339,50 @@ final class DeckViewModel: ObservableObject {
     /// keeps every SortState write behind this single source of truth (the
     /// same rule `refresh(follow:)`'s doc comment establishes).
     func resolveCompareGroup(toDelete: [PHAsset], keeping kept: [PHAsset], groupID: String) {
-        // Captured before the marks (and therefore visibleAssets) change:
+        // REMOTE GATE (compare): only reachable from CompareView, which a
+        // remote deck never presents (groupByAssetID is empty there).
+        precondition(!isRemote, "Compare is local-only")
+        // Captured before the marks (and therefore visibleItems) change:
         // if the batch includes assets sitting before currentIndex, letting
         // those disappear under hideSorted shifts every later index down —
         // reanchoring by this identity is what keeps the deck showing the
         // same photo instead of silently jumping to a neighbor.
-        let previousAssetID = currentAsset?.localIdentifier
+        let previousItemID = currentItem?.id
         var changes: [UndoEntry.Change] = []
         for asset in toDelete {
             // Previous state read BEFORE the write, same as every other
             // undo-recording call site — reading it after would just record
             // "was already markedForDelete" for everything.
             changes.append(.init(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset)))
-            sortStore.setState(.markedForDelete, for: asset, monthKey: month.key)
+            sortStore.setState(.markedForDelete, for: asset, monthKey: monthKey)
         }
         for asset in kept {
             changes.append(.init(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset)))
-            sortStore.setState(.kept, for: asset, monthKey: month.key)
+            sortStore.setState(.kept, for: asset, monthKey: monthKey)
         }
         undoStack.append(UndoEntry(changes: changes, compareGroupID: groupID))
         sortStore.markGroupResolved(groupID)
-        refresh(follow: previousAssetID)
+        refresh(follow: previousItemID)
     }
 
     /// Swipe right: keep. No PhotoKit action needed — nothing is deleted.
-    func isKept(_ asset: PHAsset) -> Bool {
-        marks[asset.localIdentifier] == .kept
+    func isKept(_ item: DeckItem) -> Bool {
+        marks[item.id] == .kept
     }
 
     func markKept() {
-        guard let asset = currentAsset else { return }
+        guard let item = currentItem else { return }
+        // Remote: right swipe is a "keep" decision POSTed to the server (the
+        // server CLI downloads kept items later). Nothing local to do.
+        if item.isRemote {
+            decideRemote(.keep, on: item)
+            return
+        }
         undoStack.append(UndoEntry(
-            changes: [.init(assetID: asset.localIdentifier, previousState: sortStore.state(for: asset))],
+            changes: [.init(assetID: item.id, previousState: sortStore.state(forID: item.id))],
             compareGroupID: nil
         ))
-        sortStore.setState(.kept, for: asset, monthKey: month.key)
+        sortStore.setState(.kept, forID: item.id, monthKey: monthKey)
         // See markForDelete()'s comment: follow: nil clamps currentIndex
         // into range, which both keeps a hideSorted-filtered photo's next
         // neighbor in place AND fixes the empty-deck bug (D2) when this was
@@ -298,9 +391,36 @@ final class DeckViewModel: ObservableObject {
         // When hideSorted filtered this photo out, the slot at currentIndex is
         // already occupied by the next photo, so advancing again would skip
         // one.
-        if visibleAssets.indices.contains(currentIndex),
-           visibleAssets[currentIndex].localIdentifier == asset.localIdentifier {
+        if visibleItems.indices.contains(currentIndex),
+           visibleItems[currentIndex].id == item.id {
             advance()
+        }
+    }
+
+    /// Remote-album swipe: writes the SortStore cache optimistically, advances
+    /// like a local swipe, and POSTs the decision. If the POST fails the cache
+    /// write is reverted and the deck goes back to that item, with the error
+    /// in `remoteError` (an alert) — the server is the source of truth, so the
+    /// UI must not keep a decision the server never recorded. No undo entry is
+    /// ever pushed: the server API cannot un-decide, so `undoStack` stays
+    /// empty and DeckView's undo button stays disabled. No retry queue; a
+    /// failed swipe is simply redone by the user.
+    private func decideRemote(_ decision: RemoteDecision, on item: DeckItem) {
+        guard let remote, let remoteItem = item.remoteItem else { return }
+        let previous = sortStore.state(forID: item.id)
+        sortStore.setState(decision == .keep ? .kept : .skipped, forID: item.id, monthKey: monthKey)
+        refresh(follow: nil)
+        if visibleItems.indices.contains(currentIndex), visibleItems[currentIndex].id == item.id {
+            advance()
+        }
+        Task {
+            do {
+                remoteCounts = try await remote.decide(mediaKey: remoteItem.mediaKey, decision)
+            } catch {
+                sortStore.setState(previous, forID: item.id, monthKey: monthKey, recordsActivity: false)
+                refresh(follow: item.id)
+                remoteError = "Couldn't save \(decision.rawValue): \(error)"
+            }
         }
     }
 
@@ -309,20 +429,24 @@ final class DeckViewModel: ObservableObject {
     /// Returns how many were marked.
     @discardableResult
     func markSortedUpToCurrent() -> Int {
-        guard let current = currentAsset,
-              let end = orderedAssets.firstIndex(where: { $0.localIdentifier == current.localIdentifier })
+        // REMOTE GATE (mark sorted till here): this would mass-"keep" every
+        // earlier item, i.e. queue up to ~1600 server downloads from one tap.
+        // The popover hides the button for a remote deck; this is the backstop.
+        guard !isRemote else { return 0 }
+        guard let current = currentItem,
+              let end = orderedItems.firstIndex(where: { $0.id == current.id })
         else { return 0 }
-        let toMark = orderedAssets[..<end].filter { sortStore.state(for: $0) == .unsorted }
+        let toMark = orderedItems[..<end].filter { sortStore.state(forID: $0.id) == .unsorted }
         guard !toMark.isEmpty else { return 0 }
-        let changes = toMark.map { UndoEntry.Change(assetID: $0.localIdentifier, previousState: .unsorted) }
-        for asset in toMark { sortStore.setState(.kept, for: asset, monthKey: month.key) }
+        let changes = toMark.map { UndoEntry.Change(assetID: $0.id, previousState: .unsorted) }
+        for item in toMark { sortStore.setState(.kept, forID: item.id, monthKey: monthKey) }
         undoStack.append(UndoEntry(changes: changes, compareGroupID: nil))
-        refresh(follow: current.localIdentifier)
+        refresh(follow: current.id)
         return toMark.count
     }
 
     private func advance() {
-        if currentIndex < visibleAssets.count - 1 {
+        if currentIndex < visibleItems.count - 1 {
             // withAnimation only wraps the resulting SwiftUI view diff — the
             // currentIndex mutation and onAdvance() itself still run
             // synchronously, in this same call, on this same run-loop turn.
@@ -351,8 +475,8 @@ final class DeckViewModel: ObservableObject {
         // writes, and exactly one refresh runs, against already-consistent
         // state, regardless of whether the batch has 1 change or several.
         for change in last.changes {
-            if let asset = orderedAssets.first(where: { $0.localIdentifier == change.assetID }) {
-                sortStore.setState(change.previousState, for: asset, monthKey: month.key)
+            if orderedItems.contains(where: { $0.id == change.assetID }) {
+                sortStore.setState(change.previousState, forID: change.assetID, monthKey: monthKey)
             }
         }
         // A Compare-confirm batch also resolved the group (markGroupResolved
@@ -368,7 +492,7 @@ final class DeckViewModel: ObservableObject {
         if let groupID = last.compareGroupID {
             sortStore.unresolveGroup(groupID)
         }
-        // Un-sorting an asset can grow visibleAssets back (the restored photo
+        // Un-sorting an asset can grow visibleItems back (the restored photo
         // reappearing under hideSorted), which shifts every later index up —
         // a blind currentIndex - 1 would land on an arbitrary neighbor
         // instead of the photo that was just undone. Reanchor by the first
@@ -380,7 +504,13 @@ final class DeckViewModel: ObservableObject {
     /// The single X commit: one PhotoKit batch delete (system confirm dialog
     /// is automatic); every asset's mirror job is armed before it and promoted after.
     func commitDeletions() async {
-        let toDelete = orderedAssets.filter { pendingDeleteIDs.contains($0.localIdentifier) }
+        // REMOTE GATE (delete + mirror queue): a remote deck has no
+        // photoLibrary/mirrorQueue (nil), no PHAssets, and its skips are
+        // .skipped (never .markedForDelete), so pendingDeleteIDs is empty and
+        // this returns before touching either. Both guards are the structural
+        // proof a remote swipe can never delete or enqueue a mirror job.
+        guard let photoLibrary, let mirrorQueue else { return }
+        let toDelete = orderedItems.compactMap(\.phAsset).filter { pendingDeleteIDs.contains($0.localIdentifier) }
         guard !toDelete.isEmpty else { return }
         isCommitting = true
         defer { isCommitting = false }
@@ -417,17 +547,17 @@ final class DeckViewModel: ObservableObject {
             try await mirrorQueue.deleteWithMirror(
                 toDelete.map(MirrorAssetInfo.init), filenames: filenames, thumbnails: thumbnails
             ) {
-                try await self.photoLibrary.deleteAssets(toDelete)
+                try await photoLibrary.deleteAssets(toDelete)
             }
             for asset in toDelete {
-                sortStore.setState(.deleted, for: asset, monthKey: month.key)
+                sortStore.setState(.deleted, for: asset, monthKey: monthKey)
             }
             undoStack.removeAll()
             // pendingDeleteIDs no longer needs an explicit removeAll(): every
             // asset just written above now reads back as .deleted, not
             // .markedForDelete, so refresh() derives an already-empty (of
             // these assets) pendingDeleteIDs on its own.
-            refresh(follow: currentAsset?.localIdentifier)
+            refresh(follow: currentItem?.id)
             // Not awaited: a hung POST would keep isCommitting true (deck
             // locked) for up to a minute per job. See scheduleDrain().
             mirrorQueue.scheduleDrain()

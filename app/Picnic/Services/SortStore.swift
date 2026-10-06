@@ -84,14 +84,21 @@ final class SortStore: ObservableObject {
 
     // MARK: Per-asset sort state
 
-    private func record(for asset: PHAsset) -> AssetSortRecord? {
-        let id = asset.localIdentifier
+    private func record(forID id: String) -> AssetSortRecord? {
         let descriptor = FetchDescriptor<AssetSortRecord>(predicate: #Predicate { $0.assetLocalID == id })
         return try? context.fetch(descriptor).first
     }
 
     func state(for asset: PHAsset) -> SortState {
-        stateCache[asset.localIdentifier] ?? .unsorted
+        state(forID: asset.localIdentifier)
+    }
+
+    /// String-key read path. Local assets use their PHAsset localIdentifier;
+    /// remote-album items use "gphotos:<albumId>:<mediaKey>" (DeckItem.id).
+    /// For remote ids this is only a CACHE of the server's decision: the
+    /// server is the source of truth and the deck re-seeds this on every load.
+    func state(forID id: String) -> SortState {
+        stateCache[id] ?? .unsorted
     }
 
     /// IDs of assets sorted (any state but unsorted) at or before `cutoff`;
@@ -104,17 +111,31 @@ final class SortStore: ObservableObject {
     }
 
     func setState(_ state: SortState, for asset: PHAsset, monthKey: String) {
-        if let existing = record(for: asset) {
+        setState(state, forID: asset.localIdentifier, monthKey: monthKey)
+    }
+
+    /// `recordsActivity: false` is for re-seeding the cache from the server
+    /// when a remote deck opens: that is not the user sorting anything, so it
+    /// must not bump the streak.
+    func setState(_ state: SortState, forID id: String, monthKey: String, recordsActivity: Bool = true) {
+        if let existing = record(forID: id) {
             existing.state = state
             existing.updatedAt = Date()
         } else {
-            context.insert(AssetSortRecord(assetLocalID: asset.localIdentifier, monthKey: monthKey, state: state))
+            context.insert(AssetSortRecord(assetLocalID: id, monthKey: monthKey, state: state))
         }
         try? context.save()
-        stateCache[asset.localIdentifier] = state
-        UserDefaults.standard.set(monthKey, forKey: Self.lastSwipedMonthKeyDefaultsKey)
-        if state != .unsorted { recordActivity() }
+        stateCache[id] = state
+        // "remote:" month keys name no My Life month; writing one here would
+        // make MyLifeView's cold-launch resume look for a month that does not
+        // exist (see lastSwipedMonthKey).
+        if !monthKey.hasPrefix(Self.remoteMonthKeyPrefix) {
+            UserDefaults.standard.set(monthKey, forKey: Self.lastSwipedMonthKeyDefaultsKey)
+        }
+        if state != .unsorted && recordsActivity { recordActivity() }
     }
+
+    static let remoteMonthKeyPrefix = "remote:"
 
     /// Reads `stateCache`, the same in-memory map `state(for:)` uses — not a
     /// SwiftData fetch. This is called from MonthCardView's body (three times

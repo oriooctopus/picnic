@@ -9,6 +9,12 @@ enum SortState: String, Codable {
     case markedForDelete
     case kept
     case deleted
+    /// Remote-album ("Oliver! album") left swipe only. Deliberately NOT
+    /// `.markedForDelete`: that state feeds the pending-delete badge and the
+    /// PhotoKit commit path, and a remote item has neither a PHAsset to delete
+    /// nor a mirror job to enqueue. `.skipped` counts as "addressed" (any
+    /// non-.unsorted state does) but nothing ever acts on it locally.
+    case skipped
 }
 
 @Model
