@@ -94,6 +94,15 @@ final class SortStore: ObservableObject {
         stateCache[asset.localIdentifier] ?? .unsorted
     }
 
+    /// IDs of assets sorted (any state but unsorted) at or before `cutoff`;
+    /// used to expire their cached warm-up thumbnails.
+    func assetIDsSorted(before cutoff: Date) -> Set<String> {
+        let unsorted = SortState.unsorted.rawValue
+        let descriptor = FetchDescriptor<AssetSortRecord>(
+            predicate: #Predicate { $0.stateRaw != unsorted && $0.updatedAt <= cutoff })
+        return Set(((try? context.fetch(descriptor)) ?? []).map(\.assetLocalID))
+    }
+
     func setState(_ state: SortState, for asset: PHAsset, monthKey: String) {
         if let existing = record(for: asset) {
             existing.state = state

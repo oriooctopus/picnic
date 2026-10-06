@@ -263,24 +263,36 @@ enum ThumbnailLoader {
         return best
     }
 
-    /// Background warm-up for a month: pulls a small version of every asset
-    /// from iCloud into PhotoKit's on-disk cache so swiping never waits on a
-    /// network round trip. Runs at utility priority, two fetches at a time
-    /// (a wider fan-out competes with the card the user is actually
-    /// loading), and stops as soon as the calling task is cancelled.
-    /// Results are discarded; the point is PhotoKit keeping the downloaded
-    /// derivative, which the later full-size request then upgrades from.
-    static func warmCache(for assets: [PHAsset], targetSize: CGSize = CGSize(width: 400, height: 533)) async {
-        await withTaskGroup(of: Void.self) { group in
+    /// Background warm-up for a month: downloads a mid-size version of every
+    /// asset (pulling it out of iCloud via PhotoKit) and saves it in
+    /// `WarmThumbCache`, where the deck uses it as an instant placeholder and
+    /// a purge later removes it. Runs at utility priority, two fetches at a
+    /// time (a wider fan-out competes with the card the user is actually
+    /// loading), skips assets already cached, and stops when the calling
+    /// task is cancelled. Logs bytes written so the real per-photo cost is
+    /// visible on a device.
+    static func warmCache(for assets: [PHAsset]) async {
+        let targetSize = WarmThumbCache.targetSize
+        await withTaskGroup(of: Int.self) { group in
             var iterator = assets.makeIterator()
             func addNext() {
-                guard !Task.isCancelled, let asset = iterator.next() else { return }
-                group.addTask(priority: .utility) {
-                    _ = await thumbnail(for: asset, targetSize: targetSize)
+                while !Task.isCancelled, let asset = iterator.next() {
+                    if WarmThumbCache.contains(asset.localIdentifier) { continue }
+                    group.addTask(priority: .utility) {
+                        guard let image = await thumbnail(for: asset, targetSize: targetSize) else { return 0 }
+                        return WarmThumbCache.store(image, for: asset.localIdentifier)
+                    }
+                    return
                 }
             }
             addNext(); addNext()
-            while await group.next() != nil { addNext() }
+            var written = 0, count = 0
+            while let bytes = await group.next() {
+                written += bytes; count += 1
+                addNext()
+            }
+            NSLog("WarmThumbCache: warmed %d photos, %d KB written, %d KB on disk total",
+                  count, written / 1024, WarmThumbCache.totalBytes() / 1024)
         }
     }
 

@@ -185,6 +185,9 @@ struct DeckView: View {
         // Warm the whole month's thumbnails in the background, starting at
         // the card the user is on and wrapping around, once per deck open.
         .task(id: viewModel.month.key) {
+            // Drop thumbnails for photos sorted more than a day ago first.
+            WarmThumbCache.purge(assetIDs: appState.sortStore.assetIDsSorted(
+                before: Date().addingTimeInterval(-WarmThumbCache.retention)))
             let assets = viewModel.visibleAssets
             let start = min(viewModel.currentIndex, assets.count)
             await ThumbnailLoader.warmCache(for: Array(assets[start...] + assets[..<start]))
@@ -353,6 +356,10 @@ struct DeckView: View {
             // behind a plain photo.
             videoController.clear()
             await ThumbnailLoader.applySlowLoadDelayIfEnabled()
+            // Instant placeholder from the warm-up cache while PhotoKit loads.
+            if currentImage == nil, let cached = WarmThumbCache.image(for: loadingID) {
+                currentImage = cached
+            }
             // Low-res first, then full: each update replaces currentImage. The
             // stream ends on the final result, and cancelling this task (the
             // card changed) cancels the PhotoKit request behind it.
