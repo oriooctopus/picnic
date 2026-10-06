@@ -56,6 +56,11 @@ struct DeckView: View {
     /// Transient note at the top of the deck: "Logged to Outfits | Review now",
     /// or the short failure note when Overland won't open.
     @State private var toast: DeckToast?
+    /// Bumped to remount the card when a swipe committed but the deck did not
+    /// move (offline, only videos ahead): the flung card keeps its off-screen
+    /// transform until its identity changes, and would sit over the filmstrip
+    /// swallowing taps.
+    @State private var cardResetNonce = 0
     @State private var toastDismissTask: Task<Void, Never>?
 
     enum DeckToast: Equatable {
@@ -151,7 +156,7 @@ struct DeckView: View {
                         onVideoRetry: { videoRetryNonce += 1 },
                         isRemote: viewModel.isRemote
                     )
-                    .id(item.id)
+                    .id("\(item.id)#\(cardResetNonce)")
                     // The photo itself is still assigned synchronously in
                     // onAdvance below (same run-loop turn as currentIndex
                     // moving — see advance()'s doc comment), so this never
@@ -282,7 +287,9 @@ struct DeckView: View {
             viewModel.onVideoSkip = { skip in
                 switch skip {
                 case .skipped(let count): showToast(.skippedVideos(count: count), seconds: 2.5)
-                case .onlyVideosLeft: showToast(.onlyVideosLeft, seconds: 2.5)
+                case .onlyVideosLeft:
+                    cardResetNonce += 1
+                    showToast(.onlyVideosLeft, seconds: 2.5)
                 }
             }
         }
