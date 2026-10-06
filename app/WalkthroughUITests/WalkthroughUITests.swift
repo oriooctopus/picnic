@@ -2959,4 +2959,63 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(reopened, shortened, accuracy: 0.1,
                        "After saving, the edited (shorter) clip should be the new full length; got \(lengthLabel.label)")
     }
+    // MARK: - Remote album deck
+
+    /// Drives the remote Google Photos deck against the DEBUG in-memory fixture
+    /// (`--seed-remote-album`, ~12 generated cards, no server): open it from
+    /// Utilities, swipe right (keep & download), swipe left (skip), screenshot
+    /// after each. Asserts only on identifiers and labels, never frames, and
+    /// on the server-sourced counter text so a swipe that never reached the
+    /// (fixture) server fails here too.
+    func testRemoteAlbumDeck() throws {
+        relaunch(withExtraArguments: ["--seed-remote-album"])
+        _ = openMyLifeGrid()
+        goToUtilities()
+
+        let row = app.descendants(matching: .any)["utilities.remoteAlbum"].firstMatch
+        // The row sits below the smart-collection tiles; scroll until it is on screen.
+        var scrolls = 0
+        while !row.isHittable && scrolls < 5 {
+            app.swipeUp()
+            scrolls += 1
+        }
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "Utilities should list the remote album row")
+        row.tap()
+
+        let banner = app.descendants(matching: .any)["deck.remoteBanner"].firstMatch
+        XCTAssertTrue(banner.waitForExistence(timeout: 15), "remote deck must show its persistent album banner")
+        XCTAssertEqual(banner.label, "ALBUM · Oliver!")
+        let counter = app.descendants(matching: .any)["deck.remoteCounter"].firstMatch
+        XCTAssertTrue(counter.waitForExistence(timeout: 15), "counter appears once the listing loads")
+        XCTAssertEqual(counter.label, "0 kept · 12 left", "counter must reflect the server's counts")
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 15), "remote deck should show a card")
+        // The local deck's destructive affordances must be absent.
+        XCTAssertFalse(app.staticTexts["deck.pendingCount"].exists, "remote deck must never show a pending-delete badge")
+        capture("70-remote-deck-first-card")
+
+        // Keep: drag right.
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        let afterKeep = NSPredicate(format: "label == %@", "1 kept · 11 left")
+        expectation(for: afterKeep, evaluatedWith: counter)
+        waitForExpectations(timeout: 10)
+        capture("71-remote-deck-after-keep")
+
+        // Skip: drag left.
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        let afterSkip = NSPredicate(format: "label == %@", "1 kept · 10 left")
+        expectation(for: afterSkip, evaluatedWith: counter)
+        waitForExpectations(timeout: 10)
+        XCTAssertFalse(app.staticTexts["deck.pendingCount"].exists,
+                       "a remote skip must not become a pending PhotoKit delete")
+        capture("72-remote-deck-after-skip")
+    }
 }
