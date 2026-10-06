@@ -56,10 +56,9 @@ struct DeckView: View {
     /// Transient note at the top of the deck: "Logged to Outfits | Review now",
     /// or the short failure note when Overland won't open.
     @State private var toast: DeckToast?
-    /// Bumped to remount the card when a swipe committed but the deck did not
-    /// move (offline, only videos ahead): the flung card keeps its off-screen
-    /// transform until its identity changes, and would sit over the filmstrip
-    /// swallowing taps.
+    /// Bumped when a swipe committed but the deck did not move (offline, only
+    /// videos ahead): the flung card keeps its off-screen transform until told
+    /// to come back, and would sit over the filmstrip swallowing taps.
     @State private var cardResetNonce = 0
     @State private var toastDismissTask: Task<Void, Never>?
 
@@ -154,9 +153,10 @@ struct DeckView: View {
                         cardAspectRatio: cardAspectRatio,
                         videoController: videoController,
                         onVideoRetry: { videoRetryNonce += 1 },
-                        isRemote: viewModel.isRemote
+                        isRemote: viewModel.isRemote,
+                        resetNonce: cardResetNonce
                     )
-                    .id("\(item.id)#\(cardResetNonce)")
+                    .id(item.id)
                     // The photo itself is still assigned synchronously in
                     // onAdvance below (same run-loop turn as currentIndex
                     // moving — see advance()'s doc comment), so this never
@@ -858,6 +858,7 @@ private struct DeckCard: View {
     let onVideoRetry: () -> Void
     /// Draws the remote-album accent frame on the card (RemoteDeckStyle).
     let isRemote: Bool
+    var resetNonce = 0
 
     var body: some View {
         // Same order as the dimmed peek card below it (aspectRatio, THEN
@@ -887,7 +888,8 @@ private struct DeckCard: View {
             onKeep: onKeep,
             onDismiss: onDismiss,
             onTranslationChange: { dragState.translation = $0 },
-            isRemote: isRemote
+            isRemote: isRemote,
+            resetNonce: resetNonce
         )
         .aspectRatio(cardAspectRatio, contentMode: .fit)
         // 8pt, not 20pt: the reference app runs its card almost edge to edge
@@ -930,6 +932,7 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
     let onDismiss: () -> Void
     let onTranslationChange: (CGSize) -> Void
     let isRemote: Bool
+    var resetNonce = 0
 
     func makeUIView(context: Context) -> PicnicSwipeCard {
         PicnicSwipeCard()
@@ -948,6 +951,10 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
         card.onKeep = onKeep
         card.onDismiss = onDismiss
         card.onTranslationChange = onTranslationChange
+        if card.lastResetNonce != resetNonce {
+            card.lastResetNonce = resetNonce
+            card.snapBackAfterUncommittedSwipe()
+        }
     }
 
     /// A plain `UIViewRepresentable` reports no size preference of its own,

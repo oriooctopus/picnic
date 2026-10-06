@@ -415,6 +415,21 @@ final class PicnicSwipeCard: SwipeCard {
         onTranslationChange?(CGSize(width: t.x, height: t.y))
     }
 
+    /// Last `resetNonce` the SwiftUI side asked us to honour (see
+    /// `snapBackAfterUncommittedSwipe`).
+    var lastResetNonce = 0
+
+    /// A swipe committed (Shuffle flew the card off) but the deck stayed on
+    /// this card, e.g. offline with only videos ahead. Without this the card
+    /// stays flung over the filmstrip until its identity changes.
+    func snapBackAfterUncommittedSwipe() {
+        layer.removeAllAnimations()
+        dragView.layer.removeAllAnimations()
+        transform = .identity
+        dragView.transform = .identity
+        onTranslationChange?(.zero)
+    }
+
     override func didSwipe(_ recognizer: UIPanGestureRecognizer, with direction: SwipeDirection) {
         super.didSwipe(recognizer, with: direction)
         onTranslationChange?(.zero)
