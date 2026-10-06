@@ -3,6 +3,9 @@ import SwiftUI
 struct HideSortedPopover: View {
     @Binding var hideSorted: Bool
     var markSortedToHere: () -> Void = {}
+    /// False for a remote-album deck: "Mark sorted till here" would mass-keep
+    /// (= queue server downloads for) every earlier item in one tap.
+    var showsMarkSortedToHere = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -28,13 +31,15 @@ struct HideSortedPopover: View {
             // infer state from the symbol name.
             .accessibilityValue(hideSorted ? "on" : "off")
 
-            Divider()
+            if showsMarkSortedToHere {
+                Divider()
 
-            Button(action: markSortedToHere) {
-                Label("Mark sorted till here", systemImage: "checkmark.circle")
+                Button(action: markSortedToHere) {
+                    Label("Mark sorted till here", systemImage: "checkmark.circle")
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("deck.markSortedToHere")
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("deck.markSortedToHere")
 
             Divider()
 

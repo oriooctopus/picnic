@@ -100,6 +100,13 @@ struct DeckView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Remote-album deck only: the persistent "ALBUM · Oliver!" strip
+            // with the server's kept/left counter. The local deck never
+            // shows it, so the two decks can't be confused.
+            if viewModel.isRemote {
+                RemoteDeckBanner(counts: viewModel.remoteCounts)
+            }
+
             topBar
 
             ZStack {
@@ -107,21 +114,29 @@ struct DeckView: View {
                 // thrown aside, which is what gives the deck its depth in the
                 // reference — previously this was a pair of flat grey
                 // rectangles with no picture in them.
-                if viewModel.currentIndex + 1 < viewModel.visibleAssets.count {
+                if viewModel.currentIndex + 1 < viewModel.visibleItems.count {
                     DeckPeekCard(image: nextImage, dragState: dragState, cardAspectRatio: cardAspectRatio)
                 }
 
-                if let asset = viewModel.currentAsset {
+                if let item = viewModel.currentItem {
                     DeckCard(
-                        asset: asset,
+                        item: item,
                         image: currentImage,
-                        compareGroup: viewModel.groupByAssetID[asset.localIdentifier].flatMap {
+                        // REMOTE GATE (Compare): groupByAssetID is built only
+                        // from local PHAssets, so a remote id never matches
+                        // and the pill never shows.
+                        compareGroup: viewModel.groupByAssetID[item.id].flatMap {
                             appState.sortStore.isGroupResolved($0.id) ? nil : $0
                         },
-                        onCompare: { presentation = .compare($0, startAssetID: asset.localIdentifier) },
-                        onLongPress: { presentLivePhotoIfNeeded(asset) },
-                        showsICloudBadge: imageState.showsICloudBadge,
-                        deleteBlocked: imageState.deleteBlocked,
+                        onCompare: { presentation = .compare($0, startAssetID: item.id) },
+                        onLongPress: { presentLivePhotoIfNeeded(item) },
+                        // REMOTE GATE (iCloud badge / delete-block): both come
+                        // from PhotoKit's low-res-vs-full quality tracking,
+                        // which a URL image never goes through. Forcing them
+                        // off also keeps the left swipe live: deleteBlocked
+                        // would otherwise remove `.left` from the card.
+                        showsICloudBadge: !viewModel.isRemote && imageState.showsICloudBadge,
+                        deleteBlocked: !viewModel.isRemote && imageState.deleteBlocked,
                         onBlockedDelete: { showToast(.deleteBlocked, seconds: 3) },
                         onDelete: { viewModel.markForDelete() },
                         onKeep: { viewModel.markKept() },
@@ -129,9 +144,10 @@ struct DeckView: View {
                         dragState: dragState,
                         cardAspectRatio: cardAspectRatio,
                         videoController: videoController,
-                        onVideoRetry: { videoRetryNonce += 1 }
+                        onVideoRetry: { videoRetryNonce += 1 },
+                        isRemote: viewModel.isRemote
                     )
-                    .id(asset.localIdentifier)
+                    .id(item.id)
                     // The photo itself is still assigned synchronously in
                     // onAdvance below (same run-loop turn as currentIndex
                     // moving — see advance()'s doc comment), so this never
@@ -141,11 +157,15 @@ struct DeckView: View {
                     // instead of popping straight to full size the instant
                     // the swipe commits.
                     .transition(.scale(scale: 0.96).combined(with: .opacity))
+                } else if viewModel.isLoadingRemote {
+                    ProgressView()
+                        .tint(RemoteDeckStyle.accent)
+                        .accessibilityIdentifier("deck.remoteLoading")
                 } else {
                     emptyState
                 }
             }
-            .overlay { SwipeVerdictLabel(state: dragState) }
+            .overlay { SwipeVerdictLabel(state: dragState, isRemote: viewModel.isRemote) }
             .frame(maxHeight: .infinity)
             // Gap below the two-line header so the card (and its stack-peek
             // layers) never overlaps the date/time subline (defect C1/C5).
@@ -154,14 +174,16 @@ struct DeckView: View {
             // Outside and below the card on purpose — see VideoControlBar's
             // doc comment: a scrub drag here must never compete with the
             // card's own swipe pan gesture.
-            if let asset = viewModel.currentAsset, asset.mediaType == .video, isTrimming {
+            // REMOTE GATE (video/trim): `phAsset` is nil for a remote item, so
+            // neither the trim bar nor the video control bar can show.
+            if let asset = viewModel.currentItem?.phAsset, asset.mediaType == .video, isTrimming {
                 VideoTrimBar(
                     controller: videoController,
                     onCancel: { endTrimming() },
                     onSave: { await saveTrim(asset: asset, window: $0) }
                 )
             } else {
-                if let asset = viewModel.currentAsset, asset.mediaType == .video {
+                if let asset = viewModel.currentItem?.phAsset, asset.mediaType == .video {
                     VideoControlBar(controller: videoController)
                         .padding(.horizontal, 28)
                         .padding(.top, 10)
@@ -172,7 +194,7 @@ struct DeckView: View {
             positionAndFilmstrip
             bottomControls
         }
-        .background(DeckTintBackground(state: dragState))
+        .background(DeckTintBackground(state: dragState, isRemote: viewModel.isRemote))
         .overlay(alignment: .topLeading) {
             if showPerfHUD {
                 PerfHUD().padding(.leading, 12).padding(.top, 64)
@@ -184,20 +206,31 @@ struct DeckView: View {
         .overlay(alignment: .top) { toastView }
         // Warm the whole month's thumbnails in the background, starting at
         // the card the user is on and wrapping around, once per deck open.
-        .task(id: viewModel.month.key) {
+        //
+        // The id includes the item count because a remote deck starts empty
+        // and fills once the server answers: keyed on monthKey alone this
+        // would run once against zero items and never warm anything.
+        .task(id: "\(viewModel.monthKey)#\(viewModel.orderedItems.count)") {
             // Drop thumbnails for photos sorted more than a day ago first.
             WarmThumbCache.purge(assetIDs: appState.sortStore.assetIDsSorted(
                 before: Date().addingTimeInterval(-WarmThumbCache.retention)))
-            let assets = viewModel.visibleAssets
-            let start = min(viewModel.currentIndex, assets.count)
-            await ThumbnailLoader.warmCache(for: Array(assets[start...] + assets[..<start]))
+            let items = viewModel.visibleItems
+            let start = min(viewModel.currentIndex, items.count)
+            await ThumbnailLoader.warmCache(for: Array(items[start...] + items[..<start]))
         }
-        .task(id: "\(viewModel.currentAsset?.localIdentifier ?? "")#\(videoRetryNonce)") {
+        // Remote deck: fetch the album (and its server-side decisions) once
+        // on open. Local decks have nothing to load. A failure lands in
+        // viewModel.remoteError and shows in the alert below; there is no
+        // automatic retry, reopening the deck is the retry.
+        .task {
+            if viewModel.isRemote { await viewModel.loadRemote() }
+        }
+        .task(id: "\(viewModel.currentItem?.id ?? "")#\(videoRetryNonce)") {
             await loadCurrentImage()
         }
         // Swiping or tapping the filmstrip away mid-trim abandons the trim;
         // load(item:) for the next video already resets the loop window.
-        .onChange(of: viewModel.currentAsset?.localIdentifier) { _, _ in
+        .onChange(of: viewModel.currentItem?.id) { _, _ in
             isTrimming = false
         }
         // Frees the shared AVPlayer's current item when the deck itself
@@ -251,6 +284,16 @@ struct DeckView: View {
         } message: {
             Text(trimError ?? "")
         }
+        // Remote deck failures: album load, a decision POST (already
+        // reverted by the view model), or the current card's image.
+        .alert("Remote album error", isPresented: Binding(
+            get: { viewModel.remoteError != nil },
+            set: { if !$0 { viewModel.remoteError = nil } }
+        )) {
+            Button("OK") { viewModel.remoteError = nil }
+        } message: {
+            Text(viewModel.remoteError ?? "")
+        }
         .alert("Couldn't delete", isPresented: Binding(
             get: { viewModel.commitError != nil },
             set: { if !$0 { viewModel.commitError = nil } }
@@ -267,7 +310,7 @@ struct DeckView: View {
     /// `onAdvance`, and `onAdvance` only fires from `DeckViewModel.advance()`
     /// — which `markForDelete`/`markKept` skip whenever hideSorted has
     /// already filtered the swiped asset out (see their guard comments). So
-    /// under hideSorted, `currentAsset` changes identity with NO synchronous
+    /// under hideSorted, `currentItem` changes identity with NO synchronous
     /// image promotion at all, and this function's own first `await` is the
     /// only thing standing between the swipe and a correct photo — on a
     /// simulator's local library that await resolves in the same run-loop
@@ -280,7 +323,7 @@ struct DeckView: View {
     /// A1 — promote an already-prefetched `nextImage` synchronously, before
     /// the first `await` below, whenever it was fetched for the asset we're
     /// about to show. This is exactly what happens whenever hideSorted drops
-    /// the swiped photo (the new `currentAsset` is the same one `nextImage`
+    /// the swiped photo (the new `currentItem` is the same one `nextImage`
     /// was prefetched for two lines below) or when the filmstrip is tapped
     /// one photo forward — both cases this closes identically. `advance()`'s
     /// own promotion (DeckView.onAppear's `onAdvance` closure) is untouched
@@ -297,23 +340,23 @@ struct DeckView: View {
     /// swipe A→B→C quickly enough and the card showing C can end up
     /// permanently displaying A. `loadingID`/`startIndex` are captured before
     /// the first `await` specifically so every assignment below can be
-    /// gated against the LIVE `viewModel.currentAsset` rather than the
+    /// gated against the LIVE `viewModel.currentItem` rather than the
     /// (necessarily still-equal-to-itself) local `asset` — and `nextIndex`
     /// is derived from the captured `startIndex`, not a fresh read of
     /// `viewModel.currentIndex`, so a stale invocation can't prefetch for a
     /// position that has since moved.
     private func loadCurrentImage() async {
-        guard let asset = viewModel.currentAsset else {
+        guard let item = viewModel.currentItem else {
             currentImage = nil; nextImage = nil; nextImageAssetID = nil
             videoController.clear()
             return
         }
 
         // A1: see this function's doc comment. Must run before any `await`
-        // — the whole point is closing the gap between currentAsset changing
+        // — the whole point is closing the gap between currentItem changing
         // and the first suspension point below, not just shortening it.
         imageState.begin(prefetched: false)
-        if nextImageAssetID == asset.localIdentifier, let prefetched = nextImage {
+        if nextImageAssetID == item.id, let prefetched = nextImage {
             currentImage = prefetched
             imageState.begin(prefetched: true)  // the 600x800 prefetch: pixels, but not the final image
             nextImage = nil
@@ -321,10 +364,27 @@ struct DeckView: View {
         }
 
         // A2: captured now, used for every gate below.
-        let loadingID = asset.localIdentifier
+        let loadingID = item.id
         let startIndex = viewModel.currentIndex
 
-        if asset.mediaType == .video {
+        if case .remote(let remote) = item {
+            // REMOTE GATE (image source): a remote card is never a video and
+            // never goes through PhotoKit/WarmThumbCache. Its image is the
+            // server's cached thumbnail, fetched by URL (in-memory NSCache in
+            // ThumbnailLoader). The PhotoKit quality state is ignored for
+            // remote cards (see the body's deleteBlocked gate).
+            videoController.clear()
+            do {
+                let image = try await ThumbnailLoader.remoteImage(url: remote.thumbnailURL)
+                if viewModel.currentItem?.id == loadingID { currentImage = image }
+            } catch {
+                // A cancelled load means the card changed and a newer task
+                // owns the state; only a real failure is worth an alert.
+                if Task.isCancelled || error is CancellationError { return }
+                viewModel.remoteError = "Couldn't load photo: \(error)"
+            }
+            if Task.isCancelled { return }
+        } else if let asset = item.phAsset, asset.mediaType == .video {
             // Poster first, local data only so it shows at once, upgraded by a
             // network-allowed fetch that runs alongside the video item (never
             // queued behind an iCloud download). The poster stays on screen
@@ -336,7 +396,7 @@ struct DeckView: View {
             imageState.markVideo()
             videoController.beginLoading(assetID: loadingID)
             if let local = await ThumbnailLoader.localThumbnail(for: asset, targetSize: ThumbnailLoader.screenPixelSize),
-               viewModel.currentAsset?.localIdentifier == loadingID {
+               viewModel.currentItem?.id == loadingID {
                 currentImage = local
             }
             async let upgraded = ThumbnailLoader.thumbnail(for: asset, targetSize: ThumbnailLoader.screenPixelSize)
@@ -348,10 +408,10 @@ struct DeckView: View {
             case .item(let item): videoController.loadItem(item, for: loadingID)
             case .failed: videoController.failLoading(for: loadingID)
             }
-            if let poster = await upgraded, viewModel.currentAsset?.localIdentifier == loadingID {
+            if let poster = await upgraded, viewModel.currentItem?.id == loadingID {
                 currentImage = poster
             }
-        } else {
+        } else if let asset = item.phAsset {
             // Not a video card: make sure nothing keeps playing/decoding
             // behind a plain photo.
             videoController.clear()
@@ -366,7 +426,7 @@ struct DeckView: View {
             for await update in ThumbnailLoader.imageUpdates(for: asset, targetSize: ThumbnailLoader.screenPixelSize) {
                 // A2 gate: only trust this fetch if it's still for the asset
                 // actually on screen — see the doc comment above.
-                guard viewModel.currentAsset?.localIdentifier == loadingID else { break }
+                guard viewModel.currentItem?.id == loadingID else { break }
                 if let image = update.image { currentImage = image }
                 imageState.apply(update)
             }
@@ -380,16 +440,16 @@ struct DeckView: View {
         // (captured above `await`), not a fresh `viewModel.currentIndex`
         // read — see A2 in the doc comment.
         let nextIndex = startIndex + 1
-        guard viewModel.visibleAssets.indices.contains(nextIndex) else {
-            if viewModel.currentAsset?.localIdentifier == loadingID { nextImage = nil; nextImageAssetID = nil }
+        guard viewModel.visibleItems.indices.contains(nextIndex) else {
+            if viewModel.currentItem?.id == loadingID { nextImage = nil; nextImageAssetID = nil }
             return
         }
-        let nextAsset = viewModel.visibleAssets[nextIndex]
-        let fetchedNext = await ThumbnailLoader.bestAvailableImage(for: nextAsset, targetSize: CGSize(width: 600, height: 800))
+        let nextItem = viewModel.visibleItems[nextIndex]
+        let fetchedNext = await ThumbnailLoader.bestAvailableImage(for: nextItem, targetSize: CGSize(width: 600, height: 800))
         // A2 gate, same reasoning as the currentImage assignment above.
-        if viewModel.currentAsset?.localIdentifier == loadingID {
+        if viewModel.currentItem?.id == loadingID {
             nextImage = fetchedNext
-            nextImageAssetID = nextAsset.localIdentifier
+            nextImageAssetID = nextItem.id
         }
     }
 
@@ -425,10 +485,10 @@ struct DeckView: View {
             Spacer()
 
             VStack(spacing: 2) {
-                Text(viewModel.month.title)
+                Text(viewModel.title)
                     .font(.headline)
                     .foregroundStyle(.white)
-                if let asset = viewModel.currentAsset, let date = asset.creationDate {
+                if let item = viewModel.currentItem, let date = item.creationDate {
                     Text(dateTimeFormatter.string(from: date).uppercased())
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.6))
@@ -525,14 +585,16 @@ struct DeckView: View {
         // identifier, so this returns the just-saved trimmed render
         // (test51 checks the reloaded length).
         if let item = await VideoLoader.playerItem(for: asset),
-           viewModel.currentAsset?.localIdentifier == asset.localIdentifier {
+           viewModel.currentItem?.id == asset.localIdentifier {
             videoController.load(item: item)
         }
         return true
     }
 
-    private func presentLivePhotoIfNeeded(_ asset: PHAsset) {
-        guard asset.mediaSubtypes.contains(.photoLive) else { return }
+    private func presentLivePhotoIfNeeded(_ item: DeckItem) {
+        // REMOTE GATE (Live Photo): a remote item has no PHAsset, and the
+        // server only caches a still thumbnail, so long-press does nothing.
+        guard let asset = item.phAsset, asset.mediaSubtypes.contains(.photoLive) else { return }
         Task {
             guard let loaded = await LivePhotoLoader.load(asset: asset) else { return }
             presentation = .livePhoto(loaded)
@@ -544,31 +606,45 @@ struct DeckView: View {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 44))
                 .foregroundStyle(.green)
-            Text("All sorted for \(viewModel.month.title)")
+            Text("All sorted for \(viewModel.title)")
                 .foregroundStyle(.white)
         }
     }
 
     // MARK: Bottom rows
 
+    @ViewBuilder
     private var bottomActionsRow: some View {
+        if viewModel.isRemote {
+            // REMOTE GATE (favorite, outfit log, share, trim): all four need
+            // a PHAsset (PhotoKit favorite flag, outfit import by local id,
+            // share of the original file, video trim). The remote deck shows
+            // an empty spacer of roughly the same height (22pt icons + 16pt
+            // padding each side) so the layout does not jump.
+            Color.clear.frame(height: 22 + 32)
+        } else {
+            localActionsRow
+        }
+    }
+
+    private var localActionsRow: some View {
         HStack(spacing: 56) {
             Button {
-                guard let asset = viewModel.currentAsset else { return }
-                Task { await viewModel.toggleFavorite(asset) }
+                guard let item = viewModel.currentItem, item.phAsset != nil else { return }
+                Task { await viewModel.toggleFavorite(item) }
             } label: {
-                let isFav = viewModel.currentAsset.map { viewModel.isFavorite($0) } ?? false
+                let isFav = viewModel.currentItem.map { viewModel.isFavorite($0) } ?? false
                 Image(systemName: isFav ? "heart.fill" : "heart")
                     .foregroundStyle(isFav ? .red : .white)
             }
             outfitButton
             Button {
-                guard let asset = viewModel.currentAsset else { return }
+                guard let asset = viewModel.currentItem?.phAsset else { return }
                 ShareSheetPresenter.present(asset: asset)
             } label: {
                 Image(systemName: "square.and.arrow.up").foregroundStyle(.white)
             }
-            if viewModel.currentAsset?.mediaType == .video {
+            if viewModel.currentItem?.phAsset?.mediaType == .video {
                 Button { isTrimming = true } label: {
                     Image(systemName: "scissors").foregroundStyle(.white)
                 }
@@ -582,7 +658,8 @@ struct DeckView: View {
     /// One-tap "Log as outfit". Outline until the photo is logged, then lilac;
     /// tapping a logged photo opens Review instead of re-importing. Photos only.
     private var outfitButton: some View {
-        let asset = viewModel.currentAsset
+        // Only reachable from localActionsRow, so the item is always local.
+        let asset = viewModel.currentItem?.phAsset
         let isVideo = asset?.mediaType == .video
         let isLogged = asset.map { outfitLog.isLogged($0) } ?? false
         return Button {
@@ -654,15 +731,15 @@ struct DeckView: View {
     private var positionAndFilmstrip: some View {
         VStack(spacing: 6) {
             FilmstripView(
-                assets: viewModel.visibleAssets,
+                items: viewModel.visibleItems,
                 currentIndex: viewModel.currentIndex,
                 pendingDeleteIDs: viewModel.pendingDeleteIDs,
                 isKept: { viewModel.isKept($0) }
             ) { index in
                 viewModel.currentIndex = index
             }
-            if !viewModel.visibleAssets.isEmpty {
-                Text("\(viewModel.currentIndex + 1) OF \(viewModel.visibleAssets.count)")
+            if !viewModel.visibleItems.isEmpty {
+                Text("\(viewModel.currentIndex + 1) OF \(viewModel.visibleItems.count)")
                     .font(.caption2.bold())
                     .foregroundStyle(.white.opacity(0.6))
                     .accessibilityIdentifier("deck.position")
@@ -691,10 +768,14 @@ struct DeckView: View {
             }
             .accessibilityIdentifier("deck.filter")
             .popover(isPresented: $showHidePopover) {
-                HideSortedPopover(hideSorted: $viewModel.hideSorted) {
+                // REMOTE GATE (mark sorted till here): hidden for a remote deck,
+                // where it would mass-keep (= queue downloads for) everything
+                // before the current card. markSortedUpToCurrent also no-ops
+                // for remote as a second line of defense.
+                HideSortedPopover(hideSorted: $viewModel.hideSorted, markSortedToHere: {
                     viewModel.markSortedUpToCurrent()
                     showHidePopover = false
-                }
+                }, showsMarkSortedToHere: !viewModel.isRemote)
                     .presentationCompactAdaptation(.popover)
             }
         }
@@ -710,7 +791,7 @@ struct DeckView: View {
 /// out to `dragState` so `DeckTintBackground`/`SwipeVerdictLabel` keep
 /// tracking the drag exactly as before.
 private struct DeckCard: View {
-    let asset: PHAsset
+    let item: DeckItem
     let image: UIImage?
     /// Already filtered for group-resolved by the caller; non-nil means show
     /// the pill.
@@ -734,6 +815,8 @@ private struct DeckCard: View {
     /// switching what's passed to `ShuffleCardRepresentable` is read here.
     let videoController: VideoPlaybackController
     let onVideoRetry: () -> Void
+    /// Draws the remote-album accent frame on the card (RemoteDeckStyle).
+    let isRemote: Bool
 
     var body: some View {
         // Same order as the dimmed peek card below it (aspectRatio, THEN
@@ -746,10 +829,11 @@ private struct DeckCard: View {
         // width, so the photo (and its black letterbox) spilled past the
         // card's own rounded rect and the dimmed peek card showed through
         // above/below instead of being covered by opaque black.
-        let isVideo = asset.mediaType == .video
+        // REMOTE GATE (video / Live Photo flags): nil phAsset means neither.
+        let isVideo = item.phAsset?.mediaType == .video
         ShuffleCardRepresentable(
             image: image,
-            isLivePhoto: asset.mediaSubtypes.contains(.photoLive),
+            isLivePhoto: item.phAsset?.mediaSubtypes.contains(.photoLive) ?? false,
             compareCount: compareGroup?.assets.count,
             cardAspectRatio: cardAspectRatio,
             videoPlayer: isVideo ? videoController.player : nil,
@@ -761,7 +845,8 @@ private struct DeckCard: View {
             onDelete: onDelete,
             onKeep: onKeep,
             onDismiss: onDismiss,
-            onTranslationChange: { dragState.translation = $0 }
+            onTranslationChange: { dragState.translation = $0 },
+            isRemote: isRemote
         )
         .aspectRatio(cardAspectRatio, contentMode: .fit)
         // 8pt, not 20pt: the reference app runs its card almost edge to edge
@@ -803,6 +888,7 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
     let onKeep: () -> Void
     let onDismiss: () -> Void
     let onTranslationChange: (CGSize) -> Void
+    let isRemote: Bool
 
     func makeUIView(context: Context) -> PicnicSwipeCard {
         PicnicSwipeCard()
@@ -811,7 +897,8 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
     func updateUIView(_ card: PicnicSwipeCard, context: Context) {
         card.configure(
             image: image, isLivePhoto: isLivePhoto, compareCount: compareCount, videoPlayer: videoPlayer,
-            showsICloudBadge: showsICloudBadge, deleteBlocked: deleteBlocked
+            showsICloudBadge: showsICloudBadge, deleteBlocked: deleteBlocked,
+            isRemote: isRemote
         )
         card.onBlockedDelete = onBlockedDelete
         card.onCompare = onCompare

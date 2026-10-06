@@ -49,6 +49,9 @@ enum DeckSwipeMetrics {
 /// behind the card, so this sits underneath everything including the bars.
 struct DeckTintBackground: View {
     @ObservedObject var state: DeckDragState
+    /// Remote-album deck: the left wash is neutral, not red (a remote skip
+    /// deletes nothing), and the right wash takes the album accent.
+    var isRemote = false
 
     var body: some View {
         let p = state.progress
@@ -70,7 +73,10 @@ struct DeckTintBackground: View {
         .animation(.easeOut(duration: 0.15), value: p == 0)
     }
 
-    private var tint: Color { state.progress < 0 ? .red : .green }
+    private var tint: Color {
+        if isRemote { return state.progress < 0 ? RemoteDeckStyle.skipColor : RemoteDeckStyle.accent }
+        return state.progress < 0 ? .red : .green
+    }
 }
 
 /// "Archive" / "Keep" with their icon, revealed in the space the card vacates
@@ -78,6 +84,9 @@ struct DeckTintBackground: View {
 /// leading side as it leaves to the right.
 struct SwipeVerdictLabel: View {
     @ObservedObject var state: DeckDragState
+    /// Remote-album deck: "Keep & download" / "Skip" in the album's own
+    /// colors instead of the local "Keep" / "Archive".
+    var isRemote = false
 
     var body: some View {
         let p = state.progress
@@ -91,12 +100,30 @@ struct SwipeVerdictLabel: View {
 
     private var label: some View {
         VStack(spacing: 4) {
-            Image(systemName: state.progress > 0 ? "hand.thumbsup.fill" : "trash.fill")
+            Image(systemName: symbol)
                 .font(.system(size: 54, weight: .semibold))
-            Text(state.progress > 0 ? "Keep" : "Archive")
+            Text(text)
                 .font(.system(size: 52, weight: .heavy))
+                // "Keep & download" is far wider than "Keep"; shrink to fit
+                // the strip beside the card rather than wrapping or clipping.
+                .lineLimit(1)
+                .minimumScaleFactor(0.4)
         }
-        .foregroundStyle(state.progress > 0 ? Color.green : Color.red)
+        .foregroundStyle(color)
+    }
+
+    private var isKeep: Bool { state.progress > 0 }
+    private var symbol: String {
+        if isRemote { return isKeep ? RemoteDeckStyle.keepSymbol : RemoteDeckStyle.skipSymbol }
+        return isKeep ? "hand.thumbsup.fill" : "trash.fill"
+    }
+    private var text: String {
+        if isRemote { return isKeep ? RemoteDeckStyle.keepLabel : RemoteDeckStyle.skipLabel }
+        return isKeep ? "Keep" : "Archive"
+    }
+    private var color: Color {
+        if isRemote { return isKeep ? RemoteDeckStyle.accent : RemoteDeckStyle.skipColor }
+        return isKeep ? Color.green : Color.red
     }
 }
 

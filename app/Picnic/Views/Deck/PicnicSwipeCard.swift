@@ -127,6 +127,22 @@ final class PicnicSwipeCard: SwipeCard {
         return button
     }()
 
+    /// Accent frame for the remote-album deck (see RemoteDeckStyle). A real
+    /// subview of `dragView`, not a SwiftUI overlay, so it rides Shuffle's drag
+    /// transform with the photo. Hidden for local cards, which therefore look
+    /// exactly as before.
+    private let remoteBorderView: UIView = {
+        let view = UIView()
+        view.backgroundColor = .clear
+        view.layer.cornerRadius = RemoteDeckStyle.cardCornerRadius
+        view.layer.borderWidth = RemoteDeckStyle.cardBorderWidth
+        view.layer.borderColor = RemoteDeckStyle.accentUIColor.cgColor
+        // Must not eat touches: the long-press / pan live on the card.
+        view.isUserInteractionEnabled = false
+        view.isHidden = true
+        return view
+    }()
+
     /// While true a left drag cannot commit a delete; it springs back (see didCancelSwipe).
     private var deleteBlocked = false
     private var lastTranslation: CGSize = .zero
@@ -207,6 +223,7 @@ final class PicnicSwipeCard: SwipeCard {
         dragView.addSubview(liveBadge)
         dragView.addSubview(comparePill)
         dragView.addSubview(iCloudBadge)
+        dragView.addSubview(remoteBorderView)
         comparePill.accessibilityIdentifier = "deck.comparePill"
         comparePill.addTarget(self, action: #selector(handleCompareTap), for: .touchUpInside)
 
@@ -257,6 +274,7 @@ final class PicnicSwipeCard: SwipeCard {
         }
         imageView.frame = dragView.bounds
         videoLayerView.frame = dragView.bounds
+        remoteBorderView.frame = dragView.bounds
         liveBadge.frame = CGRect(x: 12, y: 12, width: 32, height: 32)
         let pillSize = comparePill.sizeThatFits(CGSize(width: dragView.bounds.width, height: 44))
         comparePill.frame = CGRect(
@@ -273,6 +291,8 @@ final class PicnicSwipeCard: SwipeCard {
         dragView.bringSubviewToFront(liveBadge)
         dragView.bringSubviewToFront(comparePill)
         dragView.bringSubviewToFront(iCloudBadge)
+        // Frame goes on top of everything so badges never cover it.
+        dragView.bringSubviewToFront(remoteBorderView)
     }
 
     /// Whether the poster is shown (test hook; see configure).
@@ -294,9 +314,11 @@ final class PicnicSwipeCard: SwipeCard {
 
     func configure(
         image: UIImage?, isLivePhoto: Bool, compareCount: Int?, videoPlayer: AVPlayer?,
-        showsICloudBadge: Bool = false, deleteBlocked: Bool = false
+        showsICloudBadge: Bool = false, deleteBlocked: Bool = false,
+        isRemote: Bool = false
     ) {
         imageView.image = image
+        remoteBorderView.isHidden = !isRemote
         iCloudBadge.isHidden = !showsICloudBadge
         self.deleteBlocked = deleteBlocked
         // Shuffle only commits a swipe in a listed direction; leaving .left out

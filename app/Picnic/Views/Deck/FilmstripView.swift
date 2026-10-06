@@ -2,10 +2,10 @@ import SwiftUI
 import Photos
 
 struct FilmstripView: View {
-    let assets: [PHAsset]
+    let items: [DeckItem]
     let currentIndex: Int
     let pendingDeleteIDs: Set<String>
-    let isKept: (PHAsset) -> Bool
+    let isKept: (DeckItem) -> Bool
     let onSelect: (Int) -> Void
 
     /// What the strip's scroll position has to follow: WHICH photo is
@@ -22,8 +22,8 @@ struct FilmstripView: View {
 
     private var scrollAnchor: ScrollAnchor {
         ScrollAnchor(
-            assetID: assets.indices.contains(currentIndex) ? assets[currentIndex].localIdentifier : nil,
-            count: assets.count
+            assetID: items.indices.contains(currentIndex) ? items[currentIndex].id : nil,
+            count: items.count
         )
     }
 
@@ -35,12 +35,12 @@ struct FilmstripView: View {
                 // fires every thumbnail fetch at once. On a real month of a few
                 // hundred photos that alone made swiping stutter.
                 LazyHStack(spacing: 6) {
-                    ForEach(Array(assets.enumerated()), id: \.element.localIdentifier) { index, asset in
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                         FilmstripThumbnail(
-                            asset: asset,
+                            item: item,
                             isCurrent: index == currentIndex,
-                            isPendingDelete: pendingDeleteIDs.contains(asset.localIdentifier),
-                            isKept: isKept(asset),
+                            isPendingDelete: pendingDeleteIDs.contains(item.id),
+                            isKept: isKept(item),
                             onTap: { onSelect(index) }
                         )
                         // NOT .id(index): SwiftUI already keys each cell's
@@ -58,7 +58,7 @@ struct FilmstripView: View {
                         // current below now looks up the id by asset
                         // identifier instead, so nothing needs the index
                         // as an id anymore.
-                        .id(asset.localIdentifier)
+                        .id(item.id)
                         .accessibilityIdentifier("filmstrip.thumb.\(index)")
                     }
                 }
@@ -82,8 +82,8 @@ struct FilmstripView: View {
                 // has changed yet. Scrolls by asset identifier, matching the
                 // .id() each cell now carries above — currentIndex is only
                 // used to look up which asset that is.
-                if assets.indices.contains(currentIndex) {
-                    proxy.scrollTo(assets[currentIndex].localIdentifier, anchor: .center)
+                if items.indices.contains(currentIndex) {
+                    proxy.scrollTo(items[currentIndex].id, anchor: .center)
                 }
             }
             // Keyed on the current asset's IDENTITY, not its numeric index,
@@ -139,7 +139,7 @@ struct FilmstripView: View {
 /// rebuilds of N views. Keeping the image here means a finished load repaints
 /// only the cell it belongs to.
 private struct FilmstripThumbnail: View {
-    let asset: PHAsset
+    let item: DeckItem
     let isCurrent: Bool
     let isPendingDelete: Bool
     let isKept: Bool
@@ -220,9 +220,17 @@ private struct FilmstripThumbnail: View {
         .onTapGesture { onTap() }
         .task {
             if image == nil {
-                image = await ThumbnailLoader.thumbnail(
-                    for: asset, targetSize: CGSize(width: 72, height: 72)
-                )
+                switch item {
+                case .local(let asset):
+                    image = await ThumbnailLoader.thumbnail(
+                        for: asset, targetSize: CGSize(width: 72, height: 72)
+                    )
+                case .remote(let remote):
+                    // Best-effort like the local branch's nil result: a cell
+                    // that fails to load just stays gray. The same URL is
+                    // fetched with errors surfaced when the card is current.
+                    image = try? await ThumbnailLoader.remoteImage(url: remote.thumbnailURL)
+                }
             }
         }
     }
