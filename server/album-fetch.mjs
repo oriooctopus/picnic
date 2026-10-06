@@ -23,10 +23,72 @@ function extFor(res) {
   return ext;
 }
 
+const PLACEHOLDER_MAX_BYTES = 2000;
+
+/**
+ * Pure: why a response must NOT be written to disk, or null if it is usable.
+ * Without the signed-in session cookies Google answers 403 with a ~1KB
+ * image/png placeholder (observed live: 1035 bytes), which looks like an image
+ * and would otherwise be saved as a "thumb". So an image content-type alone
+ * is not proof: the status must be 200 too, and a small non-200 body is
+ * called out as the placeholder.
+ */
+export function classifyResponse({ status, contentType, bytes }) {
+  const type = (contentType || '').split(';')[0].trim().toLowerCase();
+  if (status !== 200) {
+    const hint = bytes < PLACEHOLDER_MAX_BYTES ? ' (small body: likely the signed-out placeholder, session cookies missing?)' : '';
+    return `HTTP ${status}, ${type || 'no content-type'}, ${bytes} bytes${hint}`;
+  }
+  if (!type.startsWith('image/') && !type.startsWith('video/')) {
+    return `HTTP 200 but content-type ${JSON.stringify(type)} is not image/* or video/* (${bytes} bytes)`;
+  }
+  return null;
+}
+
+/**
+ * Pure adapter: a Playwright APIRequestContext (shares the signed-in Chrome
+ * cookies) -> a fetch-like fn returning the minimal Response shape the
+ * fetchers consume (ok, status, headers.get, arrayBuffer). failOnStatusCode
+ * stays false so a 403 reaches classifyResponse instead of throwing.
+ */
+export function requestContextFetch(requestContext) {
+  return async (url) => {
+    const r = await requestContext.get(url, { failOnStatusCode: false });
+    const headers = r.headers();
+    return {
+      ok: r.status() >= 200 && r.status() < 300,
+      status: r.status(),
+      headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+      arrayBuffer: async () => {
+        const b = await r.body();
+        return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+      },
+    };
+  };
+}
+
 async function fetchBytes(fetchFn, url) {
   const res = await fetchFn(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return { res, buf: Buffer.from(await res.arrayBuffer()) };
+  const buf = Buffer.from(await res.arrayBuffer());
+  const reason = classifyResponse({ status: res.status, contentType: res.headers.get('content-type'), bytes: buf.length });
+  if (reason) throw new Error(reason);
+  return { res, buf };
+}
+
+/**
+ * Connects to the signed-in Chrome over CDP and returns {fetchFn, close}.
+ * close() calls browser.close(), which for a connectOverCDP browser only
+ * closes Playwright's websocket (verified in playwright-core 1.62.1: the
+ * browserProcess.close for CDP is transport.closeAndWait(); the
+ * Browser.close CDP command is only sent for browsers Playwright launched).
+ */
+async function connectCdpFetch() {
+  const { chromium } = await import('playwright-core');
+  const { getGatewayIp } = await import('./lib/gateway.mjs');
+  const browser = await chromium.connectOverCDP(`http://${getGatewayIp()}:9251`);
+  const context = browser.contexts()[0];
+  if (!context) throw new Error('CDP browser has no context to take cookies from');
+  return { fetchFn: requestContextFetch(context.request), close: () => browser.close() };
 }
 
 export async function fetchThumbs(store, { fetchFn = fetch, paceMs = PACE_MS, log = console.log } = {}) {
@@ -71,12 +133,21 @@ export async function downloadKept(store, { fetchFn = fetch, paceMs = PACE_MS, l
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const [cmd, albumId] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  const useCdp = args.includes('--cdp');
+  const [cmd, albumId] = args.filter((a) => a !== '--cdp');
   if (!['thumbs', 'download'].includes(cmd) || !albumId) {
-    console.error('usage: node album-fetch.mjs thumbs|download <albumId>');
+    console.error('usage: node album-fetch.mjs thumbs|download <albumId> [--cdp]');
     process.exit(2);
   }
   const store = new AlbumStore(defaultAlbumsDir(), albumId);
-  const r = cmd === 'thumbs' ? await fetchThumbs(store) : await downloadKept(store);
+  const cdp = useCdp ? await connectCdpFetch() : null;
+  let r;
+  try {
+    const opts = cdp ? { fetchFn: cdp.fetchFn } : {};
+    r = cmd === 'thumbs' ? await fetchThumbs(store, opts) : await downloadKept(store, opts);
+  } finally {
+    await cdp?.close();
+  }
   process.exit(r.failed > 0 ? 1 : 0);
 }

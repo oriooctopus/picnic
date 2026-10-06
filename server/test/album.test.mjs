@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AlbumStore } from '../lib/album.mjs';
-import { fetchThumbs, downloadKept } from '../album-fetch.mjs';
+import { fetchThumbs, downloadKept, classifyResponse, requestContextFetch } from '../album-fetch.mjs';
 
 const dir = mkdtempSync(join(tmpdir(), 'picnic-album-test-'));
 const tokenPath = join(dir, 'token');
@@ -137,6 +137,53 @@ test('fetchThumbs: appends size suffix, idempotent, counts failures, no network'
   urls.length = 0;
   assert.deepEqual(await fetchThumbs(s, opts), { ok: 0, skipped: 1, failed: 1 });
   assert.deepEqual(urls, ['https://lh3.example/k2=w512-h512']);
+});
+
+// Fake Playwright APIResponse / APIRequestContext (lowercased header keys, like the real one).
+const fakeApiResponse = (status, contentType, body) => ({
+  status: () => status,
+  headers: () => ({ 'content-type': contentType }),
+  body: async () => Buffer.from(body),
+});
+
+test('requestContextFetch adapts an APIRequestContext to the fetch shape', async () => {
+  const seen = [];
+  const ctx = { get: async (url, opts) => (seen.push([url, opts]), fakeApiResponse(200, 'image/jpeg', 'abc')) };
+  const res = await requestContextFetch(ctx)('https://x/y=d');
+  assert.equal(res.ok, true);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('Content-Type'), 'image/jpeg');
+  assert.equal(Buffer.from(await res.arrayBuffer()).toString(), 'abc');
+  assert.deepEqual(seen, [['https://x/y=d', { failOnStatusCode: false }]]);
+  const bad = await requestContextFetch({ get: async () => fakeApiResponse(403, 'image/png', 'p') })('u');
+  assert.equal(bad.ok, false);
+  assert.equal(bad.status, 403);
+});
+
+test('classifyResponse flags placeholder 403, html 200, accepts image/video 200', () => {
+  assert.match(classifyResponse({ status: 403, contentType: 'image/png', bytes: 1035 }), /HTTP 403.*1035 bytes.*placeholder/);
+  assert.match(classifyResponse({ status: 200, contentType: 'text/html; charset=utf-8', bytes: 50000 }), /not image\/\* or video\/\*/);
+  assert.match(classifyResponse({ status: 403, contentType: 'text/html', bytes: 90000 }), /HTTP 403/);
+  assert.equal(classifyResponse({ status: 200, contentType: 'image/jpeg', bytes: 500 }), null);
+  assert.equal(classifyResponse({ status: 200, contentType: 'video/mp4', bytes: 9e6 }), null);
+});
+
+test('fetchThumbs via adapter never writes placeholder or html bodies', async () => {
+  const s = freshStore();
+  s.ingestItems([A('k1'), A('k2'), A('k3')]);
+  const resp = {
+    k1: fakeApiResponse(403, 'image/png', 'x'.repeat(1035)),
+    k2: fakeApiResponse(200, 'text/html', '<html>'),
+    k3: fakeApiResponse(200, 'image/jpeg', 'good'),
+  };
+  const ctx = { get: async (u) => resp[u.split('/').pop().split('=')[0]] };
+  const logs = [];
+  const r = await fetchThumbs(s, { fetchFn: requestContextFetch(ctx), paceMs: 0, log: (m) => logs.push(m) });
+  assert.deepEqual(r, { ok: 1, skipped: 0, failed: 2 });
+  assert.equal(s.hasThumb('k1'), false);
+  assert.equal(s.hasThumb('k2'), false);
+  assert.equal(s.hasThumb('k3'), true);
+  assert.ok(logs.some((l) => /thumb FAILED k1: HTTP 403.*placeholder/.test(l)));
 });
 
 test('fetchThumbs paces requests', async () => {
