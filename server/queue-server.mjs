@@ -8,6 +8,7 @@ import { JobQueue, STATUSES } from './lib/queue.mjs';
 import { loadToken, checkBearerAuth, tokensMatch } from './lib/auth.mjs';
 import { createAutoDrain, createCdpProbe, createWorkerSpawn, isAutoDrainEnabled } from './lib/autodrain.mjs';
 import { ReconcileStore, sectionForCameraModel } from './lib/reconcile.mjs';
+import { AlbumStore, ID_RE, defaultAlbumsDir } from './lib/album.mjs';
 
 // NOTE: SPEC.md / task instructions said 8306, but ~/.claude/rules/ports.md
 // already has 8306 assigned to another local service (verified live and
@@ -34,6 +35,9 @@ const queue = new JobQueue(QUEUE_PATH);
 // POST /queue with a thumbnail never races a lazy mkdir.
 if (!existsSync(THUMBS_DIR)) mkdirSync(THUMBS_DIR, { recursive: true });
 const reconcile = new ReconcileStore(RECONCILE_DIR);
+
+// Remote album triage (lib/album.mjs). Resolved per request so tests can set PICNIC_ALBUMS_DIR late.
+const albumStore = (albumId) => new AlbumStore(defaultAlbumsDir(), albumId);
 
 function thumbPath(id) {
   return join(THUMBS_DIR, `${id}.jpg`);
@@ -488,6 +492,56 @@ export function createApp({
           .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         return res.end(renderIssuesPage(jobs, token));
+      }
+
+      // ----- Remote album triage routes -------------------------------------
+      // albumId / mediaKey are validated against ID_RE before any path join.
+      const albumMatch = /^\/album\/([^/]+)(?:\/(items|thumb|decision|download-status)(?:\/([^/]+))?)?$/.exec(url.pathname);
+      if (albumMatch) {
+        const [, albumId, sub, mediaKey] = albumMatch;
+        if (!ID_RE.test(albumId)) return send(res, 404, { error: 'no such album' });
+        if (req.method === 'GET' && sub === 'thumb' && mediaKey) {
+          if (!requireAuthQueryOrHeader(req, res, url)) return;
+          if (!ID_RE.test(mediaKey)) return send(res, 404, { error: 'no thumbnail for that mediaKey' });
+          const store = albumStore(albumId);
+          if (!store.hasThumb(mediaKey)) return send(res, 404, { error: 'no thumbnail for that mediaKey' });
+          res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+          return res.end(readFileSync(store.thumbPath(mediaKey)));
+        }
+        if (req.method === 'POST' && sub === 'items' && !mediaKey) {
+          if (!requireAuth(req, res)) return;
+          const body = await readJsonBody(req);
+          if (!Array.isArray(body.items)) return send(res, 400, { error: 'items must be an array' });
+          try {
+            return send(res, 200, albumStore(albumId).ingestItems(body.items));
+          } catch (e) {
+            return send(res, 400, { error: e.message });
+          }
+        }
+        if (req.method === 'POST' && sub === 'decision' && !mediaKey) {
+          if (!requireAuth(req, res)) return;
+          const body = await readJsonBody(req);
+          if (typeof body.mediaKey !== 'string' || !ID_RE.test(body.mediaKey)) {
+            return send(res, 400, { error: 'mediaKey must match [A-Za-z0-9_-]+' });
+          }
+          try {
+            const store = albumStore(albumId);
+            store.setDecision(body.mediaKey, body.decision);
+            return send(res, 200, { ok: true, counts: store.counts() });
+          } catch (e) {
+            return send(res, 400, { error: e.message });
+          }
+        }
+        if (req.method === 'GET' && sub === 'download-status' && !mediaKey) {
+          if (!requireAuth(req, res)) return;
+          const c = albumStore(albumId).counts();
+          return send(res, 200, { kept: c.keep, downloaded: c.downloaded, pending: Math.max(0, c.keep - c.downloaded), counts: c });
+        }
+        if (req.method === 'GET' && !sub) {
+          if (!requireAuth(req, res)) return;
+          const store = albumStore(albumId);
+          return send(res, 200, { counts: store.counts(), items: store.listItems() });
+        }
       }
 
       // ----- Reconcile ("Clean up Google") routes -------------------------
