@@ -79,6 +79,11 @@ OPTIONAL = [
     "99-final-test19DeckSwipeDownFromTopExits",
     "99-final-test20CompareButtonsReachableWithMismatchedAspect",
     "60-outfit-before-tap", "61-outfit-after-tap", "62-outfit-after-relaunch",
+    # Remote album deck (testRemoteAlbumDeck). Without these names the extractor
+    # keeps nothing from an only_testing run of that test and fails the job even
+    # though the test passed (seen on run 37489993858).
+    "70-remote-deck-first-card", "71-remote-deck-after-keep", "72-remote-deck-after-skip",
+    "99-final-testRemoteAlbumDeck",
 ]
 
 EXPECTED = REQUIRED + OPTIONAL
