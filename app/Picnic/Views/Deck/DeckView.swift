@@ -182,6 +182,13 @@ struct DeckView: View {
         // needing the HUD itself shown.
         .overlay(alignment: .topLeading) { PerfStatsProbe() }
         .overlay(alignment: .top) { toastView }
+        // Warm the whole month's thumbnails in the background, starting at
+        // the card the user is on and wrapping around, once per deck open.
+        .task(id: viewModel.month.key) {
+            let assets = viewModel.visibleAssets
+            let start = min(viewModel.currentIndex, assets.count)
+            await ThumbnailLoader.warmCache(for: Array(assets[start...] + assets[..<start]))
+        }
         .task(id: "\(viewModel.currentAsset?.localIdentifier ?? "")#\(videoRetryNonce)") {
             await loadCurrentImage()
         }

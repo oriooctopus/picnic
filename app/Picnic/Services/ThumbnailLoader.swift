@@ -263,6 +263,27 @@ enum ThumbnailLoader {
         return best
     }
 
+    /// Background warm-up for a month: pulls a small version of every asset
+    /// from iCloud into PhotoKit's on-disk cache so swiping never waits on a
+    /// network round trip. Runs at utility priority, two fetches at a time
+    /// (a wider fan-out competes with the card the user is actually
+    /// loading), and stops as soon as the calling task is cancelled.
+    /// Results are discarded; the point is PhotoKit keeping the downloaded
+    /// derivative, which the later full-size request then upgrades from.
+    static func warmCache(for assets: [PHAsset], targetSize: CGSize = CGSize(width: 400, height: 533)) async {
+        await withTaskGroup(of: Void.self) { group in
+            var iterator = assets.makeIterator()
+            func addNext() {
+                guard !Task.isCancelled, let asset = iterator.next() else { return }
+                group.addTask(priority: .utility) {
+                    _ = await thumbnail(for: asset, targetSize: targetSize)
+                }
+            }
+            addNext(); addNext()
+            while await group.next() != nil { addNext() }
+        }
+    }
+
     static func fullImage(for asset: PHAsset, targetSize: CGSize) async -> UIImage? {
         #if DEBUG
         if slowImageLoadsEnabled {
