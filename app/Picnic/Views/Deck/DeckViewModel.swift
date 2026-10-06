@@ -101,7 +101,7 @@ final class DeckViewModel: ObservableObject {
     /// Videos are left alone offline (big iCloud downloads that can't
     /// complete), so natural advancement and "mark sorted up to here" bypass
     /// them. A closure rather than a direct singleton read so tests can pin it.
-    var isOffline: () -> Bool = { false }
+    var isOffline: () -> Bool = { !Connectivity.shared.isOnline }
 
     private func isVideo(_ item: DeckItem) -> Bool {
         // Remote items have no phAsset and are never videos.
