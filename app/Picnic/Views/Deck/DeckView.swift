@@ -38,6 +38,8 @@ struct DeckView: View {
     @State private var videoController = VideoPlaybackController()
     /// Bumped by the video card's "tap to retry"; part of the load task's id so it re-runs.
     @State private var videoRetryNonce = 0
+    /// Plain @State, same reasoning as dragState: holds the object without subscribing.
+    @State private var prefetcher = DeckPrefetcher()
     /// Long-press the month title to reveal the frame-rate readout. Hidden by
     /// default so it never intrudes on normal use, but present in the ad-hoc
     /// build because the phone is the only place the stutter reproduces.
@@ -218,6 +220,12 @@ struct DeckView: View {
             let start = min(viewModel.currentIndex, items.count)
             await ThumbnailLoader.warmCache(for: Array(items[start...] + items[..<start]))
         }
+        // Pull the 15 photos either side of the current card down from iCloud
+        // so swiping to them doesn't wait on the network. Id includes the
+        // count because a remote deck fills in after open.
+        .task(id: "\(viewModel.currentIndex)#\(viewModel.visibleItems.count)") {
+            prefetcher.recenter(items: viewModel.visibleItems, currentIndex: viewModel.currentIndex)
+        }
         // Remote deck: fetch the album (and its server-side decisions) once
         // on open. Local decks have nothing to load. A failure lands in
         // viewModel.remoteError and shows in the alert below; there is no
@@ -236,7 +244,10 @@ struct DeckView: View {
         // Frees the shared AVPlayer's current item when the deck itself
         // goes away — the other half of "no leaked AVPlayer" alongside
         // loadCurrentImage()'s per-card clear()/load() below.
-        .onDisappear { videoController.clear() }
+        .onDisappear {
+            videoController.clear()
+            prefetcher.cancelAll()
+        }
         // A modal covering the deck (Compare / a long-pressed live photo)
         // shouldn't leave a video still playing (and audible) underneath
         // it.
