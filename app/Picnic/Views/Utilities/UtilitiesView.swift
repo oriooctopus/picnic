@@ -29,6 +29,10 @@ struct UtilitiesView: View {
             LazyVStack(alignment: .leading, spacing: 24) {
                 header
 
+                // Top of the screen, not after the grids: at the bottom it sat behind
+                // the floating tab-bar pill on a 6.7" phone and read as missing.
+                remoteAlbumRow
+
                 Text("Recents").font(.title3.bold()).foregroundStyle(.white).padding(.horizontal)
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                     ForEach(recentsKinds) { kind in
@@ -46,8 +50,6 @@ struct UtilitiesView: View {
                     }
                 }
                 .padding(.horizontal)
-
-                remoteAlbumRow
             }
         }
         // Matches MyLifeView's clearance for the floating tab-bar pill
