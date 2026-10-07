@@ -520,7 +520,7 @@ export function createApp({
 
       // ----- Remote album triage routes -------------------------------------
       // albumId / mediaKey are validated against ID_RE before any path join.
-      const albumMatch = /^\/album\/([^/]+)(?:\/(items|thumb|video|decision|trim|download-status)(?:\/([^/]+))?)?$/.exec(url.pathname);
+      const albumMatch = /^\/album\/([^/]+)(?:\/(items|thumb|display|video|decision|trim|download-status)(?:\/([^/]+))?)?$/.exec(url.pathname);
       if (albumMatch) {
         const [, albumId, sub, mediaKey] = albumMatch;
         if (!ID_RE.test(albumId)) return send(res, 404, { error: 'no such album' });
@@ -531,6 +531,14 @@ export function createApp({
           if (!store.hasThumb(mediaKey)) return send(res, 404, { error: 'no thumbnail for that mediaKey' });
           res.writeHead(200, { 'Content-Type': 'image/jpeg' });
           return res.end(readFileSync(store.thumbPath(mediaKey)));
+        }
+        if (req.method === 'GET' && sub === 'display' && mediaKey) {
+          if (!requireAuthQueryOrHeader(req, res, url)) return;
+          if (!ID_RE.test(mediaKey)) return send(res, 404, { error: 'no display image for that mediaKey' });
+          const store = albumStore(albumId);
+          if (!store.hasDisplay(mediaKey)) return send(res, 404, { error: 'no display image for that mediaKey' });
+          res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+          return res.end(readFileSync(store.displayPath(mediaKey)));
         }
         if (req.method === 'GET' && sub === 'video' && mediaKey) {
           if (!requireAuthQueryOrHeader(req, res, url)) return;

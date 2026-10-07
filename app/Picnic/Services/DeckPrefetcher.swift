@@ -9,10 +9,24 @@ import UIKit
 /// hundreds of MB, and the download into PhotoKit's store is the whole point.
 /// Same targetSize/contentMode as `ThumbnailLoader.imageUpdates` so the cached
 /// derivative is the one the card asks for.
+///
+/// Remote-album photo cards use the SAME window and the same recenter /
+/// cancel-out-of-window / refill loop, but the unit of work is "download the
+/// server's card-size JPEG into RemoteDisplayCache's disk cache" (encoded
+/// bytes, no decode, so the 31-card window costs ~15 MB of disk, not
+/// hundreds of MB of RAM). Remote videos are deliberately not prefetched:
+/// one shared player streams the current video only.
 @MainActor
 final class DeckPrefetcher {
     static let radius = 15
     static let maxInFlight = 2
+    /// Remote downloads are small HTTP GETs from the tailnet box, not iCloud
+    /// pulls, so a few in parallel is fine. A guess, not a measurement.
+    static let remoteMaxInFlight = 3
+
+    /// Downloads one display image into the disk cache. Injectable so a unit
+    /// test can observe requests and cancellation without a network.
+    typealias RemoteFetch = @Sendable (URL) async throws -> Void
 
     /// Indices to prefetch around `current`: the next `radius` cards first
     /// (the user is swiping forward), then the previous `radius`, clamped to
@@ -23,12 +37,32 @@ final class DeckPrefetcher {
         return (steps.map { current + $0 } + steps.map { current - $0 }).filter { (0..<count).contains($0) }
     }
 
+    private let remoteFetch: RemoteFetch
+    private var remoteInFlight: [URL: Task<Void, Never>] = [:]
+    private var remoteDone: Set<URL> = []
+
+    init(remoteFetch: @escaping RemoteFetch = { try await RemoteDisplayCache.prefetch($0) }) {
+        self.remoteFetch = remoteFetch
+    }
+
+    /// Display URLs to prefetch around `currentIndex`, in `window` order
+    /// (forward first). Remote photos that have a display image only: videos
+    /// are not prefetched, and an item with no display rendition yet has
+    /// nothing to fetch.
+    nonisolated static func remoteWanted(items: [DeckItem], currentIndex: Int) -> [URL] {
+        window(count: items.count, current: currentIndex).compactMap { i in
+            guard let remote = items[i].remoteItem, !remote.isVideo else { return nil }
+            return remote.displayURL
+        }
+    }
+
     private var inFlight: [String: PHImageRequestID] = [:]
     private var done: Set<String> = []
 
     func recenter(items: [DeckItem], currentIndex: Int) {
         lastItems = items
         lastIndex = currentIndex
+        recenterRemote(items: items, currentIndex: currentIndex)
         #if DEBUG
         if ThumbnailLoader.simulatedUpdates() != nil { return }
         #endif
@@ -51,9 +85,44 @@ final class DeckPrefetcher {
         }
     }
 
+    /// Remote half of `recenter`: cancel downloads that left the window (ones
+    /// still inside keep running so fast swiping doesn't thrash), then start
+    /// wanted ones up to the in-flight cap.
+    private func recenterRemote(items: [DeckItem], currentIndex: Int) {
+        let wanted = Self.remoteWanted(items: items, currentIndex: currentIndex)
+        let wantedSet = Set(wanted)
+        for (url, task) in remoteInFlight where !wantedSet.contains(url) {
+            task.cancel()
+            remoteInFlight[url] = nil
+        }
+        for url in wanted {
+            if remoteInFlight.count >= Self.remoteMaxInFlight { break }
+            if remoteDone.contains(url) || remoteInFlight[url] != nil { continue }
+            startRemote(url)
+        }
+    }
+
+    private func startRemote(_ url: URL) {
+        remoteInFlight[url] = Task { [weak self, remoteFetch] in
+            // Failure is deliberately swallowed here: see the done-marking below.
+            try? await remoteFetch(url)
+            // A cancelled task must not touch state: a newer task for the same
+            // URL may already own the slot.
+            if Task.isCancelled { return }
+            guard let self, self.remoteInFlight[url] != nil else { return }
+            self.remoteInFlight[url] = nil
+            // A failed prefetch is marked done too (no retry loop); the card
+            // fetches the same URL itself and surfaces the error if it is real.
+            self.remoteDone.insert(url)
+            self.refill()
+        }
+    }
+
     func cancelAll() {
         for requestID in inFlight.values { PHImageManager.default().cancelImageRequest(requestID) }
         inFlight.removeAll()
+        for task in remoteInFlight.values { task.cancel() }
+        remoteInFlight.removeAll()
     }
 
     private func start(_ asset: PHAsset) {

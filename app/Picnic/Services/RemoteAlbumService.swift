@@ -49,10 +49,16 @@ struct RemoteAlbumItem: Equatable, Identifiable {
     /// server applies it only at download time, the app uses it to loop the
     /// preview and to reopen the trim bar on the saved range.
     let trim: RemoteTrim?
+    /// Card-size (<=2048px) rendition on the server; nil while the server has
+    /// not cached it yet (`hasDisplay` false). The card shows `thumbnailURL`
+    /// (512px, soft on a phone) until this exists, then this. A real
+    /// "not cached yet" state, like local low-res-then-high-res loading.
+    let displayURL: URL?
 
     init(albumId: String, mediaKey: String, captureMs: Int64, width: Int, height: Int,
          decision: RemoteDecision?, thumbnailURL: URL,
-         kind: RemoteMediaKind = .photo, videoURL: URL? = nil, trim: RemoteTrim? = nil) {
+         kind: RemoteMediaKind = .photo, videoURL: URL? = nil, trim: RemoteTrim? = nil,
+         displayURL: URL? = nil) {
         self.albumId = albumId
         self.mediaKey = mediaKey
         self.captureMs = captureMs
@@ -63,6 +69,7 @@ struct RemoteAlbumItem: Equatable, Identifiable {
         self.kind = kind
         self.videoURL = videoURL
         self.trim = trim
+        self.displayURL = displayURL
     }
 
     var isVideo: Bool { kind == .video }
@@ -115,6 +122,11 @@ struct HTTPRemoteAlbumClient: RemoteAlbumClient {
         let kind: RemoteMediaKind
         let hasVideo: Bool
         let trim: RemoteTrim?
+        /// Optional only because the app (OTA) and the server deploy
+        /// separately: a server from before the display rendition omits the
+        /// key, and that must read as "no display yet", not fail the whole
+        /// listing decode.
+        let hasDisplay: Bool?
     }
     private struct WireAlbum: Decodable {
         let counts: RemoteAlbumCounts
@@ -130,6 +142,10 @@ struct HTTPRemoteAlbumClient: RemoteAlbumClient {
 
     static func thumbnailURL(albumId: String, mediaKey: String) -> URL {
         Config.reconcileURL(for: "/album/\(albumId)/thumb/\(mediaKey)?token=\(MirrorToken.value)")
+    }
+
+    static func displayURL(albumId: String, mediaKey: String) -> URL {
+        Config.reconcileURL(for: "/album/\(albumId)/display/\(mediaKey)?token=\(MirrorToken.value)")
     }
 
     static func videoURL(albumId: String, mediaKey: String) -> URL {
@@ -161,7 +177,8 @@ struct HTTPRemoteAlbumClient: RemoteAlbumClient {
                     thumbnailURL: thumbnailURL(albumId: albumId, mediaKey: item.mediaKey),
                     kind: item.kind,
                     videoURL: item.hasVideo ? videoURL(albumId: albumId, mediaKey: item.mediaKey) : nil,
-                    trim: item.trim
+                    trim: item.trim,
+                    displayURL: item.hasDisplay == true ? displayURL(albumId: albumId, mediaKey: item.mediaKey) : nil
                 )
             }
         return RemoteAlbumSnapshot(counts: wire.counts, items: items)

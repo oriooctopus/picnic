@@ -3022,6 +3022,76 @@ final class WalkthroughUITests: XCTestCase {
         capture("72-remote-deck-after-skip")
     }
 
+    // MARK: Remote album display resolution
+
+    /// Standard deviation (0...255) of the grey levels in the same central
+    /// region `centerMeanRGB` reads. A flat-colour thumb is low; the fixture
+    /// display image is a black/white checkerboard, so it is near the maximum
+    /// (~127). Pixels, not frames: this is "what is really drawn".
+    private func centerLuminanceStdDev(_ screenshot: XCUIScreenshot) -> Double {
+        guard let cg = screenshot.image.cgImage else {
+            XCTFail("screenshot has no CGImage")
+            return 0
+        }
+        let w = Double(cg.width), h = Double(cg.height)
+        guard let crop = cg.cropping(to: CGRect(x: w * 0.35, y: h * 0.40, width: w * 0.30, height: h * 0.12)) else {
+            XCTFail("crop failed")
+            return 0
+        }
+        let cw = crop.width, ch = crop.height
+        var px = [UInt8](repeating: 0, count: cw * ch)
+        px.withUnsafeMutableBytes { raw in
+            let ctx = CGContext(
+                data: raw.baseAddress, width: cw, height: ch, bitsPerComponent: 8, bytesPerRow: cw,
+                space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+            )!
+            ctx.draw(crop, in: CGRect(x: 0, y: 0, width: cw, height: ch))
+        }
+        let mean = px.reduce(0.0) { $0 + Double($1) } / Double(px.count)
+        let variance = px.reduce(0.0) { $0 + (Double($1) - mean) * (Double($1) - mean) } / Double(px.count)
+        return variance.squareRoot()
+    }
+
+    /// The remote card must draw the server's card-size rendition, not the
+    /// 512px thumb (the user's "photos are really low resolution"). Fixture
+    /// item 0 has a 1800x2400 checkerboard display image behind a flat-colour
+    /// thumb, so a card that is still the thumb has almost no pixel variance;
+    /// one drawn from the display image has the checkerboard's. Fixture item 3
+    /// has no display image yet and must keep showing its flat thumb.
+    func testRemoteAlbumCardRendersAtDisplayResolution() throws {
+        relaunch(withExtraArguments: ["--seed-remote-album", "--reset-sort-state"])
+        let deckCard = openRemoteAlbumDeckFromUtilities()
+        let counter = app.descendants(matching: .any)["deck.remoteCounter"].firstMatch
+        XCTAssertTrue(counter.waitForExistence(timeout: 15))
+
+        // The thumb paints first and the display image swaps in a moment later
+        // (low-to-high resolution), so poll rather than read once.
+        var sharp = 0.0
+        for _ in 0..<30 {
+            sharp = centerLuminanceStdDev(app.screenshot())
+            if sharp > 100 { break }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        capture("83-remote-card-display-resolution")
+        XCTAssertGreaterThan(sharp, 100, "card 1 must be drawn from the display image (checkerboard), got stddev \(sharp)")
+
+        // Keep three cards to reach fixture item 3, which has no display image.
+        for kept in 1...3 {
+            deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+                .press(forDuration: 0.1,
+                       thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                       withVelocity: .default,
+                       thenHoldForDuration: 0.1)
+            let reached = NSPredicate(format: "label == %@", "\(kept) kept · \(12 - kept) left")
+            expectation(for: reached, evaluatedWith: counter)
+            waitForExpectations(timeout: 10)
+        }
+        Thread.sleep(forTimeInterval: 1.5)  // let any (wrongly) pending swap land before reading
+        let flat = centerLuminanceStdDev(app.screenshot())
+        capture("84-remote-card-no-display-keeps-thumb")
+        XCTAssertLessThan(flat, 60, "a card with no display image must keep its flat thumb, got stddev \(flat)")
+    }
+
     // MARK: Remote album video + resume
 
     /// Utilities tab -> "Oliver! album" row -> remote deck. Shared by the

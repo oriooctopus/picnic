@@ -3,6 +3,7 @@
  *   <root>/<albumId>/items.json      [{mediaKey, thumbUrl, width, height, captureMs}]
  *   <root>/<albumId>/decisions.json  {mediaKey: 'keep'|'skip'}
  *   <root>/<albumId>/thumbs/<mediaKey>.jpg
+ *   <root>/<albumId>/display/<mediaKey>.jpg  (=w2048-h2048 card-size rendition; thumbs stay 512px for the filmstrip)
  *   <root>/<albumId>/full/<mediaKey>.<ext>
  *   <root>/<albumId>/video/<mediaKey>.mp4   (playable rendition of kind=video items)
  *   <root>/<albumId>/trims.json      {mediaKey: {startSec, endSec}}  (kept-video cut range, applied at download)
@@ -53,6 +54,7 @@ export class AlbumStore {
     mkdirSync(join(this.dir, 'thumbs'), { recursive: true });
     mkdirSync(join(this.dir, 'full'), { recursive: true });
     mkdirSync(join(this.dir, 'video'), { recursive: true });
+    mkdirSync(join(this.dir, 'display'), { recursive: true });
   }
 
   #read(name, fallback) {
@@ -156,6 +158,18 @@ export class AlbumStore {
     writeFileSync(this.thumbPath(mediaKey), buf);
   }
 
+  displayPath(mediaKey) {
+    return join(this.dir, 'display', `${assertId('mediaKey', mediaKey)}.jpg`);
+  }
+
+  hasDisplay(mediaKey) {
+    return existsSync(this.displayPath(mediaKey));
+  }
+
+  writeDisplay(mediaKey, buf) {
+    writeFileSync(this.displayPath(mediaKey), buf);
+  }
+
   /** Path of the downloaded full-res file for mediaKey, or null. */
   fullPath(mediaKey) {
     assertId('mediaKey', mediaKey);
@@ -180,6 +194,9 @@ export class AlbumStore {
       hasVideo: i.kind === 'video' && this.hasVideo(i.mediaKey),
       decision: decisions[i.mediaKey] ?? null,
       hasThumb: this.hasThumb(i.mediaKey),
+      // A real "not cached yet" state: the app shows the 512px thumb until the
+      // display rendition exists, then swaps it in.
+      hasDisplay: this.hasDisplay(i.mediaKey),
       downloaded: this.fullPath(i.mediaKey) !== null,
     }));
   }

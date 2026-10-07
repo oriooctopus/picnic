@@ -2,6 +2,8 @@
 /**
  * Album triage fetcher.
  *   node album-fetch.mjs thumbs <albumId>    fetch <thumbUrl>=w512-h512 for each item
+ *   node album-fetch.mjs display <albumId>   fetch <thumbUrl>=w2048-h2048 (card-size rendition, aspect kept, never
+ *                                            upscaled) for EVERY item incl. videos, so a video poster is sharp too
  *   node album-fetch.mjs videos <albumId>    fetch a playable mp4 (=m37, else =m18) for each kind=video item
  *   node album-fetch.mjs kinds <albumId> <kinds.json>  merge {mediaKey: Photo|Video|Animation} into items.json
  *   node album-fetch.mjs download <albumId>  fetch <thumbUrl>=d for each KEPT item; a kept video with a
@@ -119,6 +121,38 @@ export async function fetchThumbs(store, { fetchFn = fetch, paceMs = PACE_MS, lo
   return { ok, skipped, failed };
 }
 
+/** Longest edge of the display rendition. Google returns <= this box with aspect kept; 2048 is ~1.6x a 1284px-wide phone. */
+export const DISPLAY_BOX = 2048;
+
+/**
+ * Card-size rendition per item (photos AND videos: a video card shows this as
+ * its poster). Same pacing / skip-cached / classifyResponse pattern as thumbs;
+ * the 512px thumb stays for the filmstrip and as the instant first paint.
+ */
+export async function fetchDisplays(store, { fetchFn = fetch, paceMs = PACE_MS, log = console.log } = {}) {
+  let ok = 0, skipped = 0, failed = 0, requests = 0;
+  for (const item of store.loadItems()) {
+    if (store.hasDisplay(item.mediaKey)) { skipped += 1; continue; }
+    if (requests++ > 0) await sleep(paceMs);
+    try {
+      const { res, buf } = await fetchBytes(fetchFn, `${item.thumbUrl}=w${DISPLAY_BOX}-h${DISPLAY_BOX}`);
+      // The store and the route name this file .jpg and serve image/jpeg, so a
+      // non-JPEG body (a png/webp/gif of an Animation item, say) must not be
+      // written under that name.
+      const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+      if (type !== 'image/jpeg') throw new Error(`content-type ${JSON.stringify(type)} is not image/jpeg`);
+      store.writeDisplay(item.mediaKey, buf);
+      ok += 1;
+      log(`display ok ${item.mediaKey} (${buf.length} bytes)`);
+    } catch (e) {
+      failed += 1;
+      log(`display FAILED ${item.mediaKey}: ${e.message}`);
+    }
+  }
+  log(`display: ok ${ok}, skipped ${skipped}, failed ${failed}`);
+  return { ok, skipped, failed };
+}
+
 /**
  * Playable video rendition per kind=video item: `=m37` (1080p) first, `=m18`
  * (360p) when m37 is not a usable 200. Stored at video/<mediaKey>.mp4.
@@ -220,8 +254,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
   const useCdp = args.includes('--cdp');
   const [cmd, albumId, extra] = args.filter((a) => a !== '--cdp');
-  if (!['thumbs', 'download', 'videos', 'kinds'].includes(cmd) || !albumId || (cmd === 'kinds') !== (extra !== undefined)) {
-    console.error('usage: node album-fetch.mjs thumbs|download|videos <albumId> [--cdp]\n       node album-fetch.mjs kinds <albumId> <kinds.json>');
+  if (!['thumbs', 'display', 'download', 'videos', 'kinds'].includes(cmd) || !albumId || (cmd === 'kinds') !== (extra !== undefined)) {
+    console.error('usage: node album-fetch.mjs thumbs|display|download|videos <albumId> [--cdp]\n       node album-fetch.mjs kinds <albumId> <kinds.json>');
     process.exit(2);
   }
   const store = new AlbumStore(defaultAlbumsDir(), albumId);
@@ -234,7 +268,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   let r;
   try {
     const opts = cdp ? { fetchFn: cdp.fetchFn } : {};
-    r = cmd === 'thumbs' ? await fetchThumbs(store, opts) : cmd === 'videos' ? await fetchVideos(store, opts) : await downloadKept(store, opts);
+    r = cmd === 'thumbs' ? await fetchThumbs(store, opts) : cmd === 'display' ? await fetchDisplays(store, opts) : cmd === 'videos' ? await fetchVideos(store, opts) : await downloadKept(store, opts);
   } finally {
     await cdp?.close();
   }

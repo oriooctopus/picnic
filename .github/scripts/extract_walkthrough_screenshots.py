@@ -88,6 +88,7 @@ OPTIONAL = [
     "77-remote-video-loading", "78-remote-video-after-loading",
     "79-remote-trim-open", "80-remote-trim-dragged", "81-remote-trim-reopened",
     "82-remote-trim-reopened-after-reopen-deck",
+    "83-remote-card-display-resolution", "84-remote-card-no-display-keeps-thumb",
     "99-final-testRemoteAlbumDeck",
 ]
 

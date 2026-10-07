@@ -97,6 +97,42 @@ enum RemoteAlbumFixtures {
         URL(string: "\(thumbnailScheme)://\(mediaKey)")!
     }
 
+    /// Scheme for fixture display images; RemoteDisplayCache builds these from
+    /// `displayImage(for:)` instead of URLSession (it still writes the bytes
+    /// to its disk cache, so the real cache path runs).
+    static let displayScheme = "fixturedisplay"
+
+    /// Item 3 has no display rendition: the "server has not cached it yet"
+    /// state, which must keep showing the flat thumb.
+    static let noDisplayIndex = 3
+
+    static func displayURL(mediaKey: String) -> URL {
+        URL(string: "\(displayScheme)://\(mediaKey)")!
+    }
+
+    /// 1800x2400 (3x the 600x800 thumb) black/white checkerboard. The thumb is
+    /// a flat colour, so "the card is drawn from the display image" is a plain
+    /// pixel fact: the card's centre has large luminance variance, a flat thumb
+    /// has none. The 80px cells stay ~17pt wide after the card scales it down,
+    /// so the pattern survives downscaling (a 1px pattern would average to
+    /// grey and prove nothing).
+    static func displayImage(for url: URL) -> UIImage {
+        let size = CGSize(width: 1800, height: 2400)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1  // exactly 1800x2400 pixels regardless of device scale
+        return UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            UIColor.black.setFill()
+            let cell: CGFloat = 80
+            for row in 0..<Int(size.height / cell) {
+                for col in 0..<Int(size.width / cell) where (row + col) % 2 == 0 {
+                    ctx.fill(CGRect(x: CGFloat(col) * cell, y: CGFloat(row) * cell, width: cell, height: cell))
+                }
+            }
+        }
+    }
+
     /// Draws a labelled solid-color 600x800 card so each fixture is visually
     /// distinct and its number is readable in a screenshot.
     static func image(for url: URL) -> UIImage {
@@ -148,7 +184,8 @@ final class FixtureRemoteAlbumClient: RemoteAlbumClient {
                 thumbnailURL: RemoteAlbumFixtures.thumbnailURL(mediaKey: key),
                 kind: isVideo ? .video : .photo,
                 videoURL: i == 0 ? videoURL : nil,
-                trim: trims[key]
+                trim: trims[key],
+                displayURL: i == RemoteAlbumFixtures.noDisplayIndex ? nil : RemoteAlbumFixtures.displayURL(mediaKey: key)
             )
         }
     }

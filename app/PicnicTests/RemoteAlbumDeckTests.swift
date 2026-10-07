@@ -206,6 +206,23 @@ final class RemoteAlbumDeckTests: XCTestCase {
         XCTAssertEqual(items.map { DeckItem.remote($0).isVideo }, [false, true, true])
     }
 
+    func testWireHasDisplayDecodesToDisplayURLAndMissingKeyMeansNone() throws {
+        let json = """
+        {"counts":{"total":3,"keep":0,"skip":0,"undecided":3,"downloaded":0},
+         "items":[
+          {"mediaKey":"a","thumbUrl":"https://x/a","width":1,"height":1,"captureMs":1,"decision":null,"kind":"photo","hasVideo":false,"hasDisplay":true},
+          {"mediaKey":"b","thumbUrl":"https://x/b","width":1,"height":1,"captureMs":2,"decision":null,"kind":"photo","hasVideo":false,"hasDisplay":false},
+          {"mediaKey":"c","thumbUrl":"https://x/c","width":1,"height":1,"captureMs":3,"decision":null,"kind":"video","hasVideo":false}
+         ]}
+        """
+        let items = try HTTPRemoteAlbumClient.decodeSnapshot(Data(json.utf8), albumId: "a").items
+        let url = try XCTUnwrap(items[0].displayURL, "a cached display image must carry its server URL")
+        XCTAssertTrue(url.path.hasSuffix("/album/a/display/a"), "got \(url)")
+        XCTAssertTrue(url.absoluteString.contains("token="))
+        XCTAssertNil(items[1].displayURL, "hasDisplay false: the card keeps the thumb")
+        XCTAssertNil(items[2].displayURL, "a server that predates the key must decode, with no display URL")
+    }
+
     func testDeckItemIdsAndGateAccessors() {
         let remote = DeckItem.remote(RemoteAlbumItem(
             albumId: "a", mediaKey: "m", captureMs: 0, width: 1, height: 1, decision: nil,

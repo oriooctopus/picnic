@@ -422,8 +422,20 @@ struct DeckView: View {
                 videoController.clear()
             }
             do {
-                let image = try await ThumbnailLoader.remoteImage(url: remote.thumbnailURL)
-                if viewModel.currentItem?.id == loadingID { currentImage = image }
+                // Low-to-high resolution like a local card: the 512px thumb
+                // paints at once (skipped when the display image is already
+                // on disk, so a prefetched card never flashes the soft one),
+                // then the card-size rendition swaps in. The thumb stays the
+                // card's picture when the server has no display image yet.
+                let displayURL = remote.displayURL
+                if displayURL.map(RemoteDisplayCache.isCached) != true {
+                    let thumb = try await ThumbnailLoader.remoteImage(url: remote.thumbnailURL)
+                    if viewModel.currentItem?.id == loadingID { currentImage = thumb }
+                }
+                if let displayURL {
+                    let sharp = try await RemoteDisplayCache.image(url: displayURL)
+                    if viewModel.currentItem?.id == loadingID { currentImage = sharp }
+                }
             } catch {
                 // A cancelled load means the card changed and a newer task
                 // owns the state; only a real failure is worth an alert.
