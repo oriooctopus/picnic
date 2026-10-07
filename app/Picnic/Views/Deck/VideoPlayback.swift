@@ -9,6 +9,10 @@ enum VideoLoadState: Equatable {
     /// Waiting for PhotoKit's item and then for AVPlayer's readyToPlay.
     /// `downloadProgress` (0...1) is non-nil only while PhotoKit reports an iCloud download.
     case loading(downloadProgress: Double?)
+    /// REMOTE only: the item is attached to the player but playback is held
+    /// until `VideoBufferGate` opens. `fraction` (0...1) is how much of the
+    /// required lead-in is buffered. Local PHAsset videos never enter this state.
+    case buffering(fraction: Double)
     case ready
     /// PhotoKit gave no item (or an error/cancel), or the item failed to load.
     case failed
@@ -16,6 +20,7 @@ enum VideoLoadState: Equatable {
     var overlayText: String? {
         switch self {
         case .loading(let p?): return "Downloading from iCloud \(Int((min(max(p, 0), 1) * 100).rounded()))%"
+        case .buffering(let f): return "Loading \(Int((min(max(f, 0), 1) * 100).rounded()))%"
         case .failed: return "Couldn't load video, tap to retry"
         default: return nil
         }
@@ -43,9 +48,24 @@ struct VideoLoadTracker {
         return false
     }
 
-    /// Player reported readyToPlay (or failed) for the current load.
-    mutating func playerReady() { if case .loading = state { state = .ready } }
-    mutating func playerFailed() { if case .loading = state { state = .failed } }
+    /// Remote buffer-gate progress. Only moves a load that is in flight
+    /// (`.loading` or already `.buffering`), so a late KVO tick can never
+    /// pull a `.ready`/`.failed` card back into a spinner.
+    mutating func buffering(_ fraction: Double) {
+        if isInFlight { state = .buffering(fraction: fraction) }
+    }
+
+    private var isInFlight: Bool {
+        switch state {
+        case .loading, .buffering: return true
+        default: return false
+        }
+    }
+
+    /// Player reported readyToPlay (or failed) for the current load; for a
+    /// remote video, "ready" is the buffer gate opening.
+    mutating func playerReady() { if isInFlight { state = .ready } }
+    mutating func playerFailed() { if isInFlight { state = .failed } }
 
     /// PhotoKit failed for `id`; ignored if that card is no longer current. Returns whether it applied.
     @discardableResult
@@ -53,6 +73,51 @@ struct VideoLoadTracker {
         guard accepts(itemFor: id) else { return false }
         state = .failed
         return true
+    }
+}
+
+/// The remote-video start gate, pure so it is unit-tested without AVFoundation.
+/// Playback of a remote video starts only when the item's loaded ranges
+/// CONTIGUOUSLY cover [0, min(duration, targetSeconds)]: a single early range
+/// is not enough if buffering jumped (a seek) and left a hole, because the
+/// player would stall at the hole right after starting, which is the janky
+/// start this gate exists to remove.
+enum VideoBufferGate {
+    /// Lead-in required before playback starts (the user's "at least 15 seconds loaded").
+    static let targetSeconds = 15.0
+    /// Item's `preferredForwardBufferDuration`: above the gate so a long video
+    /// keeps buffering ahead of the playhead after it starts (0 would leave it
+    /// to AVFoundation's own, much smaller, default).
+    static let forwardBufferSeconds = 30.0
+    /// Slack for float rounding between ranges and for "covers the whole clip".
+    static let epsilon = 0.05
+
+    typealias Range = (start: Double, duration: Double)
+
+    /// Seconds buffered contiguously from time 0.
+    static func contiguousSeconds(from ranges: [Range]) -> Double {
+        var covered = 0.0
+        for r in ranges.sorted(by: { $0.start < $1.start }) {
+            guard r.start <= covered + epsilon else { break }
+            covered = max(covered, r.start + r.duration)
+        }
+        return covered
+    }
+
+    /// Seconds that must be buffered; nil until the duration is known.
+    static func requiredSeconds(duration: Double) -> Double? {
+        guard duration.isFinite, duration > 0 else { return nil }
+        return min(duration, targetSeconds)
+    }
+
+    static func isOpen(ranges: [Range], duration: Double) -> Bool {
+        guard let required = requiredSeconds(duration: duration) else { return false }
+        return contiguousSeconds(from: ranges) >= required - epsilon
+    }
+
+    static func fraction(ranges: [Range], duration: Double) -> Double {
+        guard let required = requiredSeconds(duration: duration) else { return 0 }
+        return min(max(contiguousSeconds(from: ranges) / required, 0), 1)
     }
 }
 
@@ -99,8 +164,83 @@ final class VideoPlaybackController: ObservableObject {
     /// `setLoopWindow`).
     private var loopStart: CMTime = .zero
 
-    /// Swaps in a new item, autoplays, and loops it on end.
-    func load(item: AVPlayerItem) {
+    /// REMOTE buffer gate in flight for `item`, else nil. `holdUntil` is a
+    /// DEBUG-only floor on when the gate may open (`--hold-remote-video-load`).
+    private struct PendingGate {
+        let item: AVPlayerItem
+        let trim: ClosedRange<Double>?
+        let holdUntil: Date
+    }
+    private var pendingGate: PendingGate?
+    private var rangesObservation: NSKeyValueObservation?
+    private var gateRecheckTask: Task<Void, Never>?
+
+    /// REMOTE video: attaches `item` but does NOT play until the buffer gate
+    /// opens (see VideoBufferGate), showing `.buffering` meanwhile. When the
+    /// gate opens, a saved `trim` becomes the loop window and playback starts
+    /// at its start. Gated by card id like `loadItem`. The gate only requires
+    /// [0, 15s] regardless of `trim`: a trim starting past what is buffered
+    /// just makes AVPlayer fetch that part on the first seek.
+    @discardableResult
+    func loadRemoteItem(_ item: AVPlayerItem, for assetID: String, trim: ClosedRange<Double>?, holdFor: TimeInterval = 0) -> Bool {
+        guard tracker.accepts(itemFor: assetID) else { return false }
+        item.preferredForwardBufferDuration = VideoBufferGate.forwardBufferSeconds
+        load(item: item, autoplay: false)
+        // After load(), which clears any previous gate.
+        pendingGate = PendingGate(item: item, trim: trim, holdUntil: Date().addingTimeInterval(holdFor))
+        tracker.buffering(0)
+        rangesObservation = item.observe(\.loadedTimeRanges, options: [.new]) { [weak self] observed, _ in
+            Task { @MainActor in self?.evaluateGate(for: observed) }
+        }
+        return true
+    }
+
+    /// Re-checks the gate for `item` (a stale item, or no gate in flight, is ignored).
+    private func evaluateGate(for item: AVPlayerItem) {
+        guard let gate = pendingGate, gate.item === item, player.currentItem === item else { return }
+        let ranges: [VideoBufferGate.Range] = item.loadedTimeRanges.map {
+            let r = $0.timeRangeValue
+            return (CMTimeGetSeconds(r.start), CMTimeGetSeconds(r.duration))
+        }
+        let duration = CMTimeGetSeconds(item.duration)  // NaN until readyToPlay
+        tracker.buffering(VideoBufferGate.fraction(ranges: ranges, duration: duration))
+        guard VideoBufferGate.isOpen(ranges: ranges, duration: duration) else { return }
+        let wait = gate.holdUntil.timeIntervalSinceNow
+        if wait > 0 {
+            // A fully buffered local file stops emitting range changes, so
+            // the hold needs its own wake-up.
+            gateRecheckTask?.cancel()
+            gateRecheckTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                if !Task.isCancelled { self?.evaluateGate(for: item) }
+            }
+            return
+        }
+        openGate(gate)
+    }
+
+    private func openGate(_ gate: PendingGate) {
+        clearGate()
+        if let trim = gate.trim {
+            setLoopWindow(trim)
+            seek(toSeconds: trim.lowerBound)
+        }
+        tracker.playerReady()
+        player.play()
+        isPlaying = true
+    }
+
+    private func clearGate() {
+        pendingGate = nil
+        rangesObservation = nil
+        gateRecheckTask?.cancel()
+        gateRecheckTask = nil
+    }
+
+    /// Swaps in a new item and loops it on end; autoplays unless the remote
+    /// buffer gate is holding it (`autoplay: false`, see `loadRemoteItem`).
+    func load(item: AVPlayerItem, autoplay: Bool = true) {
+        clearGate()
         teardownItemObservers()
         currentTime = 0
         duration = 0
@@ -120,8 +260,14 @@ final class VideoPlaybackController: ObservableObject {
             let seconds = CMTimeGetSeconds(observedItem.duration)
             Task { @MainActor in
                 guard let self, self.player.currentItem === observedItem else { return }
-                self.tracker.playerReady()
                 if seconds.isFinite { self.duration = seconds }
+                if self.pendingGate?.item === observedItem {
+                    // Remote: readyToPlay only means the duration is known;
+                    // "ready" is the buffer gate opening, not this.
+                    self.evaluateGate(for: observedItem)
+                } else {
+                    self.tracker.playerReady()
+                }
             }
         }
         endObserver = NotificationCenter.default.addObserver(
@@ -144,8 +290,12 @@ final class VideoPlaybackController: ObservableObject {
             }
         }
 
-        player.play()
-        isPlaying = true
+        if autoplay {
+            player.play()
+            isPlaying = true
+        } else {
+            isPlaying = false
+        }
     }
 
     /// Stops and detaches the current item without tearing down the shared
@@ -184,6 +334,7 @@ final class VideoPlaybackController: ObservableObject {
     }
 
     private func detachItem() {
+        clearGate()
         teardownItemObservers()
         if let timeObserverToken {
             player.removeTimeObserver(timeObserverToken)
@@ -359,6 +510,9 @@ struct VideoControlBar: View {
         .opacity(isEnabled ? 1 : 0.35)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(isEnabled ? "deck.videoControls" : "deck.videoControlsDisabled")
+        // Lets a UI test tell "held by the buffer gate" from "playing"
+        // without reading pixels.
+        .accessibilityValue(controller.isPlaying ? "playing" : "paused")
     }
 }
 
@@ -380,6 +534,22 @@ struct VideoLoadOverlay: View {
                     .background(Capsule().fill(.black.opacity(0.65)))
             }
             .accessibilityIdentifier("deck.videoRetry")
+        case .buffering:
+            // Scrim over whatever the video layer shows (it paints the first
+            // frame as soon as the item is ready, even while held): without
+            // it a held clip looks like a frozen, broken player.
+            ZStack {
+                RoundedRectangle(cornerRadius: 24).fill(.black.opacity(0.55))
+                VStack(spacing: 10) {
+                    ProgressView().tint(.white)
+                    Text(controller.loadState.overlayText ?? "")
+                        .font(.system(size: 14, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.white)
+                }
+            }
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .ignore)
+            .accessibilityIdentifier("deck.videoBuffering")
         case .loading(let progress):
             Group {
                 if let text = controller.loadState.overlayText {

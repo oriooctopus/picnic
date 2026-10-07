@@ -9,6 +9,7 @@ import { loadToken, checkBearerAuth, tokensMatch } from './lib/auth.mjs';
 import { createAutoDrain, createCdpProbe, createWorkerSpawn, isAutoDrainEnabled } from './lib/autodrain.mjs';
 import { ReconcileStore, sectionForCameraModel } from './lib/reconcile.mjs';
 import { AlbumStore, ID_RE, defaultAlbumsDir } from './lib/album.mjs';
+import { probeDurationSec } from './lib/video-trim.mjs';
 
 // NOTE: SPEC.md / task instructions said 8306, but ~/.claude/rules/ports.md
 // already has 8306 assigned to another local service (verified live and
@@ -519,7 +520,7 @@ export function createApp({
 
       // ----- Remote album triage routes -------------------------------------
       // albumId / mediaKey are validated against ID_RE before any path join.
-      const albumMatch = /^\/album\/([^/]+)(?:\/(items|thumb|video|decision|download-status)(?:\/([^/]+))?)?$/.exec(url.pathname);
+      const albumMatch = /^\/album\/([^/]+)(?:\/(items|thumb|video|decision|trim|download-status)(?:\/([^/]+))?)?$/.exec(url.pathname);
       if (albumMatch) {
         const [, albumId, sub, mediaKey] = albumMatch;
         if (!ID_RE.test(albumId)) return send(res, 404, { error: 'no such album' });
@@ -558,6 +559,20 @@ export function createApp({
             const store = albumStore(albumId);
             store.setDecision(body.mediaKey, body.decision);
             return send(res, 200, { ok: true, counts: store.counts() });
+          } catch (e) {
+            return send(res, 400, { error: e.message });
+          }
+        }
+        if (req.method === 'POST' && sub === 'trim' && mediaKey) {
+          if (!requireAuth(req, res)) return;
+          if (!ID_RE.test(mediaKey)) return send(res, 400, { error: 'mediaKey must match [A-Za-z0-9_-]+' });
+          const body = await readJsonBody(req);
+          const store = albumStore(albumId);
+          // Probe the cached mp4 (if any) so an end past the real duration is
+          // refused; a probe failure is a 500 on purpose, not a skipped check.
+          const durationSec = store.hasVideo(mediaKey) ? await probeDurationSec(store.videoPath(mediaKey)) : undefined;
+          try {
+            return send(res, 200, { ok: true, trim: store.setTrim(mediaKey, body.startSec, body.endSec, durationSec) });
           } catch (e) {
             return send(res, 400, { error: e.message });
           }

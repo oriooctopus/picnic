@@ -85,6 +85,9 @@ OPTIONAL = [
     "70-remote-deck-first-card", "71-remote-deck-after-keep", "72-remote-deck-after-skip",
     "73-remote-video-playing-a", "74-remote-video-playing-b", "75-remote-video-unavailable",
     "76-remote-resume-after-relaunch",
+    "77-remote-video-loading", "78-remote-video-after-loading",
+    "79-remote-trim-open", "80-remote-trim-dragged", "81-remote-trim-reopened",
+    "82-remote-trim-reopened-after-reopen-deck",
     "99-final-testRemoteAlbumDeck",
 ]
 

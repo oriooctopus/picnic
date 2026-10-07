@@ -22,6 +22,13 @@ enum RemoteAlbumFixtures {
     /// so the photo-only walkthrough (testRemoteAlbumDeck) is unchanged.
     static let videoFirst = ProcessInfo.processInfo.arguments.contains("--seed-remote-album-video-first")
 
+    /// `--hold-remote-video-load`: the buffer gate (VideoPlaybackController)
+    /// stays closed for `holdLoadSeconds` after the item is ready, so the
+    /// loading overlay is on screen long enough for a UI test to screenshot
+    /// it deterministically (a local file buffers in milliseconds otherwise).
+    static let holdLoad = ProcessInfo.processInfo.arguments.contains("--hold-remote-video-load")
+    static let holdLoadSeconds: Double = 5
+
     /// Fixture video: 40 frames at 10 fps (4 s). Every frame is one saturated
     /// color whose hue sweeps green to magenta across the clip, so two
     /// screenshots a second apart differ in plain pixel color, and the video
@@ -117,6 +124,8 @@ enum RemoteAlbumFixtures {
 final class FixtureRemoteAlbumClient: RemoteAlbumClient {
     private let albumId: String
     private var decisions: [String: RemoteDecision] = [:]
+    /// Saved trims, in memory like decisions, so a trim survives closing and reopening the deck.
+    private var trims: [String: RemoteTrim] = [:]
     /// When set, the next postDecision throws it once. Lets a test (or manual
     /// run) exercise the error alert without a server.
     var nextDecisionError: Error?
@@ -138,7 +147,8 @@ final class FixtureRemoteAlbumClient: RemoteAlbumClient {
                 width: 600, height: 800, decision: decisions[key],
                 thumbnailURL: RemoteAlbumFixtures.thumbnailURL(mediaKey: key),
                 kind: isVideo ? .video : .photo,
-                videoURL: i == 0 ? videoURL : nil
+                videoURL: i == 0 ? videoURL : nil,
+                trim: trims[key]
             )
         }
     }
@@ -154,6 +164,10 @@ final class FixtureRemoteAlbumClient: RemoteAlbumClient {
         var videoURL: URL?
         if RemoteAlbumFixtures.videoFirst { videoURL = try await RemoteAlbumFixtures.fixtureVideoURL() }
         return RemoteAlbumSnapshot(counts: counts(), items: items(videoURL: videoURL))
+    }
+
+    func postTrim(albumId: String, mediaKey: String, trim: RemoteTrim) async throws {
+        trims[mediaKey] = trim
     }
 
     func postDecision(albumId: String, mediaKey: String, decision: RemoteDecision) async throws -> RemoteAlbumCounts {

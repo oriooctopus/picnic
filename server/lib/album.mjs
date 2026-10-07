@@ -5,6 +5,7 @@
  *   <root>/<albumId>/thumbs/<mediaKey>.jpg
  *   <root>/<albumId>/full/<mediaKey>.<ext>
  *   <root>/<albumId>/video/<mediaKey>.mp4   (playable rendition of kind=video items)
+ *   <root>/<albumId>/trims.json      {mediaKey: {startSec, endSec}}  (kept-video cut range, applied at download)
  * albumId and mediaKey are untrusted URL/body text; both are validated against
  * ID_RE before they ever reach a path join.
  */
@@ -16,6 +17,10 @@ import { mergeItems } from './listing.mjs';
 export const ID_RE = /^[A-Za-z0-9_-]+$/;
 export const KINDS = new Set(['photo', 'video']);
 export const DECISIONS = new Set(['keep', 'skip']);
+/** Shortest kept clip. Matches the app's VideoTrimBar minimum length (0.5s) loosely; this is only a sanity floor. */
+export const MIN_TRIM_SEC = 0.1;
+/** Slack past the probed duration: the app reads duration from AVPlayer, ffprobe from the container; they differ by a frame or two. */
+export const TRIM_DURATION_SLACK_SEC = 0.5;
 export const defaultAlbumsDir = () =>
   process.env.PICNIC_ALBUMS_DIR || join(homedir(), '.local', 'share', 'picnic', 'albums');
 
@@ -100,6 +105,36 @@ export class AlbumStore {
     writeFileSync(this.videoPath(mediaKey), buf);
   }
 
+  loadTrims() {
+    return this.#read('trims.json', {});
+  }
+
+  /**
+   * Stores the kept range of a video. Throws (route -> 400) unless mediaKey is a
+   * known kind=video item and 0 <= startSec, startSec + MIN_TRIM_SEC <= endSec,
+   * both finite numbers. When `durationSec` is given (route passes the ffprobe
+   * duration of the cached mp4) endSec may not exceed it by more than the slack.
+   * Last write wins; the range is applied only at download time.
+   */
+  setTrim(mediaKey, startSec, endSec, durationSec) {
+    assertId('mediaKey', mediaKey);
+    const item = this.loadItems().find((i) => i.mediaKey === mediaKey);
+    if (!item) throw new Error(`unknown mediaKey: ${mediaKey}`);
+    if (item.kind !== 'video') throw new Error(`not a video: ${mediaKey}`);
+    for (const [name, v] of [['startSec', startSec], ['endSec', endSec]]) {
+      if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`${name} must be a finite number`);
+    }
+    if (startSec < 0) throw new Error('startSec must be >= 0');
+    if (endSec - startSec < MIN_TRIM_SEC) throw new Error(`trim must be at least ${MIN_TRIM_SEC}s long`);
+    if (durationSec !== undefined && endSec > durationSec + TRIM_DURATION_SLACK_SEC) {
+      throw new Error(`endSec ${endSec} is past the video duration ${durationSec}`);
+    }
+    const trims = this.loadTrims();
+    trims[mediaKey] = { startSec, endSec };
+    writeFileSync(join(this.dir, 'trims.json'), JSON.stringify(trims));
+    return trims[mediaKey];
+  }
+
   setDecision(mediaKey, decision) {
     assertId('mediaKey', mediaKey);
     if (!DECISIONS.has(decision)) throw new Error(`invalid decision: ${JSON.stringify(decision)}`);
@@ -137,9 +172,11 @@ export class AlbumStore {
 
   listItems() {
     const decisions = this.loadDecisions();
+    const trims = this.loadTrims();
     return this.loadItems().map((i) => ({
       ...i,
       kind: i.kind ?? 'photo',
+      trim: trims[i.mediaKey] ?? null,
       hasVideo: i.kind === 'video' && this.hasVideo(i.mediaKey),
       decision: decisions[i.mediaKey] ?? null,
       hasThumb: this.hasThumb(i.mediaKey),

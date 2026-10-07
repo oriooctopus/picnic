@@ -66,6 +66,11 @@ final class DeckViewModel: ObservableObject {
         }
     }
     @Published var currentIndex = 0
+    /// Trims saved this session, by DeckItem id. The server listing is the
+    /// source of truth (`RemoteAlbumItem.trim`), but the in-memory items are
+    /// immutable snapshots, so a save is overlaid here until the next
+    /// `loadRemote` replaces the snapshot (which then already carries it).
+    private var remoteTrimOverrides: [String: RemoteTrim] = [:]
     /// Swipe-left cues — a CUE ONLY. Nothing is deleted until commitDeletions()
     /// runs, which is only reachable from the explicit X-button tap.
     /// `private(set)`, not independently mutated: every write used to be a
@@ -162,12 +167,34 @@ final class DeckViewModel: ObservableObject {
                 sortStore.setState(state, forID: item.id, monthKey: monthKey, recordsActivity: false)
             }
             remoteCounts = snapshot.counts
+            remoteTrimOverrides = [:]
             // orderedItems' didSet runs refresh(), which rebuilds visibleItems
             // (honoring hideSorted); the index below is into THAT list.
             orderedItems = snapshot.items.map(DeckItem.remote)
             currentIndex = visibleItems.firstIndex { sortStore.state(forID: $0.id) == .unsorted } ?? 0
         } catch {
             remoteError = "\(error)"
+        }
+    }
+
+    /// The saved kept-range of a remote video (this session's save, else the
+    /// server's), nil when untrimmed or not a remote video.
+    func remoteTrim(for item: DeckItem) -> RemoteTrim? {
+        remoteTrimOverrides[item.id] ?? item.remoteItem?.trim
+    }
+
+    /// POSTs a remote video's kept range and remembers it. False (with the
+    /// error in `remoteError`) when the server refused, so the trim bar stays
+    /// open instead of pretending the trim was saved.
+    func saveRemoteTrim(_ trim: RemoteTrim, on item: DeckItem) async -> Bool {
+        guard let remote, let remoteItem = item.remoteItem else { return false }
+        do {
+            try await remote.saveTrim(mediaKey: remoteItem.mediaKey, trim)
+            remoteTrimOverrides[item.id] = trim
+            return true
+        } catch {
+            remoteError = "Couldn't save trim: \(error)"
+            return false
         }
     }
 

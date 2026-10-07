@@ -18,6 +18,17 @@ struct VideoTrimBar: View {
     /// (failure, or the user declined iOS's "Allow Picnic to modify" prompt).
     let onSave: (ClosedRange<Double>) async -> Bool
 
+    /// `initialWindow` reopens the bar on an already-saved range (remote
+    /// trims, which persist server-side); nil starts at the whole clip.
+    init(controller: VideoPlaybackController, initialWindow: ClosedRange<Double>? = nil,
+         onCancel: @escaping () -> Void, onSave: @escaping (ClosedRange<Double>) async -> Bool) {
+        self.controller = controller
+        self.onCancel = onCancel
+        self.onSave = onSave
+        _start = State(initialValue: initialWindow?.lowerBound ?? 0)
+        _end = State(initialValue: initialWindow?.upperBound)
+    }
+
     @State private var start: Double = 0
     /// nil until the user drags the end handle, meaning "the clip's end" —
     /// so it stays correct if `controller.duration` only arrives after this

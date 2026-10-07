@@ -4,10 +4,15 @@
  *   node album-fetch.mjs thumbs <albumId>    fetch <thumbUrl>=w512-h512 for each item
  *   node album-fetch.mjs videos <albumId>    fetch a playable mp4 (=m37, else =m18) for each kind=video item
  *   node album-fetch.mjs kinds <albumId> <kinds.json>  merge {mediaKey: Photo|Video|Animation} into items.json
- *   node album-fetch.mjs download <albumId>  fetch <thumbUrl>=d for each KEPT item
+ *   node album-fetch.mjs download <albumId>  fetch <thumbUrl>=d for each KEPT item; a kept video with a
+ *                                            saved trim is fetched as =dv and cut with ffmpeg to that range
  * Paced at 1 request / 300ms; idempotent (files already on disk are skipped).
  */
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { AlbumStore, defaultAlbumsDir } from './lib/album.mjs';
+import { trimVideoFile } from './lib/video-trim.mjs';
 
 const PACE_MS = 300;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -149,18 +154,45 @@ export async function fetchVideos(store, { fetchFn = fetch, paceMs = PACE_MS, lo
   return { downloaded, cached, failed };
 }
 
-export async function downloadKept(store, { fetchFn = fetch, paceMs = PACE_MS, log = console.log } = {}) {
+/**
+ * `=dv` is Google's original-video download. A trimmed video must be cut from
+ * the ORIGINAL, never from the cached =m37 1080p transcode used for in-app
+ * playback, or the kept file would be a second-generation re-encode.
+ * Writes full/<mediaKey>.mp4.
+ */
+async function downloadTrimmedVideo(store, item, trim, { fetchFn, trimFn }) {
+  const { buf } = await fetchBytes(fetchFn, `${item.thumbUrl}=dv`);
+  const work = mkdtempSync(join(tmpdir(), 'picnic-trim-'));
+  try {
+    const input = join(work, 'original.bin');
+    const output = join(work, 'trimmed.mp4');
+    writeFileSync(input, buf);
+    await trimFn({ input, output, startSec: trim.startSec, endSec: trim.endSec });
+    store.writeFull(item.mediaKey, 'mp4', readFileSync(output));
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+export async function downloadKept(store, { fetchFn = fetch, paceMs = PACE_MS, log = console.log, trimFn = trimVideoFile } = {}) {
   const decisions = store.loadDecisions();
+  const trims = store.loadTrims();
   const kept = store.loadItems().filter((i) => decisions[i.mediaKey] === 'keep');
   let ok = 0, skipped = 0, failed = 0, requests = 0;
   for (const item of kept) {
     if (store.fullPath(item.mediaKey)) { skipped += 1; continue; }
     if (requests++ > 0) await sleep(paceMs);
     try {
-      const { res, buf } = await fetchBytes(fetchFn, `${item.thumbUrl}=d`);
-      store.writeFull(item.mediaKey, extFor(res), buf);
+      const trim = item.kind === 'video' ? trims[item.mediaKey] : undefined;
+      if (trim) {
+        await downloadTrimmedVideo(store, item, trim, { fetchFn, trimFn });
+        log(`full ok ${item.mediaKey} (trimmed ${trim.startSec}s-${trim.endSec}s)`);
+      } else {
+        const { res, buf } = await fetchBytes(fetchFn, `${item.thumbUrl}=d`);
+        store.writeFull(item.mediaKey, extFor(res), buf);
+        log(`full ok ${item.mediaKey}`);
+      }
       ok += 1;
-      log(`full ok ${item.mediaKey}`);
     } catch (e) {
       failed += 1;
       log(`full FAILED ${item.mediaKey}: ${e.message}`);

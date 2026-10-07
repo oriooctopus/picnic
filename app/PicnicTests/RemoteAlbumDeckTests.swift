@@ -15,6 +15,8 @@ final class RemoteAlbumDeckTests: XCTestCase {
     final class FakeClient: RemoteAlbumClient {
         var posted: [(mediaKey: String, decision: RemoteDecision)] = []
         var failNextPost = false
+        var postedTrims: [(mediaKey: String, trim: RemoteTrim)] = []
+        var failNextTrim = false
         let albumId = RemoteAlbumService.oliverAlbumId
 
         struct Boom: Error, CustomStringConvertible { var description: String { "boom" } }
@@ -34,6 +36,14 @@ final class RemoteAlbumDeckTests: XCTestCase {
                 counts: RemoteAlbumCounts(total: 4, keep: 1, skip: 0, undecided: 3, downloaded: 0),
                 items: items
             )
+        }
+
+        func postTrim(albumId: String, mediaKey: String, trim: RemoteTrim) async throws {
+            if failNextTrim {
+                failNextTrim = false
+                throw Boom()
+            }
+            postedTrims.append((mediaKey, trim))
         }
 
         func postDecision(albumId: String, mediaKey: String, decision: RemoteDecision) async throws -> RemoteAlbumCounts {
@@ -204,5 +214,40 @@ final class RemoteAlbumDeckTests: XCTestCase {
         XCTAssertEqual(remote.id, "gphotos:a:m")
         XCTAssertTrue(remote.isRemote)
         XCTAssertNil(remote.phAsset, "remote items must never expose a PHAsset (that is the PhotoKit gate)")
+    }
+
+    // MARK: remote trim
+
+    func testWireTrimDecodesAndNullMeansUntrimmed() throws {
+        let json = """
+        {"counts":{"total":2,"keep":0,"skip":0,"undecided":2,"downloaded":0},
+         "items":[
+          {"mediaKey":"a","thumbUrl":"https://x/a","width":1,"height":1,"captureMs":1,"decision":null,"kind":"video","hasVideo":true,"trim":{"startSec":1.5,"endSec":4.25}},
+          {"mediaKey":"b","thumbUrl":"https://x/b","width":1,"height":1,"captureMs":2,"decision":null,"kind":"video","hasVideo":true,"trim":null}
+         ]}
+        """
+        let items = try HTTPRemoteAlbumClient.decodeSnapshot(Data(json.utf8), albumId: "a").items
+        XCTAssertEqual(items[0].trim, RemoteTrim(startSec: 1.5, endSec: 4.25))
+        XCTAssertNil(items[1].trim, "a null trim on the wire is an untrimmed video")
+    }
+
+    func testSaveRemoteTrimPostsAndOverlaysThenFailureSurfacesAndKeepsOld() async throws {
+        let rig = try await makeRig()
+        let item = try XCTUnwrap(rig.viewModel.currentItem)
+        XCTAssertNil(rig.viewModel.remoteTrim(for: item))
+
+        let ok = await rig.viewModel.saveRemoteTrim(RemoteTrim(startSec: 1, endSec: 2), on: item)
+        XCTAssertTrue(ok)
+        XCTAssertEqual(rig.client.postedTrims.map(\.mediaKey), ["k1"], "must POST the card's own mediaKey")
+        XCTAssertEqual(rig.client.postedTrims.first?.trim, RemoteTrim(startSec: 1, endSec: 2))
+        XCTAssertEqual(rig.viewModel.remoteTrim(for: item), RemoteTrim(startSec: 1, endSec: 2),
+                       "a saved trim must be what reopening the trim bar shows")
+
+        rig.client.failNextTrim = true
+        let failed = await rig.viewModel.saveRemoteTrim(RemoteTrim(startSec: 0, endSec: 3), on: item)
+        XCTAssertFalse(failed, "a refused trim must keep the trim bar open")
+        XCTAssertNotNil(rig.viewModel.remoteError, "a refused trim must be shown, not swallowed")
+        XCTAssertEqual(rig.viewModel.remoteTrim(for: item), RemoteTrim(startSec: 1, endSec: 2),
+                       "a failed save must not replace the previously saved trim")
     }
 }

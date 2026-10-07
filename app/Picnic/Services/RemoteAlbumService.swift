@@ -23,6 +23,12 @@ enum RemoteMediaKind: String, Codable, Equatable {
     case video
 }
 
+/// Kept range of a remote video, seconds (wire shape of the server's trim).
+struct RemoteTrim: Codable, Equatable {
+    let startSec: Double
+    let endSec: Double
+}
+
 /// One album item with its thumbnail resolved to the SERVER'S cached copy
 /// (never the raw Google URL, which is not reachable/authorized from the app).
 struct RemoteAlbumItem: Equatable, Identifiable {
@@ -39,10 +45,14 @@ struct RemoteAlbumItem: Equatable, Identifiable {
     /// has not cached yet (`hasVideo` false), which the deck shows as a still
     /// with a disabled play control.
     let videoURL: URL?
+    /// Saved kept-range of a video (server trims.json); nil = untrimmed. The
+    /// server applies it only at download time, the app uses it to loop the
+    /// preview and to reopen the trim bar on the saved range.
+    let trim: RemoteTrim?
 
     init(albumId: String, mediaKey: String, captureMs: Int64, width: Int, height: Int,
          decision: RemoteDecision?, thumbnailURL: URL,
-         kind: RemoteMediaKind = .photo, videoURL: URL? = nil) {
+         kind: RemoteMediaKind = .photo, videoURL: URL? = nil, trim: RemoteTrim? = nil) {
         self.albumId = albumId
         self.mediaKey = mediaKey
         self.captureMs = captureMs
@@ -52,6 +62,7 @@ struct RemoteAlbumItem: Equatable, Identifiable {
         self.thumbnailURL = thumbnailURL
         self.kind = kind
         self.videoURL = videoURL
+        self.trim = trim
     }
 
     var isVideo: Bool { kind == .video }
@@ -72,6 +83,7 @@ struct RemoteAlbumSnapshot {
 protocol RemoteAlbumClient {
     func fetchAlbum(albumId: String) async throws -> RemoteAlbumSnapshot
     func postDecision(albumId: String, mediaKey: String, decision: RemoteDecision) async throws -> RemoteAlbumCounts
+    func postTrim(albumId: String, mediaKey: String, trim: RemoteTrim) async throws
 }
 
 enum RemoteAlbumError: Error, CustomStringConvertible {
@@ -102,6 +114,7 @@ struct HTTPRemoteAlbumClient: RemoteAlbumClient {
         let decision: RemoteDecision?
         let kind: RemoteMediaKind
         let hasVideo: Bool
+        let trim: RemoteTrim?
     }
     private struct WireAlbum: Decodable {
         let counts: RemoteAlbumCounts
@@ -147,7 +160,8 @@ struct HTTPRemoteAlbumClient: RemoteAlbumClient {
                     width: item.width ?? 0, height: item.height ?? 0, decision: item.decision,
                     thumbnailURL: thumbnailURL(albumId: albumId, mediaKey: item.mediaKey),
                     kind: item.kind,
-                    videoURL: item.hasVideo ? videoURL(albumId: albumId, mediaKey: item.mediaKey) : nil
+                    videoURL: item.hasVideo ? videoURL(albumId: albumId, mediaKey: item.mediaKey) : nil,
+                    trim: item.trim
                 )
             }
         return RemoteAlbumSnapshot(counts: wire.counts, items: items)
@@ -165,6 +179,17 @@ struct HTTPRemoteAlbumClient: RemoteAlbumClient {
         let (data, response) = try await URLSession.shared.data(for: request)
         try Self.requireOK(response)
         return try JSONDecoder().decode(WireDecisionResponse.self, from: data).counts
+    }
+
+    func postTrim(albumId: String, mediaKey: String, trim: RemoteTrim) async throws {
+        var request = URLRequest(url: Self.albumURL(albumId: albumId, path: "/trim/\(mediaKey)"))
+        request.timeoutInterval = Config.requestTimeout
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONEncoder().encode(trim)
+        let (_, response) = try await URLSession.shared.data(for: request)
+        try Self.requireOK(response)
     }
 
     private static func requireOK(_ response: URLResponse) throws {
@@ -208,6 +233,10 @@ struct RemoteAlbumService {
 
     func load() async throws -> RemoteAlbumSnapshot {
         try await client.fetchAlbum(albumId: albumId)
+    }
+
+    func saveTrim(mediaKey: String, _ trim: RemoteTrim) async throws {
+        try await client.postTrim(albumId: albumId, mediaKey: mediaKey, trim: trim)
     }
 
     func decide(mediaKey: String, _ decision: RemoteDecision) async throws -> RemoteAlbumCounts {

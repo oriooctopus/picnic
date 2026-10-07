@@ -3115,6 +3115,107 @@ final class WalkthroughUITests: XCTestCase {
                           "an uncached video must show its dark still, not a video frame: \(stillMean)")
     }
 
+    /// The remote video must not start until its lead-in is buffered. With
+    /// `--hold-remote-video-load` the gate is kept closed for 5s even though the
+    /// fixture file is fully loaded at once, so the loading state is on screen
+    /// long enough to inspect: the buffering overlay must show and the video
+    /// must NOT be playing (the center stays dim, and does not change a second
+    /// later). Then the overlay must go away and the clip must actually play
+    /// (bright, changing frames).
+    func testRemoteAlbumVideoShowsLoadingThenPlays() throws {
+        relaunch(withExtraArguments: ["--seed-remote-album", "--seed-remote-album-video-first",
+                                      "--hold-remote-video-load", "--reset-sort-state"])
+        _ = openRemoteAlbumDeckFromUtilities()
+        let buffering = app.descendants(matching: .any)["deck.videoBuffering"].firstMatch
+        XCTAssertTrue(buffering.waitForExistence(timeout: 15), "a held remote video must show the loading overlay")
+        let loadingA = capture("77-remote-video-loading", delay: 0.5)
+        let meanA = centerMeanRGB(loadingA)
+        Thread.sleep(forTimeInterval: 1.0)
+        let meanB = centerMeanRGB(app.screenshot())
+        // Playing frames are fully saturated and bright (a channel at 255);
+        // the overlay's scrim dims the poster / first frame well below that.
+        XCTAssertLessThan(max(meanA.r, meanA.g, meanA.b), 200,
+                          "while loading the card must be dimmed behind the spinner, not playing: \(meanA)")
+        let held = ((meanA.r - meanB.r) * (meanA.r - meanB.r) + (meanA.g - meanB.g) * (meanA.g - meanB.g)
+            + (meanA.b - meanB.b) * (meanA.b - meanB.b)).squareRoot()
+        XCTAssertLessThan(held, 25, "the video must not advance while the buffer gate is closed: \(meanA) vs \(meanB)")
+
+        // Gate opens after the 5s hold: overlay gone, video playing.
+        let gone = NSPredicate(format: "exists == false")
+        expectation(for: gone, evaluatedWith: buffering)
+        waitForExpectations(timeout: 20)
+        var playing = false
+        var last = (r: 0.0, g: 0.0, b: 0.0)
+        for _ in 0..<15 {
+            last = centerMeanRGB(app.screenshot())
+            if max(last.r, last.g, last.b) >= 220 && min(last.r, last.g, last.b) <= 60 { playing = true; break }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        capture("78-remote-video-after-loading", delay: 0)
+        XCTAssertTrue(playing, "after the gate opened the video must play (bright frame), last center \(last)")
+    }
+
+    /// Remote trim round trip through the same VideoTrimBar the local deck
+    /// uses: shorten the 4s fixture clip, Save (POSTs to the fixture "server"),
+    /// reopen the trim bar and see the saved length, then close the deck,
+    /// reopen it (the snapshot is re-fetched, so the length now comes from the
+    /// server listing's `trim`) and see it again.
+    func testRemoteAlbumVideoTrimSavesAndReopens() throws {
+        relaunch(withExtraArguments: ["--seed-remote-album", "--seed-remote-album-video-first", "--reset-sort-state"])
+        _ = openRemoteAlbumDeckFromUtilities()
+        let trimButton = app.buttons["deck.trim"]
+        XCTAssertTrue(trimButton.waitForExistence(timeout: 20), "a playable remote video must offer the trim button")
+        trimButton.tap()
+
+        let lengthLabel = app.staticTexts["trim.length"]
+        XCTAssertTrue(lengthLabel.waitForExistence(timeout: 10), "trim bar should open on a remote video")
+        // Duration arrives asynchronously; wait for the full ~4s clip.
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline && trimLengthSeconds(lengthLabel.label) < 3.5 { Thread.sleep(forTimeInterval: 0.5) }
+        XCTAssertGreaterThan(trimLengthSeconds(lengthLabel.label), 3.5, "full clip length, got \(lengthLabel.label)")
+        capture("79-remote-trim-open")
+
+        let endHandle = app.descendants(matching: .any)["trim.endHandle"].firstMatch
+        XCTAssertTrue(endHandle.exists)
+        endHandle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.2,
+                   thenDragTo: endHandle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                       .withOffset(CGVector(dx: -150, dy: 0)),
+                   withVelocity: .slow,
+                   thenHoldForDuration: 0.3)
+        let shortened = trimLengthSeconds(lengthLabel.label)
+        XCTAssertLessThan(shortened, 3.3, "dragging the end handle left must shorten the kept length, got \(lengthLabel.label)")
+        XCTAssertGreaterThan(shortened, 0.4)
+        capture("80-remote-trim-dragged")
+
+        app.buttons["trim.save"].tap()
+        // No system prompt remotely: the bar just closes once the POST succeeds.
+        XCTAssertTrue(trimButton.waitForExistence(timeout: 20), "trim bar should close after a successful remote save")
+
+        trimButton.tap()
+        XCTAssertTrue(lengthLabel.waitForExistence(timeout: 10))
+        XCTAssertEqual(trimLengthSeconds(lengthLabel.label), shortened, accuracy: 0.15,
+                       "reopening trim must show the saved range, got \(lengthLabel.label)")
+        capture("81-remote-trim-reopened")
+        app.buttons["trim.cancel"].tap()
+
+        // Close the deck and reopen it: the item now comes back from the
+        // fixture "server" listing with its saved trim.
+        app.buttons["deck.commit"].tap()
+        let row = app.descendants(matching: .any)["utilities.remoteAlbum"].firstMatch
+        if !row.waitForExistence(timeout: 5) { goToUtilities() }
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        XCTAssertTrue(trimButton.waitForExistence(timeout: 20), "reopened remote deck should offer trim again")
+        trimButton.tap()
+        XCTAssertTrue(lengthLabel.waitForExistence(timeout: 10))
+        let again = Date().addingTimeInterval(20)
+        while Date() < again && abs(trimLengthSeconds(lengthLabel.label) - shortened) > 0.15 { Thread.sleep(forTimeInterval: 0.5) }
+        capture("82-remote-trim-reopened-after-reopen-deck")
+        XCTAssertEqual(trimLengthSeconds(lengthLabel.label), shortened, accuracy: 0.15,
+                       "the trim must come back from the server listing after reopening the deck, got \(lengthLabel.label)")
+    }
+
     /// Swipe in the remote deck, kill the app, cold-launch WITHOUT
     /// --skip-auto-open-deck: the app must reopen the remote deck (banner
     /// showing), not a local month.

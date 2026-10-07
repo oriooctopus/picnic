@@ -183,14 +183,21 @@ struct DeckView: View {
             // Outside and below the card on purpose — see VideoControlBar's
             // doc comment: a scrub drag here must never compete with the
             // card's own swipe pan gesture.
-            // REMOTE GATE (video/trim): `phAsset` is nil for a remote item, so
-            // the trim bar can never show for it. The control bar does show
-            // for a remote video (dimmed when the server has no file).
+            // The same VideoTrimBar serves both decks. Local: Save edits the
+            // PHAsset. Remote (`remoteTrimTarget`): Save POSTs the range to
+            // the server, which applies it when it downloads the kept video.
             if let asset = viewModel.currentItem?.phAsset, asset.mediaType == .video, isTrimming {
                 VideoTrimBar(
                     controller: videoController,
                     onCancel: { endTrimming() },
                     onSave: { await saveTrim(asset: asset, window: $0) }
+                )
+            } else if let item = remoteTrimTarget, isTrimming {
+                VideoTrimBar(
+                    controller: videoController,
+                    initialWindow: viewModel.remoteTrim(for: item).map { $0.startSec...$0.endSec },
+                    onCancel: { endTrimming() },
+                    onSave: { await saveRemoteTrim(item: item, window: $0) }
                 )
             } else {
                 if let item = viewModel.currentItem, item.isVideo {
@@ -408,6 +415,8 @@ struct DeckView: View {
             // video with a cached file also streams from the server into the
             // shared controller, gated by card id exactly like a local video.
             if remote.videoURL != nil {
+                // Poster + spinner now; the item is attached below but held
+                // by the buffer gate (VideoBufferGate) until 15s are loaded.
                 videoController.beginLoading(assetID: loadingID)
             } else {
                 videoController.clear()
@@ -423,7 +432,12 @@ struct DeckView: View {
             }
             if Task.isCancelled { return }
             if let videoURL = remote.videoURL, viewModel.currentItem?.id == loadingID {
-                videoController.loadItem(AVPlayerItem(url: videoURL), for: loadingID)
+                let trim = viewModel.remoteTrim(for: item).map { $0.startSec...$0.endSec }
+                var hold: TimeInterval = 0
+                #if DEBUG
+                if RemoteAlbumFixtures.holdLoad { hold = RemoteAlbumFixtures.holdLoadSeconds }
+                #endif
+                videoController.loadRemoteItem(AVPlayerItem(url: videoURL), for: loadingID, trim: trim, holdFor: hold)
             }
         } else if let asset = item.phAsset, asset.mediaType == .video {
             // Poster first, local data only so it shows at once, upgraded by a
@@ -598,9 +612,30 @@ struct DeckView: View {
         )
     }
 
+    /// The current card when it is a remote video with a cached file: the
+    /// only remote card the trim bar can edit (it needs the player's duration).
+    private var remoteTrimTarget: DeckItem? {
+        guard let item = viewModel.currentItem, item.isRemote, item.hasPlayableVideo, item.isVideo else { return nil }
+        return item
+    }
+
+    /// Leaves trim mode. The loop window goes back to the SAVED remote trim
+    /// (nil for a local video, whose trim is baked into the asset), not
+    /// blindly to nil, so Cancel on a trimmed remote video keeps previewing
+    /// the range that is actually saved.
     private func endTrimming() {
-        videoController.setLoopWindow(nil)
+        let saved = viewModel.currentItem.flatMap { viewModel.remoteTrim(for: $0) }
+        videoController.setLoopWindow(saved.map { $0.startSec...$0.endSec })
         isTrimming = false
+    }
+
+    /// Remote Save: POST the range, then keep looping exactly that range.
+    /// The cached playback file is untouched (the cut happens at download).
+    private func saveRemoteTrim(item: DeckItem, window: ClosedRange<Double>) async -> Bool {
+        let trim = RemoteTrim(startSec: window.lowerBound, endSec: window.upperBound)
+        guard await viewModel.saveRemoteTrim(trim, on: item) else { return false }
+        if viewModel.currentItem?.id == item.id { endTrimming() }
+        return true
     }
 
     /// Writes the trim to Photos, then reloads the shared player from the
@@ -657,12 +692,22 @@ struct DeckView: View {
     @ViewBuilder
     private var bottomActionsRow: some View {
         if viewModel.isRemote {
-            // REMOTE GATE (favorite, outfit log, share, trim): all four need
-            // a PHAsset (PhotoKit favorite flag, outfit import by local id,
-            // share of the original file, video trim). The remote deck shows
-            // an empty spacer of roughly the same height (22pt icons + 16pt
-            // padding each side) so the layout does not jump.
-            Color.clear.frame(height: 22 + 32)
+            // REMOTE GATE (favorite, outfit log, share): all three need a
+            // PHAsset (PhotoKit favorite flag, outfit import by local id,
+            // share of the original file). Only trim exists remotely, as a
+            // lone scissors button on a playable video. Otherwise an empty
+            // spacer of the same height (22pt icons + 16pt padding each
+            // side) so the layout does not jump.
+            if remoteTrimTarget != nil {
+                Button { isTrimming = true } label: {
+                    Image(systemName: "scissors").foregroundStyle(.white)
+                        .font(.system(size: 22))
+                        .padding(.vertical, 16)
+                }
+                .accessibilityIdentifier("deck.trim")
+            } else {
+                Color.clear.frame(height: 22 + 32)
+            }
         } else {
             localActionsRow
         }
