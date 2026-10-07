@@ -55,6 +55,16 @@ test('display route rejects traversal in mediaKey and albumId', async () => {
   assert.equal((await fetch(`${base}/album/..%2Fx/display/k1?token=${TOKEN}`)).status, 404);
 });
 
+test('fetchDisplays fetches in deck order (oldest captureMs first), not items.json order', async () => {
+  const store = new AlbumStore(process.env.PICNIC_ALBUMS_DIR, 'd-order');
+  // Google lists newest first; the deck sorts oldest first.
+  const at = (key, ms) => [key, [`https://lh3.example/${key}`, 100, 50], ms, 'dedupe', 0, 1];
+  store.ingestItems([at('newest', 3000), at('middle', 2000), at('oldest', 1000)]);
+  const order = [];
+  await fetchDisplays(store, { ...quiet, fetchFn: async (url) => { order.push(url.split('/').pop().split('=')[0]); return resp('JPEG'); } });
+  assert.deepEqual(order, ['oldest', 'middle', 'newest']);
+});
+
 test('fetchDisplays: =w2048-h2048 for photos AND videos, idempotent, bad responses never stored', async () => {
   const store = new AlbumStore(process.env.PICNIC_ALBUMS_DIR, 'd2');
   store.ingestItems([A('p1'), A('v1'), A('bad403'), A('png')]);

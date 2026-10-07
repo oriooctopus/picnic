@@ -131,7 +131,12 @@ export const DISPLAY_BOX = 2048;
  */
 export async function fetchDisplays(store, { fetchFn = fetch, paceMs = PACE_MS, log = console.log } = {}) {
   let ok = 0, skipped = 0, failed = 0, requests = 0;
-  for (const item of store.loadItems()) {
+  // Deck order (oldest first, RemoteAlbumService sorts by captureMs), not
+  // items.json order (newest first): a full run takes over an hour, and the
+  // cards the user is swiping must get their display image first. In
+  // items.json order the first 275 fetched were all at the far end of the deck.
+  const deckOrder = [...store.loadItems()].sort((a, b) => a.captureMs - b.captureMs);
+  for (const item of deckOrder) {
     if (store.hasDisplay(item.mediaKey)) { skipped += 1; continue; }
     if (requests++ > 0) await sleep(paceMs);
     try {
