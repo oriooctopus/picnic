@@ -154,7 +154,7 @@ test('requestContextFetch adapts an APIRequestContext to the fetch shape', async
   assert.equal(res.status, 200);
   assert.equal(res.headers.get('Content-Type'), 'image/jpeg');
   assert.equal(Buffer.from(await res.arrayBuffer()).toString(), 'abc');
-  assert.deepEqual(seen, [['https://x/y=d', { failOnStatusCode: false }]]);
+  assert.deepEqual(seen, [['https://x/y=d', { failOnStatusCode: false, timeout: 300_000 }]]);
   const bad = await requestContextFetch({ get: async () => fakeApiResponse(403, 'image/png', 'p') })('u');
   assert.equal(bad.ok, false);
   assert.equal(bad.status, 403);

@@ -55,7 +55,9 @@ export function classifyResponse({ status, contentType, bytes }) {
  */
 export function requestContextFetch(requestContext) {
   return async (url) => {
-    const r = await requestContext.get(url, { failOnStatusCode: false });
+    // Long videos are transcoded on request (=m37/=m18) and routinely exceed
+    // Playwright's 30s default (8 of 109 Oliver-album videos did, both renditions).
+    const r = await requestContext.get(url, { failOnStatusCode: false, timeout: 300_000 });
     const headers = r.headers();
     return {
       ok: r.status() >= 200 && r.status() < 300,
