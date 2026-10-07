@@ -2,6 +2,8 @@
 /**
  * Album triage fetcher.
  *   node album-fetch.mjs thumbs <albumId>    fetch <thumbUrl>=w512-h512 for each item
+ *   node album-fetch.mjs videos <albumId>    fetch a playable mp4 (=m37, else =m18) for each kind=video item
+ *   node album-fetch.mjs kinds <albumId> <kinds.json>  merge {mediaKey: Photo|Video|Animation} into items.json
  *   node album-fetch.mjs download <albumId>  fetch <thumbUrl>=d for each KEPT item
  * Paced at 1 request / 300ms; idempotent (files already on disk are skipped).
  */
@@ -110,6 +112,41 @@ export async function fetchThumbs(store, { fetchFn = fetch, paceMs = PACE_MS, lo
   return { ok, skipped, failed };
 }
 
+/**
+ * Playable video rendition per kind=video item: `=m37` (1080p) first, `=m18`
+ * (360p) when m37 is not a usable 200. Stored at video/<mediaKey>.mp4.
+ */
+export async function fetchVideos(store, { fetchFn = fetch, paceMs = PACE_MS, log = console.log } = {}) {
+  let downloaded = 0, cached = 0, failed = 0, requests = 0;
+  for (const item of store.loadItems().filter((i) => i.kind === 'video')) {
+    if (store.hasVideo(item.mediaKey)) { cached += 1; continue; }
+    let done = false;
+    const errors = [];
+    for (const fmt of ['m37', 'm18']) {
+      if (requests++ > 0) await sleep(paceMs);
+      try {
+        const { res, buf } = await fetchBytes(fetchFn, `${item.thumbUrl}=${fmt}`);
+        const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        if (!type.startsWith('video/')) throw new Error(`content-type ${JSON.stringify(type)} is not video/*`);
+        if (buf.length <= PLACEHOLDER_MAX_BYTES) throw new Error(`only ${buf.length} bytes`);
+        store.writeVideo(item.mediaKey, buf);
+        log(`video ok ${item.mediaKey} via ${fmt} (${buf.length} bytes)`);
+        downloaded += 1;
+        done = true;
+        break;
+      } catch (e) {
+        errors.push(`${fmt}: ${e.message}`);
+      }
+    }
+    if (!done) {
+      failed += 1;
+      log(`video FAILED ${item.mediaKey}: ${errors.join('; ')}`);
+    }
+  }
+  log(`videos: ${downloaded} downloaded, ${cached} cached, ${failed} failed`);
+  return { downloaded, cached, failed };
+}
+
 export async function downloadKept(store, { fetchFn = fetch, paceMs = PACE_MS, log = console.log } = {}) {
   const decisions = store.loadDecisions();
   const kept = store.loadItems().filter((i) => decisions[i.mediaKey] === 'keep');
@@ -132,20 +169,38 @@ export async function downloadKept(store, { fetchFn = fetch, paceMs = PACE_MS, l
   return { downloaded, kept: kept.length, failed, ok, skipped };
 }
 
+/** Google's kind names -> stored kinds (Animation is a photo). */
+const GOOGLE_KINDS = { Photo: 'photo', Animation: 'photo', Video: 'video' };
+
+export function mergeKindsFile(store, raw) {
+  const kinds = {};
+  for (const [key, k] of Object.entries(raw)) {
+    const kind = GOOGLE_KINDS[k];
+    if (!kind) throw new Error(`unknown kind for ${key}: ${JSON.stringify(k)}`);
+    kinds[key] = kind;
+  }
+  return store.mergeKinds(kinds);
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const args = process.argv.slice(2);
   const useCdp = args.includes('--cdp');
-  const [cmd, albumId] = args.filter((a) => a !== '--cdp');
-  if (!['thumbs', 'download'].includes(cmd) || !albumId) {
-    console.error('usage: node album-fetch.mjs thumbs|download <albumId> [--cdp]');
+  const [cmd, albumId, extra] = args.filter((a) => a !== '--cdp');
+  if (!['thumbs', 'download', 'videos', 'kinds'].includes(cmd) || !albumId || (cmd === 'kinds') !== (extra !== undefined)) {
+    console.error('usage: node album-fetch.mjs thumbs|download|videos <albumId> [--cdp]\n       node album-fetch.mjs kinds <albumId> <kinds.json>');
     process.exit(2);
   }
   const store = new AlbumStore(defaultAlbumsDir(), albumId);
+  if (cmd === 'kinds') {
+    const { readFileSync } = await import('node:fs');
+    console.log(JSON.stringify(mergeKindsFile(store, JSON.parse(readFileSync(extra, 'utf8')))));
+    process.exit(0);
+  }
   const cdp = useCdp ? await connectCdpFetch() : null;
   let r;
   try {
     const opts = cdp ? { fetchFn: cdp.fetchFn } : {};
-    r = cmd === 'thumbs' ? await fetchThumbs(store, opts) : await downloadKept(store, opts);
+    r = cmd === 'thumbs' ? await fetchThumbs(store, opts) : cmd === 'videos' ? await fetchVideos(store, opts) : await downloadKept(store, opts);
   } finally {
     await cdp?.close();
   }

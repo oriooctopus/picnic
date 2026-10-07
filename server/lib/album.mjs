@@ -4,6 +4,7 @@
  *   <root>/<albumId>/decisions.json  {mediaKey: 'keep'|'skip'}
  *   <root>/<albumId>/thumbs/<mediaKey>.jpg
  *   <root>/<albumId>/full/<mediaKey>.<ext>
+ *   <root>/<albumId>/video/<mediaKey>.mp4   (playable rendition of kind=video items)
  * albumId and mediaKey are untrusted URL/body text; both are validated against
  * ID_RE before they ever reach a path join.
  */
@@ -13,6 +14,7 @@ import { join } from 'node:path';
 import { mergeItems } from './listing.mjs';
 
 export const ID_RE = /^[A-Za-z0-9_-]+$/;
+export const KINDS = new Set(['photo', 'video']);
 export const DECISIONS = new Set(['keep', 'skip']);
 export const defaultAlbumsDir = () =>
   process.env.PICNIC_ALBUMS_DIR || join(homedir(), '.local', 'share', 'picnic', 'albums');
@@ -45,6 +47,7 @@ export class AlbumStore {
     this.dir = join(root, albumId);
     mkdirSync(join(this.dir, 'thumbs'), { recursive: true });
     mkdirSync(join(this.dir, 'full'), { recursive: true });
+    mkdirSync(join(this.dir, 'video'), { recursive: true });
   }
 
   #read(name, fallback) {
@@ -67,6 +70,34 @@ export class AlbumStore {
     const added = mergeItems(byKey, items);
     writeFileSync(join(this.dir, 'items.json'), JSON.stringify([...byKey.values()]));
     return { added, total: byKey.size };
+  }
+
+  /**
+   * Merge {mediaKey: kind} into items.json. Kinds must be photo|video and every
+   * key must already be in the album; anything else throws and writes nothing.
+   */
+  mergeKinds(kinds) {
+    const items = this.loadItems();
+    const known = new Set(items.map((i) => i.mediaKey));
+    for (const [key, kind] of Object.entries(kinds)) {
+      if (!KINDS.has(kind)) throw new Error(`invalid kind for ${key}: ${JSON.stringify(kind)}`);
+      if (!known.has(key)) throw new Error(`unknown mediaKey: ${key}`);
+    }
+    for (const i of items) if (i.mediaKey in kinds) i.kind = kinds[i.mediaKey];
+    writeFileSync(join(this.dir, 'items.json'), JSON.stringify(items));
+    return { merged: Object.keys(kinds).length, videos: items.filter((i) => i.kind === 'video').length };
+  }
+
+  videoPath(mediaKey) {
+    return join(this.dir, 'video', `${assertId('mediaKey', mediaKey)}.mp4`);
+  }
+
+  hasVideo(mediaKey) {
+    return existsSync(this.videoPath(mediaKey));
+  }
+
+  writeVideo(mediaKey, buf) {
+    writeFileSync(this.videoPath(mediaKey), buf);
   }
 
   setDecision(mediaKey, decision) {
@@ -108,6 +139,8 @@ export class AlbumStore {
     const decisions = this.loadDecisions();
     return this.loadItems().map((i) => ({
       ...i,
+      kind: i.kind ?? 'photo',
+      hasVideo: i.kind === 'video' && this.hasVideo(i.mediaKey),
       decision: decisions[i.mediaKey] ?? null,
       hasThumb: this.hasThumb(i.mediaKey),
       downloaded: this.fullPath(i.mediaKey) !== null,

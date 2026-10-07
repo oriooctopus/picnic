@@ -221,3 +221,100 @@ test('downloadKept: only kept items, =d url, ext from content-type, idempotent, 
   assert.deepEqual(urls, ['https://lh3.example/k2=d']);
   assert.deepEqual([r2.downloaded, r2.failed], [2, 1]);
 });
+
+// ----- kinds + videos + Range -------------------------------------------
+import { mergeKindsFile, fetchVideos } from '../album-fetch.mjs';
+
+test('mergeKindsFile: maps Google kinds, Animation is a photo, listItems exposes kind/hasVideo', () => {
+  const s = freshStore();
+  s.ingestItems([A('k1'), A('k2'), A('k3')]);
+  assert.deepEqual(mergeKindsFile(s, { k1: 'Photo', k2: 'Video', k3: 'Animation' }), { merged: 3, videos: 1 });
+  const items = s.listItems();
+  assert.deepEqual(items.map((i) => [i.kind, i.hasVideo]), [['photo', false], ['video', false], ['photo', false]]);
+  s.writeVideo('k2', Buffer.from('v'));
+  assert.equal(s.listItems()[1].hasVideo, true);
+});
+
+test('mergeKindsFile: unknown kind or missing key throws and writes nothing', () => {
+  const s = freshStore();
+  s.ingestItems([A('k1')]);
+  assert.throws(() => mergeKindsFile(s, { k1: 'Video', k2: 'Photo' }), /unknown mediaKey: k2/);
+  assert.throws(() => mergeKindsFile(s, { k1: 'Hologram' }), /unknown kind for k1/);
+  assert.equal(s.loadItems()[0].kind, undefined);
+});
+
+test('fetchVideos: m37 first, m18 fallback, failures write nothing, cached skipped', async () => {
+  const s = freshStore();
+  s.ingestItems([A('v1'), A('v2'), A('v3'), A('v4'), A('p1')]);
+  mergeKindsFile(s, { v1: 'Video', v2: 'Video', v3: 'Video', v4: 'Video', p1: 'Photo' });
+  const big = 'x'.repeat(3000);
+  const urls = [];
+  const fetchFn = async (u) => {
+    urls.push(u);
+    if (u === 'https://lh3.example/v1=m37') return fakeResponse(big, 'video/mp4');
+    if (u === 'https://lh3.example/v2=m37') return fakeResponse('redirect', 'text/html', 302);
+    if (u === 'https://lh3.example/v2=m18') return fakeResponse(big + 'low', 'video/mp4');
+    if (u.startsWith('https://lh3.example/v3=')) return fakeResponse('tiny', 'video/mp4');
+    return fakeResponse(big, 'image/jpeg');
+  };
+  const logs = [];
+  const opts = { fetchFn, paceMs: 0, log: (m) => logs.push(m) };
+  assert.deepEqual(await fetchVideos(s, opts), { downloaded: 2, cached: 0, failed: 2 });
+  assert.deepEqual(urls, [
+    'https://lh3.example/v1=m37', 'https://lh3.example/v2=m37', 'https://lh3.example/v2=m18',
+    'https://lh3.example/v3=m37', 'https://lh3.example/v3=m18', 'https://lh3.example/v4=m37', 'https://lh3.example/v4=m18',
+  ]);
+  assert.ok(logs.includes('video ok v1 via m37 (3000 bytes)'));
+  assert.ok(logs.includes('video ok v2 via m18 (3003 bytes)'));
+  assert.ok(logs.some((l) => /video FAILED v3: m37: only 4 bytes; m18: only 4 bytes/.test(l)));
+  assert.ok(logs.some((l) => /video FAILED v4: .*not image\/\* or video\/\*|video FAILED v4: .*not video\/\*/.test(l)));
+  assert.equal(logs.at(-1), 'videos: 2 downloaded, 0 cached, 2 failed');
+  assert.equal(s.hasVideo('v3'), false);
+  assert.equal(s.hasVideo('v4'), false);
+  assert.equal(s.hasVideo('p1'), false);
+  urls.length = 0;
+  await fetchVideos(s, opts);
+  assert.deepEqual(urls.filter((u) => u.includes('v1') || u.includes('v2')), []);
+  assert.equal(logs.at(-1), 'videos: 0 downloaded, 2 cached, 2 failed');
+});
+
+test('GET /album/:id/video/:key serves Range (200, 206, open-ended, suffix, 416) and 404/401', async () => {
+  await post('/album/vr/items', { items: [A('v1'), A('v2')] });
+  const s = new AlbumStore(process.env.PICNIC_ALBUMS_DIR, 'vr');
+  s.writeVideo('v1', Buffer.from('0123456789'));
+  const get = (key, range) =>
+    fetch(`${base}/album/vr/video/${key}?token=${TOKEN}`, { headers: range ? { Range: range } : {} });
+  assert.equal((await fetch(`${base}/album/vr/video/v1`)).status, 401);
+  assert.equal((await get('v2')).status, 404);
+
+  const full = await get('v1');
+  assert.equal(full.status, 200);
+  assert.equal(full.headers.get('accept-ranges'), 'bytes');
+  assert.equal(full.headers.get('content-type'), 'video/mp4');
+  assert.equal(await full.text(), '0123456789');
+
+  const part = await get('v1', 'bytes=0-1');
+  assert.equal(part.status, 206);
+  assert.equal(part.headers.get('content-range'), 'bytes 0-1/10');
+  assert.equal(await part.text(), '01');
+
+  const open = await get('v1', 'bytes=4-');
+  assert.equal(open.status, 206);
+  assert.equal(open.headers.get('content-range'), 'bytes 4-9/10');
+  assert.equal(await open.text(), '456789');
+
+  const suffix = await get('v1', 'bytes=-3');
+  assert.equal(suffix.status, 206);
+  assert.equal(await suffix.text(), '789');
+
+  const clamped = await get('v1', 'bytes=8-99');
+  assert.equal(clamped.headers.get('content-range'), 'bytes 8-9/10');
+  await clamped.arrayBuffer();
+
+  const bad = await get('v1', 'bytes=10-20');
+  assert.equal(bad.status, 416);
+  assert.equal(bad.headers.get('content-range'), 'bytes */10');
+
+  const list = await (await fetch(`${base}/album/vr`, { headers: auth })).json();
+  assert.deepEqual(list.items.map((i) => [i.kind, i.hasVideo]), [['photo', false], ['photo', false]]);
+});

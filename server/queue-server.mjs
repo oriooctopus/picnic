@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, openSync, closeSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, openSync, closeSync, statSync, createReadStream } from 'node:fs';
 import { JobQueue, STATUSES } from './lib/queue.mjs';
 import { loadToken, checkBearerAuth, tokensMatch } from './lib/auth.mjs';
 import { createAutoDrain, createCdpProbe, createWorkerSpawn, isAutoDrainEnabled } from './lib/autodrain.mjs';
@@ -35,6 +35,29 @@ const queue = new JobQueue(QUEUE_PATH);
 // POST /queue with a thumbnail never races a lazy mkdir.
 if (!existsSync(THUMBS_DIR)) mkdirSync(THUMBS_DIR, { recursive: true });
 const reconcile = new ReconcileStore(RECONCILE_DIR);
+
+/** Serve a file with single-range HTTP Range support (AVPlayer needs 206s). */
+function serveRange(req, res, path, contentType) {
+  const size = statSync(path).size;
+  const header = req.headers.range;
+  const base = { 'Content-Type': contentType, 'Accept-Ranges': 'bytes' };
+  if (!header) {
+    res.writeHead(200, { ...base, 'Content-Length': size });
+    return createReadStream(path).pipe(res);
+  }
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header);
+  let start, end;
+  if (m && (m[1] || m[2])) {
+    if (m[1] === '') { start = Math.max(0, size - Number(m[2])); end = size - 1; }
+    else { start = Number(m[1]); end = m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1); }
+  }
+  if (start === undefined || start >= size || start > end) {
+    res.writeHead(416, { ...base, 'Content-Range': `bytes */${size}` });
+    return res.end();
+  }
+  res.writeHead(206, { ...base, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': end - start + 1 });
+  return createReadStream(path, { start, end }).pipe(res);
+}
 
 // Remote album triage (lib/album.mjs). Resolved per request so tests can set PICNIC_ALBUMS_DIR late.
 const albumStore = (albumId) => new AlbumStore(defaultAlbumsDir(), albumId);
@@ -496,7 +519,7 @@ export function createApp({
 
       // ----- Remote album triage routes -------------------------------------
       // albumId / mediaKey are validated against ID_RE before any path join.
-      const albumMatch = /^\/album\/([^/]+)(?:\/(items|thumb|decision|download-status)(?:\/([^/]+))?)?$/.exec(url.pathname);
+      const albumMatch = /^\/album\/([^/]+)(?:\/(items|thumb|video|decision|download-status)(?:\/([^/]+))?)?$/.exec(url.pathname);
       if (albumMatch) {
         const [, albumId, sub, mediaKey] = albumMatch;
         if (!ID_RE.test(albumId)) return send(res, 404, { error: 'no such album' });
@@ -507,6 +530,13 @@ export function createApp({
           if (!store.hasThumb(mediaKey)) return send(res, 404, { error: 'no thumbnail for that mediaKey' });
           res.writeHead(200, { 'Content-Type': 'image/jpeg' });
           return res.end(readFileSync(store.thumbPath(mediaKey)));
+        }
+        if (req.method === 'GET' && sub === 'video' && mediaKey) {
+          if (!requireAuthQueryOrHeader(req, res, url)) return;
+          if (!ID_RE.test(mediaKey)) return send(res, 404, { error: 'no video for that mediaKey' });
+          const store = albumStore(albumId);
+          if (!store.hasVideo(mediaKey)) return send(res, 404, { error: 'no video for that mediaKey' });
+          return serveRange(req, res, store.videoPath(mediaKey), 'video/mp4');
         }
         if (req.method === 'POST' && sub === 'items' && !mediaKey) {
           if (!requireAuth(req, res)) return;
