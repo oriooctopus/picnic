@@ -82,7 +82,9 @@ final class WalkthroughUITests: XCTestCase {
         }
     }
 
-    private func capture(_ name: String, delay: TimeInterval = 1.0) {
+    /// Returns the screenshot it saved so a test can also read its pixels.
+    @discardableResult
+    private func capture(_ name: String, delay: TimeInterval = 1.0) -> XCUIScreenshot {
         Thread.sleep(forTimeInterval: delay)
         let screenshot = app.screenshot()
 
@@ -95,6 +97,7 @@ final class WalkthroughUITests: XCTestCase {
             let fileURL = dir.appendingPathComponent("\(name).png")
             try? screenshot.pngRepresentation.write(to: fileURL)
         }
+        return screenshot
     }
 
     /// Tap away from a popover to dismiss it. Prefers UIKit's
@@ -3017,6 +3020,131 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["deck.pendingCount"].exists,
                        "a remote skip must not become a pending PhotoKit delete")
         capture("72-remote-deck-after-skip")
+    }
+
+    // MARK: Remote album video + resume
+
+    /// Utilities tab -> "Oliver! album" row -> remote deck. Shared by the
+    /// remote video and resume tests; testRemoteAlbumDeck keeps its own copy.
+    @discardableResult
+    private func openRemoteAlbumDeckFromUtilities() -> XCUIElement {
+        _ = openMyLifeGrid()
+        goToUtilities()
+        let row = app.descendants(matching: .any)["utilities.remoteAlbum"].firstMatch
+        var scrolls = 0
+        while !row.isHittable && scrolls < 5 {
+            app.swipeUp()
+            scrolls += 1
+        }
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "Utilities should list the remote album row")
+        row.tap()
+        let deckCard = app.descendants(matching: .any)["deck.card"].firstMatch
+        XCTAssertTrue(deckCard.waitForExistence(timeout: 15), "remote deck should show a card")
+        return deckCard
+    }
+
+    /// Mean RGB (0...255) of a fixed central region of the screenshot, where
+    /// the deck card's picture sits. Pixels, not accessibility frames: this
+    /// repo's rule (see check_filmstrip_overlap.py) is that AX frames stop
+    /// tracking what is really drawn.
+    private func centerMeanRGB(_ screenshot: XCUIScreenshot) -> (r: Double, g: Double, b: Double) {
+        guard let cg = screenshot.image.cgImage else {
+            XCTFail("screenshot has no CGImage")
+            return (0, 0, 0)
+        }
+        let w = Double(cg.width), h = Double(cg.height)
+        guard let crop = cg.cropping(to: CGRect(x: w * 0.35, y: h * 0.40, width: w * 0.30, height: h * 0.12)) else {
+            XCTFail("crop failed")
+            return (0, 0, 0)
+        }
+        var px = [UInt8](repeating: 0, count: 4)
+        px.withUnsafeMutableBytes { raw in
+            let ctx = CGContext(
+                data: raw.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )!
+            ctx.interpolationQuality = .high
+            ctx.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        return (Double(px[0]), Double(px[1]), Double(px[2]))
+    }
+
+    /// The remote deck's first card is a real mp4 (fixture, no server). It must
+    /// autoplay: the card's pixels go from the dark still poster to a bright
+    /// video frame, and keep changing a second later. The next card is a video
+    /// the server has not cached: it must show its still with a visibly
+    /// disabled control bar, not a silent no-op play button.
+    func testRemoteAlbumVideoPlays() throws {
+        relaunch(withExtraArguments: ["--seed-remote-album", "--seed-remote-album-video-first", "--reset-sort-state"])
+        let deckCard = openRemoteAlbumDeckFromUtilities()
+        XCTAssertTrue(app.descendants(matching: .any)["deck.videoControls"].firstMatch.waitForExistence(timeout: 15),
+                      "a remote video card must show the video control bar")
+
+        // Poll until the video frame replaces the poster: the poster is dark
+        // (max channel ~140); fixture video frames are fully saturated and
+        // bright (a channel at 255, another near 0).
+        var frameA: XCUIScreenshot?
+        var meanA = (r: 0.0, g: 0.0, b: 0.0)
+        for _ in 0..<20 {
+            let shot = app.screenshot()
+            let m = centerMeanRGB(shot)
+            if max(m.r, m.g, m.b) >= 220 && min(m.r, m.g, m.b) <= 60 { frameA = shot; meanA = m; break }
+            Thread.sleep(forTimeInterval: 1.0)
+        }
+        XCTAssertNotNil(frameA, "the remote video never replaced its poster with a playing frame")
+        capture("73-remote-video-playing-a", delay: 0)
+        Thread.sleep(forTimeInterval: 1.0)
+        let frameB = capture("74-remote-video-playing-b", delay: 0)
+        let meanB = centerMeanRGB(frameB)
+        let distance = ((meanA.r - meanB.r) * (meanA.r - meanB.r)
+            + (meanA.g - meanB.g) * (meanA.g - meanB.g)
+            + (meanA.b - meanB.b) * (meanA.b - meanB.b)).squareRoot()
+        XCTAssertGreaterThan(distance, 60, "video must be advancing: frame A \(meanA) vs frame B \(meanB)")
+
+        // Next card: a video with no cached file.
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        XCTAssertTrue(app.descendants(matching: .any)["deck.videoControlsDisabled"].firstMatch.waitForExistence(timeout: 10),
+                      "a video the server has not cached must show a disabled control bar")
+        let still = capture("75-remote-video-unavailable", delay: 1.0)
+        let stillMean = centerMeanRGB(still)
+        XCTAssertLessThan(max(stillMean.r, stillMean.g, stillMean.b), 200,
+                          "an uncached video must show its dark still, not a video frame: \(stillMean)")
+    }
+
+    /// Swipe in the remote deck, kill the app, cold-launch WITHOUT
+    /// --skip-auto-open-deck: the app must reopen the remote deck (banner
+    /// showing), not a local month.
+    func testRemoteAlbumDeckResumesAfterRelaunch() throws {
+        relaunch(withExtraArguments: ["--seed-remote-album", "--reset-sort-state"])
+        let deckCard = openRemoteAlbumDeckFromUtilities()
+        let counter = app.descendants(matching: .any)["deck.remoteCounter"].firstMatch
+        XCTAssertTrue(counter.waitForExistence(timeout: 15))
+        deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                   withVelocity: .default,
+                   thenHoldForDuration: 0.1)
+        expectation(for: NSPredicate(format: "label == %@", "1 kept · 11 left"), evaluatedWith: counter)
+        waitForExpectations(timeout: 10)
+
+        app.terminate()
+        app.launchArguments = ["--seed-library", "--seed-remote-album"]
+        app.launch()
+        dismissPhotoPermissionSheetIfPresent()
+
+        let banner = app.descendants(matching: .any)["deck.remoteBanner"].firstMatch
+        XCTAssertTrue(banner.waitForExistence(timeout: 120),
+                      "cold launch after a remote swipe must reopen the remote deck")
+        XCTAssertEqual(banner.label, "ALBUM · Oliver!")
+        XCTAssertFalse(app.staticTexts["March 2026"].exists, "a local month deck must not be what opened")
+        capture("76-remote-resume-after-relaunch")
+
+        // Leave no remote resume key behind for any test that cold-launches later.
+        relaunch(withExtraArguments: ["--reset-sort-state"])
     }
 
     // MARK: Offline video skipping

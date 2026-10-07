@@ -1,4 +1,5 @@
 #if DEBUG
+import AVFoundation
 import Foundation
 import UIKit
 
@@ -14,6 +15,68 @@ import UIKit
 enum RemoteAlbumFixtures {
     static let isSeeded = ProcessInfo.processInfo.arguments.contains("--seed-remote-album")
     static let itemCount = 12
+
+    /// `--seed-remote-album-video-first`: item 0 is a playable video (a real
+    /// mp4 generated on first use, so the deck's AVPlayer path runs end to
+    /// end) and item 1 is a video the "server" has not cached. Off by default
+    /// so the photo-only walkthrough (testRemoteAlbumDeck) is unchanged.
+    static let videoFirst = ProcessInfo.processInfo.arguments.contains("--seed-remote-album-video-first")
+
+    /// Fixture video: 40 frames at 10 fps (4 s). Every frame is one saturated
+    /// color whose hue sweeps green to magenta across the clip, so two
+    /// screenshots a second apart differ in plain pixel color, and the video
+    /// is far brighter than the dark poster `image(for:)` draws for item 0.
+    static let videoFrameCount = 40
+    private static let videoSize = CGSize(width: 320, height: 480)
+
+    /// Writes the fixture mp4 into tmp (once per process; a leftover from an
+    /// earlier launch is reused) and returns its file URL.
+    static func fixtureVideoURL() async throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("remote-fixture-video.mp4")
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        let width = Int(videoSize.width), height = Int(videoSize.height)
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width, AVVideoHeightKey: height,
+        ])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
+                kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
+            ]
+        )
+        writer.add(input)
+        guard writer.startWriting() else { throw writer.error ?? FixtureVideoError.writerFailed }
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<videoFrameCount {
+            while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 5_000_000) }
+            var buffer: CVPixelBuffer?
+            guard let pool = adaptor.pixelBufferPool,
+                  CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer) == kCVReturnSuccess,
+                  let buffer else { throw FixtureVideoError.noPixelBuffer }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            let context = CGContext(
+                data: CVPixelBufferGetBaseAddress(buffer), width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
+            )
+            let hue = 0.33 + 0.5 * CGFloat(frame) / CGFloat(videoFrameCount)
+            context?.setFillColor(UIColor(hue: hue, saturation: 1, brightness: 1, alpha: 1).cgColor)
+            context?.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            guard context != nil else { throw FixtureVideoError.noContext }
+            guard adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 10)) else {
+                throw writer.error ?? FixtureVideoError.writerFailed
+            }
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        guard writer.status == .completed else { throw writer.error ?? FixtureVideoError.writerFailed }
+        return url
+    }
+
+    enum FixtureVideoError: Error { case writerFailed, noPixelBuffer, noContext }
 
     /// URL scheme for fixture thumbnails. ThumbnailLoader's URL path hands any
     /// "fixture" URL to `image(for:)` instead of URLSession.
@@ -62,16 +125,20 @@ final class FixtureRemoteAlbumClient: RemoteAlbumClient {
         self.albumId = albumId
     }
 
-    private var items: [RemoteAlbumItem] {
+    private func items(videoURL: URL?) -> [RemoteAlbumItem] {
         (0..<RemoteAlbumFixtures.itemCount).map { i in
             let key = "fixture\(i)"
+            // video-first mode: item 0 plays, item 1 is a video with no cached file.
+            let isVideo = RemoteAlbumFixtures.videoFirst && i <= 1
             return RemoteAlbumItem(
                 albumId: albumId, mediaKey: key,
                 // One minute apart from a fixed base so the order is
                 // deterministic regardless of when the test runs.
                 captureMs: 1_700_000_000_000 + Int64(i) * 60_000,
                 width: 600, height: 800, decision: decisions[key],
-                thumbnailURL: RemoteAlbumFixtures.thumbnailURL(mediaKey: key)
+                thumbnailURL: RemoteAlbumFixtures.thumbnailURL(mediaKey: key),
+                kind: isVideo ? .video : .photo,
+                videoURL: i == 0 ? videoURL : nil
             )
         }
     }
@@ -84,7 +151,9 @@ final class FixtureRemoteAlbumClient: RemoteAlbumClient {
     }
 
     func fetchAlbum(albumId: String) async throws -> RemoteAlbumSnapshot {
-        RemoteAlbumSnapshot(counts: counts(), items: items)
+        var videoURL: URL?
+        if RemoteAlbumFixtures.videoFirst { videoURL = try await RemoteAlbumFixtures.fixtureVideoURL() }
+        return RemoteAlbumSnapshot(counts: counts(), items: items(videoURL: videoURL))
     }
 
     func postDecision(albumId: String, mediaKey: String, decision: RemoteDecision) async throws -> RemoteAlbumCounts {

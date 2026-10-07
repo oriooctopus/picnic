@@ -171,6 +171,14 @@ private struct FilmstripThumbnail: View {
                     .frame(width: 24, height: 36)
                     .clipped()
             }
+            if item.isVideo {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.8), radius: 1.5)
+                    .padding(3)
+                    .frame(width: 24, height: 36, alignment: .bottomLeading)
+            }
             if isPendingDelete {
                 RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.35))
                 Image(systemName: "xmark").font(.caption.bold()).foregroundStyle(.white)

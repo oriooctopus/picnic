@@ -301,6 +301,10 @@ struct VideoTimeLabel: View {
 /// measured from the reference app's video screenshot.
 struct VideoControlBar: View {
     @ObservedObject var controller: VideoPlaybackController
+    /// False for a remote video the server has not cached: the bar stays
+    /// visible but dimmed and inert, so a missing video is never a silent
+    /// no-op play button.
+    var isEnabled = true
 
     private let barHeight: CGFloat = 44
 
@@ -320,6 +324,7 @@ struct VideoControlBar: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        guard isEnabled else { return }
                         controller.seek(toFraction: Double(value.location.x / geo.size.width))
                     }
             )
@@ -346,10 +351,14 @@ struct VideoControlBar: View {
                     }
                 }
                 .padding(.horizontal, 18)
+                .disabled(!isEnabled)
                 .allowsHitTesting(true)
             )
         }
         .frame(height: barHeight)
+        .opacity(isEnabled ? 1 : 0.35)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(isEnabled ? "deck.videoControls" : "deck.videoControlsDisabled")
     }
 }
 

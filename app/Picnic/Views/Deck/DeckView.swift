@@ -184,7 +184,8 @@ struct DeckView: View {
             // doc comment: a scrub drag here must never compete with the
             // card's own swipe pan gesture.
             // REMOTE GATE (video/trim): `phAsset` is nil for a remote item, so
-            // neither the trim bar nor the video control bar can show.
+            // the trim bar can never show for it. The control bar does show
+            // for a remote video (dimmed when the server has no file).
             if let asset = viewModel.currentItem?.phAsset, asset.mediaType == .video, isTrimming {
                 VideoTrimBar(
                     controller: videoController,
@@ -192,8 +193,8 @@ struct DeckView: View {
                     onSave: { await saveTrim(asset: asset, window: $0) }
                 )
             } else {
-                if let asset = viewModel.currentItem?.phAsset, asset.mediaType == .video {
-                    VideoControlBar(controller: videoController)
+                if let item = viewModel.currentItem, item.isVideo {
+                    VideoControlBar(controller: videoController, isEnabled: item.hasPlayableVideo)
                         .padding(.horizontal, 28)
                         .padding(.top, 10)
                 }
@@ -399,12 +400,18 @@ struct DeckView: View {
         let startIndex = viewModel.currentIndex
 
         if case .remote(let remote) = item {
-            // REMOTE GATE (image source): a remote card is never a video and
-            // never goes through PhotoKit/WarmThumbCache. Its image is the
-            // server's cached thumbnail, fetched by URL (in-memory NSCache in
+            // REMOTE GATE (image source): a remote card never goes through
+            // PhotoKit/WarmThumbCache. Its poster is the server's cached
+            // thumbnail, fetched by URL (in-memory NSCache in
             // ThumbnailLoader). The PhotoKit quality state is ignored for
-            // remote cards (see the body's deleteBlocked gate).
-            videoController.clear()
+            // remote cards (see the body's deleteBlocked gate). A remote
+            // video with a cached file also streams from the server into the
+            // shared controller, gated by card id exactly like a local video.
+            if remote.videoURL != nil {
+                videoController.beginLoading(assetID: loadingID)
+            } else {
+                videoController.clear()
+            }
             do {
                 let image = try await ThumbnailLoader.remoteImage(url: remote.thumbnailURL)
                 if viewModel.currentItem?.id == loadingID { currentImage = image }
@@ -415,6 +422,9 @@ struct DeckView: View {
                 viewModel.remoteError = "Couldn't load photo: \(error)"
             }
             if Task.isCancelled { return }
+            if let videoURL = remote.videoURL, viewModel.currentItem?.id == loadingID {
+                videoController.loadItem(AVPlayerItem(url: videoURL), for: loadingID)
+            }
         } else if let asset = item.phAsset, asset.mediaType == .video {
             // Poster first, local data only so it shows at once, upgraded by a
             // network-allowed fetch that runs alongside the video item (never
@@ -871,8 +881,9 @@ private struct DeckCard: View {
         // width, so the photo (and its black letterbox) spilled past the
         // card's own rounded rect and the dimmed peek card showed through
         // above/below instead of being covered by opaque black.
-        // REMOTE GATE (video / Live Photo flags): nil phAsset means neither.
-        let isVideo = item.phAsset?.mediaType == .video
+        // REMOTE GATE (Live Photo flag): nil phAsset means no Live Photo.
+        // A remote video is playable only when the server has the file.
+        let isVideo = item.hasPlayableVideo
         ShuffleCardRepresentable(
             image: image,
             isLivePhoto: item.phAsset?.mediaSubtypes.contains(.photoLive) ?? false,

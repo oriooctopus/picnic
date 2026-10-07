@@ -17,6 +17,12 @@ struct RemoteAlbumCounts: Codable, Equatable {
     let downloaded: Int
 }
 
+/// Wire strings of the server's item `kind` (server/lib/album.mjs KINDS).
+enum RemoteMediaKind: String, Codable, Equatable {
+    case photo
+    case video
+}
+
 /// One album item with its thumbnail resolved to the SERVER'S cached copy
 /// (never the raw Google URL, which is not reachable/authorized from the app).
 struct RemoteAlbumItem: Equatable, Identifiable {
@@ -28,6 +34,27 @@ struct RemoteAlbumItem: Equatable, Identifiable {
     /// The server's stored decision at fetch time; nil = undecided.
     let decision: RemoteDecision?
     let thumbnailURL: URL
+    let kind: RemoteMediaKind
+    /// Playable mp4 on the server; nil for a photo AND for a video the server
+    /// has not cached yet (`hasVideo` false), which the deck shows as a still
+    /// with a disabled play control.
+    let videoURL: URL?
+
+    init(albumId: String, mediaKey: String, captureMs: Int64, width: Int, height: Int,
+         decision: RemoteDecision?, thumbnailURL: URL,
+         kind: RemoteMediaKind = .photo, videoURL: URL? = nil) {
+        self.albumId = albumId
+        self.mediaKey = mediaKey
+        self.captureMs = captureMs
+        self.width = width
+        self.height = height
+        self.decision = decision
+        self.thumbnailURL = thumbnailURL
+        self.kind = kind
+        self.videoURL = videoURL
+    }
+
+    var isVideo: Bool { kind == .video }
 
     var id: String { "gphotos:\(albumId):\(mediaKey)" }
     var creationDate: Date { Date(timeIntervalSince1970: TimeInterval(captureMs) / 1000) }
@@ -73,6 +100,8 @@ struct HTTPRemoteAlbumClient: RemoteAlbumClient {
         let height: Int?
         let captureMs: Int64
         let decision: RemoteDecision?
+        let kind: RemoteMediaKind
+        let hasVideo: Bool
     }
     private struct WireAlbum: Decodable {
         let counts: RemoteAlbumCounts
@@ -90,6 +119,10 @@ struct HTTPRemoteAlbumClient: RemoteAlbumClient {
         Config.reconcileURL(for: "/album/\(albumId)/thumb/\(mediaKey)?token=\(MirrorToken.value)")
     }
 
+    static func videoURL(albumId: String, mediaKey: String) -> URL {
+        Config.reconcileURL(for: "/album/\(albumId)/video/\(mediaKey)?token=\(MirrorToken.value)")
+    }
+
     func fetchAlbum(albumId: String) async throws -> RemoteAlbumSnapshot {
         var request = URLRequest(url: Self.albumURL(albumId: albumId))
         // A 1605-item listing is far bigger than the tiny queue bodies
@@ -99,6 +132,12 @@ struct HTTPRemoteAlbumClient: RemoteAlbumClient {
         request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
         let (data, response) = try await URLSession.shared.data(for: request)
         try Self.requireOK(response)
+        return try Self.decodeSnapshot(data, albumId: albumId)
+    }
+
+    /// GET /album/:id body -> snapshot. Split out so a unit test can feed it
+    /// real wire JSON (kind / hasVideo handling) without a network.
+    static func decodeSnapshot(_ data: Data, albumId: String) throws -> RemoteAlbumSnapshot {
         let wire = try JSONDecoder().decode(WireAlbum.self, from: data)
         let items = wire.items
             .sorted { $0.captureMs < $1.captureMs }
@@ -106,7 +145,9 @@ struct HTTPRemoteAlbumClient: RemoteAlbumClient {
                 RemoteAlbumItem(
                     albumId: albumId, mediaKey: item.mediaKey, captureMs: item.captureMs,
                     width: item.width ?? 0, height: item.height ?? 0, decision: item.decision,
-                    thumbnailURL: Self.thumbnailURL(albumId: albumId, mediaKey: item.mediaKey)
+                    thumbnailURL: thumbnailURL(albumId: albumId, mediaKey: item.mediaKey),
+                    kind: item.kind,
+                    videoURL: item.hasVideo ? videoURL(albumId: albumId, mediaKey: item.mediaKey) : nil
                 )
             }
         return RemoteAlbumSnapshot(counts: wire.counts, items: items)
@@ -146,6 +187,11 @@ struct RemoteAlbumService {
     init(albumId: String, client: RemoteAlbumClient = HTTPRemoteAlbumClient()) {
         self.albumId = albumId
         self.client = client
+    }
+
+    /// Service for a "remote:<albumId>" resume key's album id.
+    static func service(albumId: String) -> RemoteAlbumService {
+        albumId == oliverAlbumId ? oliverAlbum : RemoteAlbumService(albumId: albumId)
     }
 
     /// The service the Utilities row opens. Under `--seed-remote-album`

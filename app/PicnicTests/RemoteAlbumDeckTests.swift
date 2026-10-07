@@ -133,18 +133,67 @@ final class RemoteAlbumDeckTests: XCTestCase {
         XCTAssertTrue(rig.client.posted.isEmpty)
     }
 
-    func testRemoteIdsRoundTripThroughStoreAndKeepLastSwipedMonthUntouched() throws {
+    func testRemoteSwipeRecordsRemoteResumeKeyAndLocalSwipeOverwritesIt() throws {
         let container = try TestSupport.inMemoryContainer()
         let store = SortStore(context: container.mainContext)
         UserDefaults.standard.removeObject(forKey: SortStore.lastSwipedMonthKeyDefaultsKey)
 
         store.setState(.skipped, forID: "gphotos:oliver-album:x", monthKey: "remote:oliver-album")
         XCTAssertEqual(store.state(forID: "gphotos:oliver-album:x"), .skipped)
-        XCTAssertNil(store.lastSwipedMonthKey,
-                     "a remote swipe must not become MyLife's 'resume where you left off' month")
+        XCTAssertEqual(store.lastSwipedMonthKey, "remote:oliver-album",
+                       "a remote swipe is where a cold launch must resume")
 
         store.setState(.kept, forID: "local-id", monthKey: "2026-01")
-        XCTAssertEqual(store.lastSwipedMonthKey, "2026-01", "local swipes must still record their month")
+        XCTAssertEqual(store.lastSwipedMonthKey, "2026-01", "the most recent swipe wins, local or remote")
+        UserDefaults.standard.removeObject(forKey: SortStore.lastSwipedMonthKeyDefaultsKey)
+    }
+
+    func testAutoOpenTargetRoutesRemoteKeyAndKeepsLocalBehavior() {
+        let jan = MonthBucket(year: 2026, month: 1, assets: [])
+        let mar = MonthBucket(year: 2026, month: 3, assets: [])
+        let buckets = [mar, jan]  // newest first, like AppState.monthBuckets
+
+        guard case .remoteAlbum(let albumId)? = AutoOpenTarget.resolve(
+            lastSwipedKey: "remote:oliver-album", buckets: buckets) else {
+            return XCTFail("a remote: key must resolve to the remote deck")
+        }
+        XCTAssertEqual(albumId, "oliver-album")
+        guard case .remoteAlbum? = AutoOpenTarget.resolve(lastSwipedKey: "remote:oliver-album", buckets: []) else {
+            return XCTFail("the remote deck needs no local months")
+        }
+        guard case .month(let resumed)? = AutoOpenTarget.resolve(lastSwipedKey: "2026-01", buckets: buckets) else {
+            return XCTFail("a month key must resolve to that month")
+        }
+        XCTAssertEqual(resumed.key, "2026-01")
+        guard case .month(let latest)? = AutoOpenTarget.resolve(lastSwipedKey: nil, buckets: buckets) else {
+            return XCTFail("no history must open the newest month")
+        }
+        XCTAssertEqual(latest.key, "2026-03")
+        guard case .month(let stale)? = AutoOpenTarget.resolve(lastSwipedKey: "1999-01", buckets: buckets) else {
+            return XCTFail("an unknown month key must fall back to the newest month")
+        }
+        XCTAssertEqual(stale.key, "2026-03")
+        XCTAssertNil(AutoOpenTarget.resolve(lastSwipedKey: nil, buckets: []))
+    }
+
+    func testWireKindAndHasVideoDecodeToVideoURL() throws {
+        let json = """
+        {"counts":{"total":3,"keep":0,"skip":0,"undecided":3,"downloaded":0},
+         "items":[
+          {"mediaKey":"p","thumbUrl":"https://x/p","width":1,"height":1,"captureMs":1,"decision":null,"kind":"photo","hasVideo":false},
+          {"mediaKey":"v","thumbUrl":"https://x/v","width":1,"height":1,"captureMs":2,"decision":null,"kind":"video","hasVideo":true},
+          {"mediaKey":"u","thumbUrl":"https://x/u","width":1,"height":1,"captureMs":3,"decision":null,"kind":"video","hasVideo":false}
+         ]}
+        """
+        let items = try HTTPRemoteAlbumClient.decodeSnapshot(Data(json.utf8), albumId: "a").items
+        XCTAssertEqual(items.map(\.kind), [.photo, .video, .video])
+        XCTAssertNil(items[0].videoURL, "a photo has no video URL")
+        let url = try XCTUnwrap(items[1].videoURL, "a cached video must carry its server URL")
+        XCTAssertTrue(url.path.hasSuffix("/album/a/video/v"), "got \(url)")
+        XCTAssertTrue(url.absoluteString.contains("token="), "AVPlayer cannot send a header; the token rides the query")
+        XCTAssertNil(items[2].videoURL, "an uncached video must have no URL so the deck disables play")
+        XCTAssertEqual(items.map { DeckItem.remote($0).hasPlayableVideo }, [false, true, false])
+        XCTAssertEqual(items.map { DeckItem.remote($0).isVideo }, [false, true, true])
     }
 
     func testDeckItemIdsAndGateAccessors() {

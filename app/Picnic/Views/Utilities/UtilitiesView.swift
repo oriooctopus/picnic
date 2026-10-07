@@ -65,13 +65,8 @@ struct UtilitiesView: View {
                 // instead of PhotoKit assets. photoLibrary/mirrorQueue are
                 // deliberately not passed, so nothing in this deck can touch
                 // PhotoKit or enqueue a mirror delete.
-                DeckView(viewModel: DeckViewModel(
-                    remoteAlbum: RemoteAlbumService.oliverAlbum,
-                    title: "Oliver! album",
-                    sortStore: appState.sortStore
-                ))
-                .environmentObject(appState)
-                .environmentObject(appState.outfitLog)
+                RemoteAlbumDeckCover(service: RemoteAlbumService.oliverAlbum)
+                    .environmentObject(appState)
             }
         }
     }

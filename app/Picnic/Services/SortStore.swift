@@ -126,12 +126,9 @@ final class SortStore: ObservableObject {
         }
         try? context.save()
         stateCache[id] = state
-        // "remote:" month keys name no My Life month; writing one here would
-        // make MyLifeView's cold-launch resume look for a month that does not
-        // exist (see lastSwipedMonthKey).
-        if !monthKey.hasPrefix(Self.remoteMonthKeyPrefix) {
-            UserDefaults.standard.set(monthKey, forKey: Self.lastSwipedMonthKeyDefaultsKey)
-        }
+        // "remote:<albumId>" keys are recorded too: MyLifeView's cold-launch
+        // resume (AutoOpenTarget) reopens the remote deck from them.
+        UserDefaults.standard.set(monthKey, forKey: Self.lastSwipedMonthKeyDefaultsKey)
         if state != .unsorted && recordsActivity { recordActivity() }
     }
 

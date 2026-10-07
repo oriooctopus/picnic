@@ -11,6 +11,8 @@ struct MyLifeView: View {
     @State private var scrollProxy: ScrollViewProxy?
     @State private var showScrollTop = false
     @State private var selectedMonth: MonthBucket?
+    /// Cold-launch resume into the remote album deck (see AutoOpenTarget).
+    @State private var resumeRemoteAlbumId: String?
 
     /// Clears the floating tab-bar pill (see RootTabView.bottomBar): its
     /// capsule sits ~14pt vertical padding + ~20pt icon + 12pt bottom
@@ -141,7 +143,23 @@ struct MyLifeView: View {
             ReconcileReviewView(month: month)
                 .environmentObject(appState)
         }
+        // The cover lives on its own background view: two fullScreenCover
+        // modifiers on the SAME view silently collapse into one in SwiftUI.
+        .background(
+            Color.clear.fullScreenCover(item: Binding(
+                get: { resumeRemoteAlbumId.map(RemoteAlbumResume.init) },
+                set: { resumeRemoteAlbumId = $0?.albumId }
+            )) { resume in
+                RemoteAlbumDeckCover(service: RemoteAlbumService.service(albumId: resume.albumId))
+                    .environmentObject(appState)
+            }
+        )
         .background(Color.black.ignoresSafeArea())
+    }
+
+    private struct RemoteAlbumResume: Identifiable {
+        let albumId: String
+        var id: String { albumId }
     }
 
     /// Cold launch reopens whichever month the user last swiped in (so
@@ -153,14 +171,19 @@ struct MyLifeView: View {
         guard !appState.hasAutoOpenedLatestMonth,
               !appState.skipAutoOpenDeck,
               !appState.isSeeding,
-              let latest = appState.monthBuckets.first else { return }
-        let resumeMonth = appState.sortStore.lastSwipedMonthKey
-            .flatMap { key in appState.monthBuckets.first { $0.key == key } } ?? latest
+              let target = AutoOpenTarget.resolve(
+                lastSwipedKey: appState.sortStore.lastSwipedMonthKey, buckets: appState.monthBuckets
+              ) else { return }
         appState.hasAutoOpenedLatestMonth = true
         // No slide-up: the deck should read as the screen the app opened on.
         var transaction = Transaction()
         transaction.disablesAnimations = true
-        withTransaction(transaction) { selectedMonth = resumeMonth }
+        withTransaction(transaction) {
+            switch target {
+            case .remoteAlbum(let albumId): resumeRemoteAlbumId = albumId
+            case .month(let month): selectedMonth = month
+            }
+        }
     }
 
     private var header: some View {

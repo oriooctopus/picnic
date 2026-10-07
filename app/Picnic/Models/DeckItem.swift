@@ -43,6 +43,23 @@ enum DeckItem: Identifiable, Equatable {
         return nil
     }
 
+    /// A video card, local or remote.
+    var isVideo: Bool {
+        switch self {
+        case .local(let asset): return asset.mediaType == .video
+        case .remote(let item): return item.isVideo
+        }
+    }
+
+    /// A video the deck can actually play. False for a remote video the
+    /// server has not cached: it shows as a still with a disabled play control.
+    var hasPlayableVideo: Bool {
+        switch self {
+        case .local(let asset): return asset.mediaType == .video
+        case .remote(let item): return item.videoURL != nil
+        }
+    }
+
     var remoteItem: RemoteAlbumItem? {
         if case .remote(let item) = self { return item }
         return nil
