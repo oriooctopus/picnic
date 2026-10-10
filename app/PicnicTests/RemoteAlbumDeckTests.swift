@@ -235,10 +235,12 @@ final class RemoteAlbumDeckTests: XCTestCase {
             displayURL: RemoteAlbumFixtures.displayURL(mediaKey: key)
         ))
         let size = CGSize(width: 600, height: 800)
-        let before = try XCTUnwrap(await ThumbnailLoader.bestAvailableImage(for: item, targetSize: size))
+        let beforeImage = await ThumbnailLoader.bestAvailableImage(for: item, targetSize: size)
+        let before = try XCTUnwrap(beforeImage)
         XCTAssertEqual(before.size.width * before.scale, 600, "display not on disk yet: the thumb")
         try await RemoteDisplayCache.prefetch(RemoteAlbumFixtures.displayURL(mediaKey: key))
-        let after = try XCTUnwrap(await ThumbnailLoader.bestAvailableImage(for: item, targetSize: size))
+        let afterImage = await ThumbnailLoader.bestAvailableImage(for: item, targetSize: size)
+        let after = try XCTUnwrap(afterImage)
         XCTAssertEqual(after.size.width * after.scale, 1800, "display on disk: the card behind must be the sharp one")
     }
 
