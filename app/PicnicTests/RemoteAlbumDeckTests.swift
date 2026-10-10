@@ -225,7 +225,7 @@ final class RemoteAlbumDeckTests: XCTestCase {
 
     /// The card behind the deck is promoted to the current card on swipe, so it
     /// must be the sharp display image whenever that is already on disk; the
-    /// 600x800 fixture thumb is the stand-in only when it is not.
+    /// 600x800pt fixture thumb (3x scale, so compared in points) is the stand-in only when it is not.
     func testPeekImageIsDisplayWhenCachedAndThumbWhenNot() async throws {
         RemoteDisplayCache.removeAll()
         let key = "peek-test"
@@ -237,11 +237,11 @@ final class RemoteAlbumDeckTests: XCTestCase {
         let size = CGSize(width: 600, height: 800)
         let beforeImage = await ThumbnailLoader.bestAvailableImage(for: item, targetSize: size)
         let before = try XCTUnwrap(beforeImage)
-        XCTAssertEqual(before.size.width * before.scale, 600, "display not on disk yet: the thumb")
+        XCTAssertEqual(before.size.width, 600, "display not on disk yet: the thumb")
         try await RemoteDisplayCache.prefetch(RemoteAlbumFixtures.displayURL(mediaKey: key))
         let afterImage = await ThumbnailLoader.bestAvailableImage(for: item, targetSize: size)
         let after = try XCTUnwrap(afterImage)
-        XCTAssertEqual(after.size.width * after.scale, 1800, "display on disk: the card behind must be the sharp one")
+        XCTAssertEqual(after.size.width, 1800, "display on disk: the card behind must be the sharp one")
     }
 
     func testDeckItemIdsAndGateAccessors() {
