@@ -50,6 +50,14 @@ extension ThumbnailLoader {
         case .local(let asset):
             return await bestAvailableImage(for: asset, targetSize: targetSize)
         case .remote(let remote):
+            // The card behind is what gets promoted to the current card on
+            // swipe, so the 512px thumb here showed as a soft card until the
+            // display image swapped in. Use the sharp one when the prefetcher
+            // already has it on disk (decode only; never a network wait).
+            if let displayURL = remote.displayURL, RemoteDisplayCache.isCached(displayURL),
+               let sharp = try? await RemoteDisplayCache.image(url: displayURL) {
+                return sharp
+            }
             return try? await remoteImage(url: remote.thumbnailURL)
         }
     }
