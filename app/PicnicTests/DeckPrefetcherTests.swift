@@ -79,7 +79,10 @@ final class DeckPrefetcherTests: XCTestCase {
         let items = remoteItems(100)
         prefetcher.recenter(items: items, currentIndex: 50)
         try await Task.sleep(nanoseconds: 200_000_000)
-        XCTAssertEqual(rec.requestedKeys, ["k51", "k52", "k53"], "forward first, capped at remoteMaxInFlight")
+        // Set, not array: the three Tasks are started in window order but may
+        // run in any order, so only WHICH keys were picked is deterministic.
+        XCTAssertEqual(rec.requestedKeys.count, 3, "capped at remoteMaxInFlight")
+        XCTAssertEqual(Set(rec.requestedKeys), ["k51", "k52", "k53"], "forward first")
 
         // Jump far away: all three are out of the new window and must be cancelled.
         prefetcher.recenter(items: items, currentIndex: 90)
