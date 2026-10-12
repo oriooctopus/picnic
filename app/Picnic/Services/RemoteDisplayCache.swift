@@ -5,9 +5,9 @@ import UIKit
 ///
 /// WHY a disk cache of ENCODED bytes and not an NSCache of UIImages: a decoded
 /// 2048x1536 bitmap is ~12.6 MB (2048x2048 ~16.8 MB). The prefetch window is
-/// 201 cards (DeckPrefetcher.remoteRadius), so decoded images would cost
-/// ~2.5-3.4 GB, which jetsam kills.
-/// The encoded JPEG is ~0.5 MB, so the whole window is ~100 MB on disk, and a
+/// 150 cards (DeckPrefetcher.remoteRadius), so decoded images would cost
+/// ~1.9-2.5 GB, which jetsam kills.
+/// The encoded JPEG is ~0.6 MB, so the whole window is ~95 MB on disk, and a
 /// card decodes only when it is shown (tens of ms, off the main thread).
 /// Only the last few decoded images stay in memory (`decoded`, 3 entries, so
 /// swiping back one card is instant): 3 x ~17 MB worst case.
@@ -15,9 +15,10 @@ import UIKit
 /// The thumbnail cache (`ThumbnailLoader.remoteImage`, 512px) is separate and
 /// unchanged; the filmstrip keeps using it.
 enum RemoteDisplayCache {
-    /// Disk bound. The prefetch window is 2 * DeckPrefetcher.remoteRadius + 1
-    /// = 201 cards, so 256 keeps the whole window plus swipe-back history. At
-    /// 0.3-0.5 MB per file that is ~80-130 MB (an estimate, not a measurement).
+    /// Disk bound. The prefetch window is DeckPrefetcher.remoteRadius = 150
+    /// cards ahead, so 256 keeps the whole window plus ~100 cards of
+    /// swipe-back history. At ~0.63 MB per file (measured average over the
+    /// album's display images) that is ~160 MB at the cap.
     /// Must stay above the window or trim() evicts files just downloaded.
     static let maxFiles = 256
 

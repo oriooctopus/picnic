@@ -10,10 +10,10 @@ import UIKit
 /// Same targetSize/contentMode as `ThumbnailLoader.imageUpdates` so the cached
 /// derivative is the one the card asks for.
 ///
-/// Remote-album photo cards use a wider window (`remoteRadius`) and the same recenter /
+/// Remote-album photo cards use a forward-only window (`remoteRadius`) and the same recenter /
 /// cancel-out-of-window / refill loop, but the unit of work is "download the
 /// server's card-size JPEG into RemoteDisplayCache's disk cache" (encoded
-/// bytes, no decode, so the 201-card window (`remoteRadius`) costs ~60-100 MB of disk, not
+/// bytes, no decode, so the 150-card window (`remoteRadius`) costs ~95 MB of disk, not
 /// hundreds of MB of RAM). Remote videos are deliberately not prefetched:
 /// one shared player streams the current video only.
 @MainActor
@@ -23,15 +23,17 @@ final class DeckPrefetcher {
     /// Remote downloads are small HTTP GETs from the tailnet box, not iCloud
     /// pulls, so a few in parallel is fine. A guess, not a measurement.
     static let remoteMaxInFlight = 4
-    /// How far around the current card remote display images are predownloaded.
-    /// Much wider than the iCloud `radius` because the unit is ~0.3-0.5 MB of
-    /// encoded JPEG on disk (never decoded, see RemoteDisplayCache), so 100
-    /// each way is ~60-100 MB. The window must be wide enough that a user
-    /// swiping quickly never outruns it and sees the soft 512px thumb. The
-    /// number is a judgement call, not a measurement; RemoteDisplayCache.maxFiles
-    /// must stay above 2 * remoteRadius + 1 or the cache evicts what it just
-    /// downloaded.
-    static let remoteRadius = 100
+    /// How many cards AHEAD of the current one remote display images are
+    /// predownloaded. Forward only: the user sorts through the album in order,
+    /// and cards already passed stay in RemoteDisplayCache (LRU) until evicted,
+    /// so swiping back needs no prefetch. Wide because the unit is ~0.6 MB of
+    /// encoded JPEG on disk (measured avg 633 KB over the 1604-image album,
+    /// never decoded, see RemoteDisplayCache), so 150 is ~95 MB. It must be wide
+    /// enough that a quick swipe never outruns it and shows the soft 512px
+    /// thumb. A judgement call, not a measurement. RemoteDisplayCache.maxFiles
+    /// must stay above remoteRadius with room for history or it evicts what it
+    /// just downloaded.
+    static let remoteRadius = 150
 
     /// Downloads one display image into the disk cache. Injectable so a unit
     /// test can observe requests and cancellation without a network.
@@ -40,10 +42,12 @@ final class DeckPrefetcher {
     /// Indices to prefetch around `current`: the next `radius` cards first
     /// (the user is swiping forward), then the previous `radius`, clamped to
     /// the list.
-    nonisolated static func window(count: Int, current: Int, radius: Int = DeckPrefetcher.radius) -> [Int] {
+    /// `behind` defaults to `radius`; the remote window passes 0 (forward only).
+    nonisolated static func window(count: Int, current: Int, radius: Int = DeckPrefetcher.radius, behind: Int? = nil) -> [Int] {
         guard count > 0, (0..<count).contains(current) else { return [] }
-        let steps = Array(stride(from: 1, through: radius, by: 1))
-        return (steps.map { current + $0 } + steps.map { current - $0 }).filter { (0..<count).contains($0) }
+        let forward = Array(stride(from: 1, through: radius, by: 1))
+        let back = Array(stride(from: 1, through: behind ?? radius, by: 1))
+        return (forward.map { current + $0 } + back.map { current - $0 }).filter { (0..<count).contains($0) }
     }
 
     private let remoteFetch: RemoteFetch
@@ -55,11 +59,11 @@ final class DeckPrefetcher {
     }
 
     /// Display URLs to prefetch around `currentIndex`, in `window` order
-    /// (forward first). Remote photos that have a display image only: videos
+    /// (forward only). Remote photos that have a display image only: videos
     /// are not prefetched, and an item with no display rendition yet has
     /// nothing to fetch.
     nonisolated static func remoteWanted(items: [DeckItem], currentIndex: Int, radius: Int = DeckPrefetcher.remoteRadius) -> [URL] {
-        window(count: items.count, current: currentIndex, radius: radius).compactMap { i in
+        window(count: items.count, current: currentIndex, radius: radius, behind: 0).compactMap { i in
             guard let remote = items[i].remoteItem, !remote.isVideo else { return nil }
             return remote.displayURL
         }

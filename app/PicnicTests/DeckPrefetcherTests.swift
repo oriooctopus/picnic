@@ -42,19 +42,19 @@ final class DeckPrefetcherTests: XCTestCase {
 
     private func keys(_ urls: [URL]) -> [String] { urls.compactMap(\.host) }
 
-    func testRemoteWantedIsTheWideWindowMinusVideosAndMissingDisplays() {
+    func testRemoteWantedIsForwardOnlyMinusVideosAndMissingDisplays() {
         let r = DeckPrefetcher.remoteRadius
         XCTAssertGreaterThanOrEqual(r, 100, "the point of the remote window is a large predownload")
-        XCTAssertGreaterThan(RemoteDisplayCache.maxFiles, 2 * r + 1, "cache must hold the whole window or it evicts fresh downloads")
-        let items = remoteItems(1000, noDisplay: [502], videos: [499])
+        XCTAssertGreaterThan(RemoteDisplayCache.maxFiles, r, "cache must hold the whole window or it evicts fresh downloads")
+        let items = remoteItems(1000, noDisplay: [502], videos: [505])
         let wanted = keys(DeckPrefetcher.remoteWanted(items: items, currentIndex: 500))
-        XCTAssertEqual(wanted.first, "k501", "forward first")
+        XCTAssertEqual(wanted.first, "k501", "nearest card first")
         XCTAssertFalse(wanted.contains("k502"), "no display rendition yet: nothing to fetch")
-        XCTAssertFalse(wanted.contains("k499"), "videos are not prefetched")
-        XCTAssertEqual(wanted.count, 2 * r - 2)
-        XCTAssertTrue(wanted.contains("k\(500 + r)") && wanted.contains("k\(500 - r)"), "both ends of the window")
+        XCTAssertFalse(wanted.contains("k505"), "videos are not prefetched")
+        XCTAssertEqual(wanted.count, r - 2)
+        XCTAssertEqual(wanted.last, "k\(500 + r)", "the far end of the window")
         XCTAssertFalse(wanted.contains("k\(500 + r + 1)"), "nothing beyond the window")
-        XCTAssertFalse(wanted.contains("k500"), "the current card loads itself")
+        XCTAssertTrue(wanted.allSatisfy { Int($0.dropFirst())! > 500 }, "nothing behind or at the current card")
     }
 
     /// Recenter must request exactly the window (capped in flight), cancel the
@@ -85,7 +85,7 @@ final class DeckPrefetcherTests: XCTestCase {
         // Set, not array: the three Tasks are started in window order but may
         // run in any order, so only WHICH keys were picked is deterministic.
         XCTAssertEqual(rec.requestedKeys.count, DeckPrefetcher.remoteMaxInFlight, "capped at remoteMaxInFlight")
-        XCTAssertEqual(Set(rec.requestedKeys), ["k51", "k52", "k53", "k54"], "forward first")
+        XCTAssertEqual(Set(rec.requestedKeys), ["k51", "k52", "k53", "k54"], "nearest cards first")
 
         // Jump far away: all three are out of the new window and must be cancelled.
         prefetcher.recenter(items: items, currentIndex: 900)
