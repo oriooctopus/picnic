@@ -6,12 +6,23 @@ import XCTest
 /// without a simulator's Photos/UI stack.
 final class MirrorBannerLogicTests: XCTestCase {
 
-    func testNoBannerWhenNothingPendingOrBackedUp() {
+    func testNoBannerWhenNothingPendingOrQueued() {
+        // Server reports counts.queued = 0 and oldestQueuedWaitMs null.
+        let state = MirrorBannerLogic.state(
+            pendingCount: 0, lastError: nil,
+            serverQueuedCount: 0, oldestQueuedWaitMs: nil
+        )
+        XCTAssertEqual(state, .none)
+    }
+
+    func testFreshServerQueueShowsNonStuckBanner() {
+        // The queue is shown at any size while it drains, not only once
+        // it's been stuck an hour (the old behavior returned .none here).
         let state = MirrorBannerLogic.state(
             pendingCount: 0, lastError: nil,
             serverQueuedCount: 3, oldestQueuedWaitMs: 10_000
         )
-        XCTAssertEqual(state, .none)
+        XCTAssertEqual(state, .serverQueued(count: 3, waitMs: 10_000, isStuck: false))
     }
 
     func testDevicePendingWinsOverServerBacklog() {
@@ -25,22 +36,31 @@ final class MirrorBannerLogicTests: XCTestCase {
         XCTAssertEqual(state, .devicePending(count: 2, outfitCount: 0, lastError: "mirror server returned HTTP 500"))
     }
 
-    func testServerBacklogJustUnderThresholdShowsNothing() {
+    func testServerQueueJustUnderThresholdIsNotStuck() {
+        let waitMs = MirrorBannerLogic.serverBacklogThresholdMs - 1
         let state = MirrorBannerLogic.state(
             pendingCount: 0, lastError: nil,
-            serverQueuedCount: 40,
-            oldestQueuedWaitMs: MirrorBannerLogic.serverBacklogThresholdMs - 1
+            serverQueuedCount: 40, oldestQueuedWaitMs: waitMs
         )
-        XCTAssertEqual(state, .none)
+        XCTAssertEqual(state, .serverQueued(count: 40, waitMs: waitMs, isStuck: false))
     }
 
-    func testServerBacklogJustOverThresholdShowsBanner() {
+    func testServerQueueJustOverThresholdIsStuck() {
         let waitMs = MirrorBannerLogic.serverBacklogThresholdMs + 1
         let state = MirrorBannerLogic.state(
             pendingCount: 0, lastError: nil,
             serverQueuedCount: 40, oldestQueuedWaitMs: waitMs
         )
-        XCTAssertEqual(state, .serverBacklog(count: 40, waitMs: waitMs))
+        XCTAssertEqual(state, .serverQueued(count: 40, waitMs: waitMs, isStuck: true))
+    }
+
+    func testWaitFormatsMinutesUnderAnHourAndHoursAfter() {
+        XCTAssertEqual(MirrorSyncBannerContent.formatWait(465_055), "7m")
+        XCTAssertEqual(MirrorSyncBannerContent.formatWait(155_993_263), "43h")
+        XCTAssertEqual(
+            MirrorSyncBannerContent.serverQueuedText(count: 125, waitMs: 465_055),
+            "125 deleting from Google · oldest 7m"
+        )
     }
 
     func testUnreachableOrNeverFetchedStatusShowsNothing() {
@@ -63,6 +83,6 @@ final class MirrorBannerLogicTests: XCTestCase {
             pendingCount: 0, lastError: nil,
             serverQueuedCount: 65, oldestQueuedWaitMs: 155_993_263
         )
-        XCTAssertEqual(state, .serverBacklog(count: 65, waitMs: 155_993_263))
+        XCTAssertEqual(state, .serverQueued(count: 65, waitMs: 155_993_263, isStuck: true))
     }
 }

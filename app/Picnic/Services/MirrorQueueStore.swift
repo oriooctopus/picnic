@@ -69,9 +69,12 @@ final class MirrorQueueStore: ObservableObject {
     // Injected clock so backoff is testable.
     private let now: () -> Date
     private let fetchStatus: () async throws -> MirrorQueueStatus
-    // 5 minutes: the banner's own threshold is a full HOUR of backlog, so
-    // polling faster than that buys no earlier signal, only battery/data.
-    private static let pollIntervalNanoseconds: UInt64 = 5 * 60 * 1_000_000_000
+    // 30 seconds: the banner shows the server queue as a live count while
+    // it drains, so the old 5-minute poll (fine when the banner only flagged
+    // hour-long backlogs) left it visibly stale right after a delete.
+    // Foreground-only (see startPolling/stopPolling) and one small GET over
+    // the tailnet, so the cost stays tiny. A guess, not measured.
+    private static let pollIntervalNanoseconds: UInt64 = 30 * 1_000_000_000
 
     init(
         context: ModelContext,

@@ -88,7 +88,7 @@ final class JobRuntime {
         await drainCoordinator.drainAtLaunch()
         // Launch counts as a foreground: fetch once immediately rather than
         // waiting out the first poll interval, so a launch after hours in the
-        // background does not show stale data for 5 minutes.
+        // background does not show stale data for a full poll interval.
         await mirrorQueue.refreshServerStatus()
         mirrorQueue.startPolling()
     }

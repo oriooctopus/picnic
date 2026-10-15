@@ -14,17 +14,20 @@ enum MirrorBannerState: Equatable {
     /// Retry or Discard. Outranks everything: the only state that needs the
     /// user to act, and it is never dropped silently.
     case failedJobs(count: Int)
-    /// Server-side backlog: jobs the phone HAS posted, but the server's
-    /// auto-drain hasn't cleared in over an hour. See
-    /// MirrorSyncBanner.swift's header comment for why pendingCount alone
-    /// can't see this -- POST succeeding is not the same as the server
-    /// having actually mirrored the file yet.
-    case serverBacklog(count: Int, waitMs: Int)
+    /// Server-side queue: jobs the phone HAS posted that the server's
+    /// auto-drain hasn't mirrored yet. Shown at any size, not only when
+    /// stuck: deletes mirror asynchronously and the queue should be
+    /// watchable while it drains. `isStuck` (oldest job waiting past
+    /// serverBacklogThresholdMs) switches the banner to its warning style.
+    /// See MirrorSyncBanner.swift's header comment for why pendingCount
+    /// alone can't see this -- POST succeeding is not the same as the
+    /// server having actually mirrored the file yet.
+    case serverQueued(count: Int, waitMs: Int, isStuck: Bool)
 }
 
 enum MirrorBannerLogic {
-    // 1 hour -- "backed up for more than an hour" is the goal's own
-    // threshold. Named here (not inlined below) so the tests read as
+    // 1 hour -- past this a queued job counts as stuck and the banner turns
+    // into a warning. Named here (not inlined below) so the tests read as
     // testing the real constant, not a copy of the number.
     static let serverBacklogThresholdMs = 60 * 60 * 1000
 
@@ -63,10 +66,13 @@ enum MirrorBannerLogic {
         if pendingCount > 0 || outfitPendingCount > 0 {
             return .devicePending(count: pendingCount, outfitCount: outfitPendingCount, lastError: lastError)
         }
-        guard let queued = serverQueuedCount, let waitMs = oldestQueuedWaitMs,
-              waitMs > serverBacklogThresholdMs else {
+        guard let queued = serverQueuedCount, queued > 0 else {
             return .none
         }
-        return .serverBacklog(count: queued, waitMs: waitMs)
+        // The server sends oldestQueuedWaitMs null only when nothing is
+        // queued; if it is ever missing with queued > 0, that only costs the
+        // "stuck" styling, never the count itself.
+        let waitMs = oldestQueuedWaitMs ?? 0
+        return .serverQueued(count: queued, waitMs: waitMs, isStuck: waitMs > serverBacklogThresholdMs)
     }
 }

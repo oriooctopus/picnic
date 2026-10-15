@@ -8,7 +8,9 @@ import SwiftUI
 ///   visible via `pendingCount` until it drains (the badge deletion-safety
 ///   requires).
 /// - Server-side: the POST succeeded, but the server's own auto-drain
-///   hasn't actually mirrored the file in over an hour. MirrorClient used to
+///   hasn't mirrored the file yet. Shown whenever anything is queued (a
+///   neutral progress pill), turning orange once the oldest job has waited
+///   over an hour. MirrorClient used to
 ///   have exactly one method (`post`) and the app never read server state,
 ///   so this half was completely invisible on the phone -- 65 jobs sat
 ///   queued server-side for 43 hours with the app showing nothing. See
@@ -122,17 +124,18 @@ struct MirrorSyncBannerContent: View {
                 .padding(.vertical, 8)
                 .background(Capsule().fill(Color.orange.opacity(0.9)))
                 .allowsHitTesting(false)
-            case .serverBacklog(let count, let waitMs):
+            case .serverQueued(let count, let waitMs, let isStuck):
                 HStack(spacing: 8) {
-                    Image(systemName: "clock.badge.exclamationmark")
-                    Text("\(count) photos waiting to mirror · \(Self.formatWait(waitMs))")
+                    Image(systemName: isStuck ? "clock.badge.exclamationmark" : "arrow.triangle.2.circlepath")
+                    Text(Self.serverQueuedText(count: count, waitMs: waitMs))
                 }
                 .font(.caption.bold())
                 .foregroundStyle(.white)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(Capsule().fill(Color.orange.opacity(0.9)))
+                .background(Capsule().fill(isStuck ? Color.orange.opacity(0.9) : Color(white: 0.25).opacity(0.95)))
                 .allowsHitTesting(false)
+                .accessibilityIdentifier("serverQueuedBanner")
             }
         }
     }
@@ -144,10 +147,13 @@ struct MirrorSyncBannerContent: View {
         return parts.joined(separator: " · ")
     }
 
-    // Whole hours only -- this banner means "stuck a while", not a live
-    // stopwatch; minute precision would just flicker on every 5-minute poll
-    // without telling anyone anything more useful.
-    private static func formatWait(_ ms: Int) -> String {
-        "\(ms / 3_600_000)h"
+    static func serverQueuedText(count: Int, waitMs: Int) -> String {
+        "\(count) deleting from Google · oldest \(formatWait(waitMs))"
+    }
+
+    // Minutes under an hour, whole hours after: the pill is a progress
+    // readout now, so "0h" for every normal sub-hour wait would say nothing.
+    static func formatWait(_ ms: Int) -> String {
+        ms < 3_600_000 ? "\(ms / 60_000)m" : "\(ms / 3_600_000)h"
     }
 }
