@@ -2932,6 +2932,14 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertGreaterThan(shortened, 0.4)
         capture("51-video-trim-dragged")
 
+        // Tapping the strip between the handles seeks; it must not move a handle.
+        let strip = app.descendants(matching: .any)["trim.strip"].firstMatch
+        XCTAssertTrue(strip.exists, "Trim strip should be tappable")
+        strip.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).tap()
+        strip.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        XCTAssertEqual(trimLengthSeconds(lengthLabel.label), shortened, accuracy: 0.05,
+                       "Tapping the strip must seek, not trim; got \(lengthLabel.label)")
+
         app.buttons["trim.save"].tap()
 
         // iOS asks "Allow Picnic to modify this video?"

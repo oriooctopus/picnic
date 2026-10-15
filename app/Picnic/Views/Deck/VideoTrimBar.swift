@@ -135,6 +135,16 @@ struct VideoTrimBar: View {
                 Rectangle().fill(Self.accent).frame(width: max(0, endX - startX), height: 3)
                     .offset(x: startX, y: stripHeight - 3)
 
+                // Tapping or dragging the strip between the handles moves the
+                // playhead there (Photos-style). Handles sit above this layer,
+                // so grabbing a handle still trims instead of seeking.
+                Color.clear
+                    .frame(width: track, height: stripHeight)
+                    .contentShape(Rectangle())
+                    .offset(x: handleWidth)
+                    .gesture(scrubDrag(track: track))
+                    .accessibilityIdentifier("trim.strip")
+
                 if controller.currentTime >= start && controller.currentTime <= effectiveEnd {
                     Capsule().fill(.white)
                         .frame(width: 3, height: stripHeight + 8)
@@ -192,6 +202,28 @@ struct VideoTrimBar: View {
                 controller.seek(toSeconds: start)
                 controller.resume()
             }
+    }
+
+    /// Pause and seek while the finger is on the strip; resume inside the
+    /// trim window on release.
+    private func scrubDrag(track: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named("trimStrip"))
+            .onChanged { value in
+                guard duration > 0 else { return }
+                controller.pause()
+                controller.seek(toSeconds: Self.scrubTime(
+                    x: value.location.x, handleWidth: handleWidth, track: track,
+                    duration: duration, window: start...effectiveEnd))
+            }
+            .onEnded { _ in controller.resume() }
+    }
+
+    /// Time under strip x-coordinate `x`, clamped to the kept `window` so the
+    /// playhead never leaves what Save will keep.
+    static func scrubTime(x: CGFloat, handleWidth: CGFloat, track: CGFloat,
+                          duration: Double, window: ClosedRange<Double>) -> Double {
+        let t = Double((x - handleWidth) / track) * duration
+        return min(max(t, window.lowerBound), window.upperBound)
     }
 
     /// Ten evenly spaced frames for the strip, decoded small. Best effort:
