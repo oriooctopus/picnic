@@ -1076,12 +1076,17 @@ export async function moveToTrash(page, panelTextBefore, { matchedUrl, expectedF
   // fixed dwell first -- a fast-rendering dialog doesn't cost the full wait,
   // and a slow one still gets caught.
   const waitForConfirmButton = async () => {
-    const confirm = page
-      .locator('button:has-text("Move to trash"), button:has-text("Delete"), button:has-text("Move to bin")')
-      .first();
+    // Scope to the confirm DIALOG when one is up: the viewer toolbar's own
+    // "Move to trash" button matches the bare locator first, and clicking it
+    // is not the confirmation (live 2026-10-16, replace flow: dialog "accepted"
+    // yet the photo stayed live and sibling items ended up trashed).
+    const labels = ['Move to trash', 'Delete', 'Move to bin'];
+    const scoped = page.locator(labels.map((l) => `[role=dialog] button:has-text("${l}")`).join(', ')).first();
+    const bare = page.locator(labels.map((l) => `button:has-text("${l}")`).join(', ')).first();
     const deadline = Date.now() + (FAST_DELAYS ? 20 : 3000);
     while (Date.now() < deadline) {
-      if (await confirm.isVisible().catch(() => false)) return confirm;
+      if (await scoped.isVisible().catch(() => false)) return scoped;
+      if (await bare.isVisible().catch(() => false)) return bare;
       await pollDelay();
     }
     return null;
@@ -3931,7 +3936,18 @@ export function makeReplaceOps(page, { stagingDir = join(dirname(QUEUE_PATH), 'r
         // copy (e.g. backed up by Google's iOS app), never the original.
         const originalDurationSec = await getDurationSec();
         if (classifyReplaceCandidate({ filename: parsed.filename, durationSec: originalDurationSec }, job, replaceUploadName(job.filename)) !== 'original') return undefined;
-        const { confirmed, guardFailed } = await moveToTrash(page, text, { matchedUrl: url, expectedFilename: parsed.filename, verifyByUrl: true, verifyUrl: plainPhotoUrl(url) });
+        // Re-prove identity on a FRESH plain-URL load (no search filmstrip to go
+        // stale) before anything is trashed: same name AND the longer duration.
+        const plain = plainPhotoUrl(url);
+        await page.goto(plain, { waitUntil: 'domcontentloaded' });
+        await openInfoPanelOnce(page);
+        const freshText = await readPanelText(page);
+        const fresh = parsePanelText(freshText);
+        const freshDurationSec = await getDurationSec();
+        if (classifyReplaceCandidate({ filename: fresh.filename, durationSec: freshDurationSec }, job, replaceUploadName(job.filename)) !== 'original') {
+          return { outcome: 'unverified', detail: `fresh load of ${plain} reads ${fresh.filename}/${freshDurationSec}s, not the original -- not trashing` };
+        }
+        const { confirmed, guardFailed } = await moveToTrash(page, freshText, { matchedUrl: plain, expectedFilename: fresh.filename, verifyByUrl: true, verifyUrl: plain });
         if (guardFailed) return { outcome: 'unverified', detail: 'viewer moved before the trash (guard refused)' };
         return confirmed
           ? { outcome: 'trashed', originalUrl: url, originalDurationSec }

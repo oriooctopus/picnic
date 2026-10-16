@@ -3189,3 +3189,32 @@ test('walkTimeline: normal case -- trashed and verified, matchedUrl logged on th
     );
   });
 });
+
+test('moveToTrash: with the viewer toolbar "Move to trash" button also on screen, only the DIALOG-scoped button is clicked', async () => {
+  let dialogVisible = false;
+  let toastVisible = false;
+  const clicked = [];
+  const page = {
+    keyboard: { press: async (key) => { if (key === '#') dialogVisible = true; } },
+    locator: (selector) => ({
+      first: () => ({
+        isVisible: async () => {
+          if (/has-text\("Move to trash"\)/.test(selector)) return /^\[role=dialog\]/.test(selector) ? dialogVisible : true; // toolbar button is always visible
+          if (/moved to \(trash\|bin\)/i.test(selector)) return toastVisible;
+          return false;
+        },
+        click: async () => {
+          clicked.push(selector);
+          if (/^\[role=dialog\]/.test(selector)) { dialogVisible = false; toastVisible = true; }
+        },
+      }),
+      all: async () => [],
+    }),
+    viewportSize: () => ({ width: 1280, height: 800 }),
+    mouse: { click: async () => {} },
+    evaluate: async () => ({ detailsAndFile: [], dimsAndFile: [], fileOnly: [] }),
+  };
+  const { confirmed } = await moveToTrash(page, 'ORIGINAL PANEL TEXT');
+  assert.equal(confirmed, true);
+  assert.ok(clicked.length === 1 && /^\[role=dialog\]/.test(clicked[0]), `clicked: ${clicked}`);
+});
