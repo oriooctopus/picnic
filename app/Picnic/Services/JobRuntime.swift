@@ -13,8 +13,10 @@ final class JobRuntime {
     let mirrorQueue: MirrorQueueStore
     let reconcileConfirm: ReconcileConfirmStore
     let outfitLog: OutfitLogStore
+    let trimReplace: TrimReplaceStore
     let drainCoordinator: DrainCoordinator
     private let pathSource: NetworkPathSource
+    private let trimCandidates: (TrimReplaceStore) async -> [TrimBackfillCandidate]
 
     init(
         context: ModelContext,
@@ -24,6 +26,8 @@ final class JobRuntime {
             _ = try await ReconcileClient.confirm(month: job.month, ids: job.googleIds, phoneDeleted: job.phoneIndexes)
         },
         outfitUpload: @escaping (OutfitImportJob) async throws -> Void = OutfitUploader().upload,
+        trimReplace: TrimReplaceStore = TrimReplaceStore(),
+        trimCandidates: @escaping (TrimReplaceStore) async -> [TrimBackfillCandidate] = { await TrimBackfillScanner.candidates(store: $0) },
         existingAssetIDs: @escaping ([String]) -> Set<String> = existingPhotoAssetIDs,
         fetchStatus: @escaping () async throws -> MirrorQueueStatus = MirrorClient.fetchStatus,
         now: @escaping () -> Date = Date.init
@@ -39,11 +43,14 @@ final class JobRuntime {
         mirrorQueue = mirror
         reconcileConfirm = reconcile
         outfitLog = outfit
+        self.trimReplace = trimReplace
+        self.trimCandidates = trimCandidates
         drainCoordinator = DrainCoordinator(drain: { ignoreBackoff in
             async let m: Void = mirror.drainQueue(ignoreBackoff: ignoreBackoff)
             async let r: Void = reconcile.drain(ignoreBackoff: ignoreBackoff)
             async let o: Void = outfit.drainQueue(ignoreBackoff: ignoreBackoff)
-            _ = await (m, r, o)
+            async let t: Void = trimReplace.drain(ignoreBackoff: ignoreBackoff)
+            _ = await (m, r, o, t)
         })
     }
 
@@ -85,6 +92,9 @@ final class JobRuntime {
         // whose delete went through are mirrored on this very launch.
         mirrorQueue.resolveArmedJobs(authorization: authorization)
         reconcileConfirm.resolveArmedJobs(authorization: authorization)
+        // Queue replacements for trims made before this feature existed (and any
+        // missed since), BEFORE the launch drain so they upload on this launch.
+        await trimReplace.backfill(candidates: { await trimCandidates(trimReplace) })
         await drainCoordinator.drainAtLaunch()
         // Launch counts as a foreground: fetch once immediately rather than
         // waiting out the first poll interval, so a launch after hours in the

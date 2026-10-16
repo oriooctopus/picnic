@@ -660,13 +660,27 @@ struct DeckView: View {
             start: CMTime(seconds: window.lowerBound, preferredTimescale: 600),
             end: CMTime(seconds: window.upperBound, preferredTimescale: 600)
         )
+        let staged = appState.trimReplace.stagingURL()
+        let adjustment: Data
         do {
-            try await VideoTrimmer.trim(asset: asset, to: range)
+            adjustment = try await VideoTrimmer.trim(asset: asset, to: range, stagedCopy: staged)
         } catch let error as PHPhotosError where error.code == .userCancelled {
             return false
         } catch {
             trimError = error.localizedDescription
             return false
+        }
+        // The edit is committed: queue the trimmed file for the server so Google
+        // Photos swaps it in (it never re-uploads edits itself). A failure here is
+        // surfaced, not swallowed, but the Photos edit itself already succeeded.
+        do {
+            try appState.trimReplace.enqueue(
+                TrimReplaceStore.entry(id: TrimReplaceStore.replaceID(localID: asset.localIdentifier, adjustmentData: adjustment), asset: asset),
+                stagedFile: staged
+            )
+            appState.trimReplace.scheduleDrain()
+        } catch {
+            trimError = "Trimmed, but couldn't queue the Google Photos update: \(error.localizedDescription)"
         }
         isTrimming = false
         // requestPlayerItem resolves the asset's current version by

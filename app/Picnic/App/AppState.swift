@@ -13,6 +13,7 @@ final class AppState: ObservableObject {
     var mirrorQueue: MirrorQueueStore { jobs.mirrorQueue }
     var reconcileConfirm: ReconcileConfirmStore { jobs.reconcileConfirm }
     var outfitLog: OutfitLogStore { jobs.outfitLog }
+    var trimReplace: TrimReplaceStore { jobs.trimReplace }
 
     @Published var monthBuckets: [MonthBucket] = []
     // Set by MonthCardView's "Clean up Google" context-menu button; MyLifeView
@@ -124,8 +125,12 @@ final class AppState: ObservableObject {
         #if DEBUG
         // UI-test mode (every UI test launches with --seed-library) must never
         // reach the real Outfits server: inject an uploader that just succeeds.
+        // Same for trim replacements (POST /replace would reach the real mirror).
         if args.contains("--seed-library") {
-            jobs = JobRuntime(context: modelContext, pathSource: NetworkPathWatcher(), outfitUpload: { _ in })
+            jobs = JobRuntime(
+                context: modelContext, pathSource: NetworkPathWatcher(), outfitUpload: { _ in },
+                trimReplace: TrimReplaceStore(upload: { _, _ in })
+            )
         } else {
             jobs = JobRuntime(context: modelContext, pathSource: NetworkPathWatcher())
         }

@@ -21,6 +21,12 @@ enum Config {
         URL(string: "http://\(mirrorHost):\(mirrorPort)/queue")!
     }
 
+    /// POST /replace: uploads a trimmed video so the server can swap it into
+    /// Google Photos (see TrimReplaceStore).
+    static var mirrorReplaceURL: URL {
+        URL(string: "http://\(mirrorHost):\(mirrorPort)/replace")!
+    }
+
     /// Outfits server: same host as the mirror, no auth, plain http over the tailnet.
     static let outfitsPort = 8314
 

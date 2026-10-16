@@ -23,7 +23,14 @@ enum VideoTrimmer {
     /// `range` is in the timeline of the asset's CURRENT version (what the
     /// deck's player is showing), which is also what `audiovisualAsset`
     /// returns below when we don't claim to understand prior adjustments.
-    static func trim(asset: PHAsset, to range: CMTimeRange) async throws {
+    ///
+    /// Besides the PhotoKit edit, the rendered trimmed file is copied to
+    /// `stagedCopy` (the trim-replace queue's directory) BEFORE the edit is
+    /// committed, so it can be uploaded to the mirror server for Google
+    /// Photos, which never re-uploads edits (see TrimReplaceStore). Returns
+    /// the adjustment payload, which keys the replacement (replaceID). If the
+    /// edit is declined or fails, the staged copy is removed again.
+    static func trim(asset: PHAsset, to range: CMTimeRange, stagedCopy: URL) async throws -> Data {
         let input = try await contentEditingInput(for: asset)
         guard let avAsset = input.audiovisualAsset else { throw TrimError.notAVideo }
 
@@ -51,9 +58,16 @@ enum VideoTrimmer {
         await export.export()
         guard export.status == .completed else { throw TrimError.exportFailed(export.error) }
 
-        try await PHPhotoLibrary.shared().performChanges {
-            PHAssetChangeRequest(for: asset).contentEditingOutput = output
+        try FileManager.default.copyItem(at: output.renderedContentURL, to: stagedCopy)
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest(for: asset).contentEditingOutput = output
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: stagedCopy)
+            throw error
         }
+        return adjustment
     }
 
     private static func contentEditingInput(for asset: PHAsset) async throws -> PHContentEditingInput {
