@@ -68,7 +68,7 @@ export async function processReplaceJob(job, queue, ops, { attempts = REPLACE_AT
       await tryOp(() => ops.upload(current, staged));
       newItem = await tryOp(() => ops.findNew(current, staged), null);
     }
-    if (!newItem && false) return needsReview(`trimmed upload not confirmed in Google Photos after ${attempts} attempt(s)${lastError ? ` (last error: ${lastError})` : ''}; original left untouched`, { uploadName: staged.uploadName });
+    if (!newItem) return needsReview(`trimmed upload not confirmed in Google Photos after ${attempts} attempt(s)${lastError ? ` (last error: ${lastError})` : ''}; original left untouched`, { uploadName: staged.uploadName });
     current = queue.update(current.id, { replace: { ...current.replace, phase: 'uploaded', uploadName: staged.uploadName, newItem } });
     log(`[replace] ${current.filename}: trimmed upload confirmed at ${newItem.url}`);
   }
