@@ -197,3 +197,12 @@ test('parseClock and durationMatches', () => {
   assert.equal(durationMatches(40, 41.4), true);
   assert.equal(durationMatches(null, 41), false);
 });
+
+test('POST /trim-scan-report stores the latest backfill diagnostics and GET returns them; auth required', async () => {
+  const noAuth = await fetch(`${base}/trim-scan-report`, { method: 'POST', body: '{}' });
+  assert.equal(noAuth.status, 401);
+  const post = await fetch(`${base}/trim-scan-report`, { method: 'POST', headers: { authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ videos: [{ id: 'a', format: 'x' }] }) });
+  assert.equal(post.status, 200);
+  const got = await (await fetch(`${base}/trim-scan-report`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
+  assert.deepEqual(got.report, { videos: [{ id: 'a', format: 'x' }] });
+});

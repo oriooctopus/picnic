@@ -144,3 +144,20 @@ final class TrimReplaceStoreTests: XCTestCase {
         XCTAssertNil(r.httpBody, "body is streamed from the file, never inlined")
     }
 }
+
+/// The backfill's "is this edit a trim" rule.
+final class TrimCandidateRuleTests: XCTestCase {
+    func testPicnicTrimIsAlwaysACandidate() {
+        XCTAssertTrue(TrimBackfillScanner.isTrimCandidate(format: "com.oliverullman.picnic.trim", currentSec: 41, originalSec: nil, subtypes: []))
+    }
+
+    func testPhotosAppTrimIsACandidateWhenClearlyShorterThanOriginal() {
+        XCTAssertTrue(TrimBackfillScanner.isTrimCandidate(format: "com.apple.photos", currentSec: 41, originalSec: 60, subtypes: []))
+    }
+
+    func testSameDurationEditsAndSloMoAreNotCandidates() {
+        XCTAssertFalse(TrimBackfillScanner.isTrimCandidate(format: "com.apple.photos", currentSec: 60, originalSec: 60.2, subtypes: []))
+        XCTAssertFalse(TrimBackfillScanner.isTrimCandidate(format: "com.apple.photos", currentSec: 10, originalSec: 20, subtypes: .videoHighFrameRate))
+        XCTAssertFalse(TrimBackfillScanner.isTrimCandidate(format: "com.apple.photos", currentSec: 41, originalSec: nil, subtypes: []))
+    }
+}

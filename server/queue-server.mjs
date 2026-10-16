@@ -385,6 +385,31 @@ export function createApp({
         return send(res, 200, { ok: true });
       }
 
+      if (url.pathname === '/trim-scan-report' && (req.method === 'POST' || req.method === 'GET')) {
+        // Diagnostics for the app's launch backfill: what it saw for every
+        // edited video (adjustment format, current vs original duration) and
+        // why each was or wasn't queued. The phone's sandbox can't be read from
+        // here, and "backfill queued nothing" is otherwise undiagnosable.
+        // Latest report wins; small JSON, no schema enforced.
+        if (!requireAuth(req, res)) return;
+        const file = join(replaceDir(), 'scan-report.json');
+        if (req.method === 'GET') {
+          if (!existsSync(file)) return send(res, 404, { error: 'no report yet' });
+          return send(res, 200, JSON.parse(readFileSync(file, 'utf8')));
+        }
+        const chunks = [];
+        let size = 0;
+        for await (const c of req) {
+          size += c.length;
+          if (size > 1_000_000) return send(res, 413, { error: 'report too large' });
+          chunks.push(c);
+        }
+        const report = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        mkdirSync(replaceDir(), { recursive: true });
+        writeFileSync(file, JSON.stringify({ receivedAt: new Date().toISOString(), report }, null, 1));
+        return send(res, 200, { ok: true });
+      }
+
       if (req.method === 'POST' && url.pathname === '/replace') {
         // Trim-replace upload: the app trimmed a video and sends the trimmed
         // file so the worker can swap it into Google Photos (upload the trim,

@@ -237,6 +237,21 @@ enum TrimReplaceClient {
         return request
     }
 
+    /// Best-effort diagnostics (see TrimBackfillScanner.ScanRow): a failure to
+    /// report must never affect the backfill, so errors are only printed.
+    static func postScanReport(_ rows: [TrimBackfillScanner.ScanRow]) async {
+        var request = URLRequest(url: Config.mirrorReplaceURL.deletingLastPathComponent().appendingPathComponent("trim-scan-report"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = Config.requestTimeout
+        request.setValue("Bearer \(MirrorToken.value)", forHTTPHeaderField: "Authorization")
+        do {
+            request.httpBody = try JSONEncoder().encode(["videos": rows])
+            _ = try await URLSession.shared.data(for: request)
+        } catch {
+            print("trim scan report failed: \(error)")
+        }
+    }
+
     static func upload(entry: TrimReplaceEntry, file: URL) async throws {
         let (_, response) = try await URLSession.shared.upload(for: request(for: entry), fromFile: file)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -248,55 +263,103 @@ enum TrimReplaceClient {
 /// PhotoKit side of the backfill: finds videos carrying the trim adjustment and
 /// copies their current (trimmed) render out of the Photos library.
 enum TrimBackfillScanner {
+    /// One edited video as the scan saw it; POSTed to the server so a backfill
+    /// that queues nothing can be diagnosed without the phone's sandbox.
+    struct ScanRow: Codable {
+        var asset: String          // last 8 chars of localIdentifier
+        var created: String?
+        var filename: String?
+        var format: String?        // adjustment formatIdentifier, nil = none delivered
+        var currentSec: Double
+        var originalSec: Double?
+        var verdict: String        // queued / skipped-<why> / error-<why>
+    }
+
+    /// A video is a trim candidate when Picnic trimmed it (our adjustment) or
+    /// when ANY editor (Apple Photos' own Trim) left it clearly shorter than its
+    /// original, because Google Photos ignores all edits equally. Edits that
+    /// keep the duration (filters, crops) are not candidates, and slo-mo /
+    /// time-lapse are excluded because their edit changes duration without trimming.
+    static func isTrimCandidate(format: String?, currentSec: Double, originalSec: Double?, subtypes: PHAssetMediaSubtype) -> Bool {
+        if format == TrimReplaceStore.formatIdentifier { return true }
+        guard let originalSec, !subtypes.contains(.videoHighFrameRate), !subtypes.contains(.videoTimelapse) else { return false }
+        return originalSec - currentSec > 1.0
+    }
+
     /// Reading an adjustment needs a content-editing-input request per edited
-    /// video, so remember each asset's modificationDate and skip it until
-    /// that changes. Stored beside the queue.
+    /// video, so remember each asset's modificationDate and skip it until that
+    /// changes. Versioned filename: v1 (adjustmentData was never delivered
+    /// because no canHandleAdjustmentData was set, so every video was stamped
+    /// "inspected, nothing") must not block re-scans.
     @MainActor
     static func candidates(store: TrimReplaceStore, directory: URL = TrimReplaceStore.defaultDirectory) async -> [TrimBackfillCandidate] {
-        let scannedURL = directory.appendingPathComponent("scanned.json")
+        let scannedURL = directory.appendingPathComponent("scanned-v2.json")
         var scanned = (try? JSONDecoder().decode([String: Double].self, from: Data(contentsOf: scannedURL))) ?? [:]
         let options = PHFetchOptions()
         options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.video.rawValue)
         let videos = PHAsset.fetchAssets(with: options)
         var toInspect: [(PHAsset, Double)] = []
         videos.enumerateObjects { asset, _, _ in
-            // Cheap pre-filter: an edited asset has an adjustment resource.
-            guard PHAssetResource.assetResources(for: asset).contains(where: { $0.type == .adjustmentData }) else { return }
+            // Cheap pre-filter: an edited video has a rendered full-size resource.
+            guard PHAssetResource.assetResources(for: asset).contains(where: { $0.type == .fullSizeVideo }) else { return }
             let stamp = asset.modificationDate?.timeIntervalSince1970 ?? 0
             if scanned[asset.localIdentifier] == stamp { return }
             toInspect.append((asset, stamp))
         }
         var found: [TrimBackfillCandidate] = []
+        var rows: [ScanRow] = []
         for (asset, stamp) in toInspect {
-            let (inspected, candidate) = await candidate(for: asset, staging: store.stagingURL())
-            // Only remember assets whose adjustment was actually readable: an
-            // iCloud-only video (no network allowed here) is retried next launch.
-            if inspected { scanned[asset.localIdentifier] = stamp }
+            let (row, candidate) = await inspect(asset, staging: store.stagingURL())
+            rows.append(row)
+            // Only remember assets that were actually decided: an iCloud-only
+            // video (no network allowed here) is retried next launch.
+            if !row.verdict.hasPrefix("error") { scanned[asset.localIdentifier] = stamp }
             if let candidate { found.append(candidate) }
         }
         try? JSONEncoder().encode(scanned).write(to: scannedURL, options: .atomic)
+        if !rows.isEmpty { await TrimReplaceClient.postScanReport(rows) }
         return found
     }
 
-    private static func candidate(for asset: PHAsset, staging: URL) async -> (inspected: Bool, TrimBackfillCandidate?) {
+    private static func inspect(_ asset: PHAsset, staging: URL) async -> (ScanRow, TrimBackfillCandidate?) {
+        let resources = PHAssetResource.assetResources(for: asset)
+        var row = ScanRow(
+            asset: String(asset.localIdentifier.suffix(8)),
+            created: asset.creationDate.map { ISO8601DateFormatter().string(from: $0) },
+            filename: (resources.first { $0.type == .video } ?? resources.first)?.originalFilename,
+            format: nil, currentSec: asset.duration, originalSec: nil, verdict: ""
+        )
         let options = PHContentEditingInputRequestOptions()
         // Never trigger an iCloud download just to inspect an adjustment.
         options.isNetworkAccessAllowed = false
+        // Without this, PhotoKit hides adjustmentData (and hands back the
+        // rendered edit as if it were the original) for any adjustment the app
+        // "can't handle". Say yes to all so the format id and the true original
+        // are visible; nothing is edited here.
+        var format: String?
+        options.canHandleAdjustmentData = { data in format = data.formatIdentifier; return true }
         let input: PHContentEditingInput? = await withCheckedContinuation { continuation in
             asset.requestContentEditingInput(with: options) { input, _ in continuation.resume(returning: input) }
         }
-        guard let input else { return (false, nil) }
-        guard let adjustment = input.adjustmentData,
-              adjustment.formatIdentifier == TrimReplaceStore.formatIdentifier,
-              let url = (input.audiovisualAsset as? AVURLAsset)?.url else { return (true, nil) }
-        // input.audiovisualAsset is the CURRENT version (the trimmed render) because
-        // VideoTrimmer never claims to understand prior adjustments (see its comment).
-        do {
-            try FileManager.default.copyItem(at: url, to: staging)
-        } catch {
-            return (false, nil)
+        guard let input else { row.verdict = "error-no-editing-input"; return (row, nil) }
+        row.format = input.adjustmentData?.formatIdentifier ?? format
+        if let original = input.audiovisualAsset, let d = try? await original.load(.duration) { row.originalSec = d.seconds }
+        guard isTrimCandidate(format: row.format, currentSec: row.currentSec, originalSec: row.originalSec, subtypes: asset.mediaSubtypes) else {
+            row.verdict = "skipped-not-a-trim"
+            return (row, nil)
         }
-        let id = TrimReplaceStore.replaceID(localID: asset.localIdentifier, adjustmentData: adjustment.data)
-        return (true, TrimBackfillCandidate(entry: TrimReplaceStore.entry(id: id, asset: asset), file: staging))
+        guard let rendered = resources.first(where: { $0.type == .fullSizeVideo }) else { row.verdict = "error-no-rendered-resource"; return (row, nil) }
+        // The rendered (trimmed) bytes, whoever edited it: PHAssetResourceManager
+        // reads exactly what Photos plays, local-only.
+        let write = PHAssetResourceRequestOptions()
+        write.isNetworkAccessAllowed = false
+        let failure: Error? = await withCheckedContinuation { continuation in
+            PHAssetResourceManager.default().writeData(for: rendered, toFile: staging, options: write) { continuation.resume(returning: $0) }
+        }
+        if let failure { try? FileManager.default.removeItem(at: staging); row.verdict = "error-copy: \(failure.localizedDescription)"; return (row, nil) }
+        row.verdict = "queued"
+        let key = input.adjustmentData?.data ?? Data((row.format ?? "unknown").utf8)
+        let id = TrimReplaceStore.replaceID(localID: asset.localIdentifier, adjustmentData: key)
+        return (row, TrimBackfillCandidate(entry: TrimReplaceStore.entry(id: id, asset: asset), file: staging))
     }
 }
