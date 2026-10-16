@@ -3947,7 +3947,7 @@ export function makeReplaceOps(page, { stagingDir = join(dirname(QUEUE_PATH), 'r
         if (classifyReplaceCandidate({ filename: fresh.filename, durationSec: freshDurationSec }, job, replaceUploadName(job.filename)) !== 'original') {
           return { outcome: 'unverified', detail: `fresh load of ${plain} reads ${fresh.filename}/${freshDurationSec}s, not the original -- not trashing` };
         }
-        const { confirmed, guardFailed } = await moveToTrash(page, freshText, { matchedUrl: plain, expectedFilename: fresh.filename, verifyByUrl: true, verifyUrl: plain });
+        const { confirmed, guardFailed } = await moveToTrash(page, freshText, { matchedUrl: plain, verifyByUrl: true, verifyUrl: plain });
         if (guardFailed) return { outcome: 'unverified', detail: 'viewer moved before the trash (guard refused)' };
         return confirmed
           ? { outcome: 'trashed', originalUrl: url, originalDurationSec }
