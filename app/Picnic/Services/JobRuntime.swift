@@ -26,7 +26,7 @@ final class JobRuntime {
             _ = try await ReconcileClient.confirm(month: job.month, ids: job.googleIds, phoneDeleted: job.phoneIndexes)
         },
         outfitUpload: @escaping (OutfitImportJob) async throws -> Void = OutfitUploader().upload,
-        trimReplace: TrimReplaceStore = TrimReplaceStore(),
+        trimReplace injectedTrimReplace: TrimReplaceStore? = nil,
         trimCandidates: @escaping (TrimReplaceStore) async -> [TrimBackfillCandidate] = { await TrimBackfillScanner.candidates(store: $0) },
         existingAssetIDs: @escaping ([String]) -> Set<String> = existingPhotoAssetIDs,
         fetchStatus: @escaping () async throws -> MirrorQueueStatus = MirrorClient.fetchStatus,
@@ -43,6 +43,8 @@ final class JobRuntime {
         mirrorQueue = mirror
         reconcileConfirm = reconcile
         outfitLog = outfit
+        // Built here (main-actor) rather than as a default argument, which is nonisolated.
+        let trimReplace = injectedTrimReplace ?? TrimReplaceStore()
         self.trimReplace = trimReplace
         self.trimCandidates = trimCandidates
         drainCoordinator = DrainCoordinator(drain: { ignoreBackoff in
