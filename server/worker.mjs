@@ -84,7 +84,7 @@
  */
 import { execSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { readFileSync, mkdirSync, rmSync, existsSync, copyFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { JobQueue, isReplaceJob } from './lib/queue.mjs';
@@ -3821,6 +3821,37 @@ export function plainPhotoUrl(url) {
   return `https://photos.google.com/photo/${id}`;
 }
 
+/**
+ * Hand `path` to the file chooser WITHOUT streaming its bytes over CDP.
+ * chooser.setFiles(path) on a remote (connectOverCDP) browser base64s the file
+ * through the websocket: a real 47MB trimmed video timed out at 30s on every
+ * attempt, and Playwright refuses buffers over 50MB outright. The browser runs
+ * on the Windows host, which can read WSL files, so copy the file to a Windows
+ * path and tell the browser to attach it by path (DOM.setFileInputFiles).
+ * The input is tagged then found through the DOM domain because Playwright's
+ * ElementHandle does not expose its CDP node id. Returns the Windows-side copy,
+ * which the caller must keep until the upload finishes (Chrome reads it lazily).
+ */
+async function setChooserFilesViaBrowserPath(page, chooser, path) {
+  const winDir = '/mnt/c/Users/Public/picnic-stage';
+  mkdirSync(winDir, { recursive: true });
+  const winCopy = `${winDir}/${path.split('/').pop()}`;
+  copyFileSync(path, winCopy);
+  const { stdout } = await promisify(execFile)('wslpath', ['-w', winCopy]);
+  const input = await chooser.element();
+  await input.evaluate((el) => el.setAttribute('data-picnic-upload', '1'));
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    const { root } = await cdp.send('DOM.getDocument', { depth: -1, pierce: true });
+    const { nodeId } = await cdp.send('DOM.querySelector', { nodeId: root.nodeId, selector: '[data-picnic-upload]' });
+    if (!nodeId) throw new Error('upload file input not found in DOM');
+    await cdp.send('DOM.setFileInputFiles', { files: [stdout.trim()], nodeId });
+  } finally {
+    await cdp.detach();
+  }
+  return winCopy;
+}
+
 /** Push `path` through Google Photos' "Import photos from your computer" and wait for its completion toast. */
 async function uploadToGooglePhotos(page, path) {
   await openPhotosHome(page);
@@ -3829,16 +3860,20 @@ async function uploadToGooglePhotos(page, path) {
     page.waitForEvent('filechooser', { timeout: 15000 }),
     page.locator(UPLOAD_MENU_ITEM).first().click(),
   ]);
-  await chooser.setFiles(path);
-  const deadline = Date.now() + UPLOAD_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    await sleep(FAST_DELAYS ? 5 : 2000);
-    const bodyText = await page.evaluate(() => document.body.innerText);
-    if (UPLOAD_DONE_PATTERN.test(bodyText)) return;
-    const failed = UPLOAD_FAILED_PATTERN.exec(bodyText);
-    if (failed) throw new Error(`Google Photos reported an upload problem: "${failed[0]}"`);
+  const winCopy = await setChooserFilesViaBrowserPath(page, chooser, path);
+  try {
+    const deadline = Date.now() + UPLOAD_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await sleep(FAST_DELAYS ? 5 : 2000);
+      const bodyText = await page.evaluate(() => document.body.innerText);
+      if (UPLOAD_DONE_PATTERN.test(bodyText)) return;
+      const failed = UPLOAD_FAILED_PATTERN.exec(bodyText);
+      if (failed) throw new Error(`Google Photos reported an upload problem: "${failed[0]}"`);
+    }
+    throw new Error(`upload did not finish within ${UPLOAD_TIMEOUT_MS / 60000} minutes`);
+  } finally {
+    rmSync(winCopy, { force: true });
   }
-  throw new Error(`upload did not finish within ${UPLOAD_TIMEOUT_MS / 60000} minutes`);
 }
 
 /**
