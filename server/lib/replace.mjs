@@ -161,3 +161,23 @@ export function parseClock(text) {
 export function durationMatches(shownSec, expectedSec, toleranceSec = 2) {
   return shownSec != null && Math.abs(shownSec - expectedSec) <= toleranceSec;
 }
+
+/**
+ * What a same-capture-second video in Google Photos is, for a trim-replace job.
+ * Names alone cannot say: the Google Photos iOS app can itself back up the
+ * edited video as a NEW item under the ORIGINAL filename (live 2026-10-16:
+ * IMG_3699.MOV 0:59/67MB and a second IMG_3699.MOV 0:42/47MB, both "Uploaded
+ * from iOS device"), so the worker trashed the trimmed one. Duration decides:
+ *   'trimmed'  -- name is the original's or our upload name AND duration ~ the trimmed length
+ *   'original' -- name is the original's AND duration is known and clearly LONGER than the trim
+ *   'unknown'  -- anything else (other name, unreadable duration): never trashed, never confirmed
+ */
+export function classifyReplaceCandidate({ filename, durationSec }, job, uploadName) {
+  if (!filename || durationSec == null) return 'unknown';
+  const lower = filename.toLowerCase();
+  const isOriginalName = lower === job.filename.toLowerCase();
+  if (!isOriginalName && lower !== uploadName.toLowerCase()) return 'unknown';
+  if (durationMatches(durationSec, job.replace.durationSec)) return 'trimmed';
+  if (isOriginalName && durationSec > job.replace.durationSec + 2) return 'original';
+  return 'unknown';
+}

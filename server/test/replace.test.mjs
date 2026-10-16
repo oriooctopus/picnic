@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JobQueue } from '../lib/queue.mjs';
-import { processReplaceJob, replaceUploadName, buildStageArgs, offsetFits, parseClock, durationMatches } from '../lib/replace.mjs';
+import { processReplaceJob, replaceUploadName, buildStageArgs, offsetFits, parseClock, durationMatches, classifyReplaceCandidate } from '../lib/replace.mjs';
 
 const dir = mkdtempSync(join(tmpdir(), 'picnic-replace-test-'));
 const tokenPath = join(dir, 'token');
@@ -205,4 +205,17 @@ test('POST /trim-scan-report stores the latest backfill diagnostics and GET retu
   assert.equal(post.status, 200);
   const got = await (await fetch(`${base}/trim-scan-report`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
   assert.deepEqual(got.report, { videos: [{ id: 'a', format: 'x' }] });
+});
+
+test('classifyReplaceCandidate: duration, not name, tells the trimmed copy from the original', () => {
+  const job = { filename: 'IMG_3699.MOV', replace: { durationSec: 42.66 } };
+  const up = 'IMG_3699-trim.MOV';
+  // live 2026-10-16: Google's iOS app backed up the 0:42 edit under the ORIGINAL name
+  assert.equal(classifyReplaceCandidate({ filename: 'IMG_3699.MOV', durationSec: 42.7 }, job, up), 'trimmed');
+  assert.equal(classifyReplaceCandidate({ filename: 'IMG_3699-trim.MOV', durationSec: 42 }, job, up), 'trimmed');
+  assert.equal(classifyReplaceCandidate({ filename: 'IMG_3699.MOV', durationSec: 59.6 }, job, up), 'original');
+  // the upload name at the wrong length is never the original, and never confirmed
+  assert.equal(classifyReplaceCandidate({ filename: 'IMG_3699-trim.MOV', durationSec: 59.6 }, job, up), 'unknown');
+  assert.equal(classifyReplaceCandidate({ filename: 'IMG_3699.MOV', durationSec: null }, job, up), 'unknown');
+  assert.equal(classifyReplaceCandidate({ filename: 'IMG_0001.MOV', durationSec: 59.6 }, job, up), 'unknown');
 });

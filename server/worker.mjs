@@ -88,7 +88,7 @@ import { readFileSync, mkdirSync, rmSync, existsSync, copyFileSync } from 'node:
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { JobQueue, isReplaceJob } from './lib/queue.mjs';
-import { processReplaceJob, replaceUploadName, buildStageArgs, offsetFits, parseClock, durationMatches } from './lib/replace.mjs';
+import { processReplaceJob, replaceUploadName, buildStageArgs, offsetFits, parseClock, durationMatches, classifyReplaceCandidate } from './lib/replace.mjs';
 import { probeDurationSec } from './lib/video-trim.mjs';
 import {
   parsePanelText,
@@ -3901,10 +3901,12 @@ export function makeReplaceOps(page, { stagingDir = join(dirname(QUEUE_PATH), 'r
       const passes = justUploaded ? REPLACE_FIND_PATIENCE_PASSES : 1;
       for (let pass = 1; pass <= passes; pass++) {
         const found = await visitReplaceCandidates(page, job, async ({ url, parsed, getDurationSec }) => {
-          if (!parsed.filename || parsed.filename.toLowerCase() !== staged.uploadName.toLowerCase()) return undefined;
+          if (!parsed.filename) return undefined;
           const durationSec = await getDurationSec();
-          if (!durationMatches(durationSec, job.replace.durationSec)) {
-            console.log(`[replace] ${staged.uploadName} found at ${url} but shows duration ${durationSec}s, expected ~${job.replace.durationSec.toFixed(1)}s -- not confirming it`);
+          // Also accepts the original filename at the trimmed length: Google's
+          // own iOS app may already have backed up the edit (see classifyReplaceCandidate).
+          if (classifyReplaceCandidate({ filename: parsed.filename, durationSec }, job, staged.uploadName) !== 'trimmed') {
+            if (parsed.filename.toLowerCase() === staged.uploadName.toLowerCase()) console.log(`[replace] ${staged.uploadName} found at ${url} but shows duration ${durationSec}s, expected ~${job.replace.durationSec.toFixed(1)}s -- not confirming it`);
             return undefined;
           }
           return { url, filename: parsed.filename, durationSec };
@@ -3923,11 +3925,12 @@ export function makeReplaceOps(page, { stagingDir = join(dirname(QUEUE_PATH), 'r
     /** Find the ORIGINAL (same capture second, original filename, NOT the new copy) and Trash it, verified by URL. */
     async trashOriginal(job, newItem) {
       const outcome = await visitReplaceCandidates(page, job, async ({ url, parsed, text, getDurationSec }) => {
-        if (url === newItem.url) return undefined;
+        if (plainPhotoUrl(url) === plainPhotoUrl(newItem.url)) return undefined;
         if (!parsed.filename || !filenamesAgree(parsed.filename, job.filename)) return undefined;
-        // Identity is the filename (the trimmed copy was uploaded under a
-        // different name); duration is only recorded for the audit trail.
+        // Name AND duration: a same-named item at the trimmed length is a trimmed
+        // copy (e.g. backed up by Google's iOS app), never the original.
         const originalDurationSec = await getDurationSec();
+        if (classifyReplaceCandidate({ filename: parsed.filename, durationSec: originalDurationSec }, job, replaceUploadName(job.filename)) !== 'original') return undefined;
         const { confirmed, guardFailed } = await moveToTrash(page, text, { matchedUrl: url, expectedFilename: parsed.filename, verifyByUrl: true, verifyUrl: plainPhotoUrl(url) });
         if (guardFailed) return { outcome: 'unverified', detail: 'viewer moved before the trash (guard refused)' };
         return confirmed
