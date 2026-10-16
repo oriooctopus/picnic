@@ -82,11 +82,14 @@
  * Both share the exact same matching/deletion path (confirmAndTrash) and
  * only ever differ in HOW a tile gets opened and read.
  */
-import { execSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { execSync, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { readFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { JobQueue } from './lib/queue.mjs';
+import { join, dirname } from 'node:path';
+import { JobQueue, isReplaceJob } from './lib/queue.mjs';
+import { processReplaceJob, replaceUploadName, buildStageArgs, offsetFits, parseClock, durationMatches } from './lib/replace.mjs';
+import { probeDurationSec } from './lib/video-trim.mjs';
 import {
   parsePanelText,
   findMatchingJob,
@@ -1058,7 +1061,7 @@ export function isTrashConfirmed({ dialogConfirmed, toastShown, panelChanged }) 
  * merely resolves is not evidence the photo was trashed either — one more
  * reason a job wrongly marked "trashed" is one we would never revisit.
  */
-export async function moveToTrash(page, panelTextBefore, { matchedUrl, expectedFilename, verifyByUrl = false } = {}) {
+export async function moveToTrash(page, panelTextBefore, { matchedUrl, expectedFilename, verifyByUrl = false, verifyUrl = matchedUrl } = {}) {
   // Ordering matters, and this got it wrong twice:
   //  - '#' is Google Photos' own move-to-trash shortcut and is the ONLY path
   //    ever observed to actually delete (the verified IMG_1418.HEIC deletion
@@ -1216,7 +1219,7 @@ export async function moveToTrash(page, panelTextBefore, { matchedUrl, expectedF
   if (dialogConfirmed) {
     const outcome = await settled();
     if (isTrashConfirmed({ dialogConfirmed, ...outcome })) {
-      return verifyByUrl ? await verifyTrashByUrl(page, matchedUrl) : { confirmed: true, guardFailed: false, verifiedByUrl: false };
+      return verifyByUrl ? await verifyTrashByUrl(page, matchedUrl, verifyUrl) : { confirmed: true, guardFailed: false, verifiedByUrl: false };
     }
   }
 
@@ -1244,7 +1247,7 @@ export async function moveToTrash(page, panelTextBefore, { matchedUrl, expectedF
   if (!dialogConfirmed) return { confirmed: false, guardFailed: false, verifiedByUrl: false };
   const outcome = await settled();
   if (!isTrashConfirmed({ dialogConfirmed, ...outcome })) return { confirmed: false, guardFailed: false, verifiedByUrl: false };
-  return verifyByUrl ? await verifyTrashByUrl(page, matchedUrl) : { confirmed: true, guardFailed: false, verifiedByUrl: false };
+  return verifyByUrl ? await verifyTrashByUrl(page, matchedUrl, verifyUrl) : { confirmed: true, guardFailed: false, verifiedByUrl: false };
 }
 
 /**
@@ -1270,7 +1273,12 @@ export async function moveToTrash(page, panelTextBefore, { matchedUrl, expectedF
  * (a goto failure must never crash the caller) -- except a genuine
  * isPageClosedError, which still propagates.
  */
-async function verifyTrashByUrl(page, matchedUrl) {
+async function verifyTrashByUrl(page, matchedUrl, reloadUrl = matchedUrl) {
+  // `reloadUrl` is what gets re-opened to look for the banner; it defaults to
+  // matchedUrl. The replace flow overrides it because a search-scoped viewer
+  // URL (/search/<token>/photo/<id>) answers "Photo not found" once the item is
+  // trashed (measured live 2026-10-16) while the plain /photo/<id> form shows
+  // the "N days left until permanently deleted" banner.
   if (matchedUrl == null) {
     // No URL to verify against -- caller opted into verifyByUrl without
     // binding matchedUrl, which is a caller bug, not a "trust it" case; but
@@ -1300,10 +1308,10 @@ async function verifyTrashByUrl(page, matchedUrl) {
   let bannerVisible = false;
   for (let attempt = 0; attempt < 3 && !bannerVisible; attempt++) {
     try {
-      await page.goto(matchedUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.goto(reloadUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     } catch (err) {
       if (isPageClosedError(page, err)) throw err;
-      loud(`[trash] SAFETY: could not reload ${matchedUrl} to verify the trash -- ${err.message || err} -- treating as NOT verified`);
+      loud(`[trash] SAFETY: could not reload ${reloadUrl} to verify the trash -- ${err.message || err} -- treating as NOT verified`);
       return { confirmed: false, guardFailed: false, verifiedByUrl: false };
     }
     if (/\/trash\//i.test(page.url())) break;
@@ -1316,7 +1324,7 @@ async function verifyTrashByUrl(page, matchedUrl) {
   const redirectedToTrash = /\/trash\//i.test(page.url());
   const verifiedByUrl = bannerVisible || redirectedToTrash;
   if (!verifiedByUrl) {
-    loud(`[trash] SAFETY: reloaded ${matchedUrl} and found NO trash-state banner -- the photo may still be live in the library. Not recording as trashed.`);
+    loud(`[trash] SAFETY: reloaded ${reloadUrl} and found NO trash-state banner -- the photo may still be live in the library. Not recording as trashed.`);
   }
   return { confirmed: verifiedByUrl, guardFailed: false, verifiedByUrl };
 }
@@ -3722,11 +3730,217 @@ async function reconcileEntry(month, mode) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Trim-replace jobs (kind 'replace'): see lib/replace.mjs for the state
+// machine and the safety ordering (upload + confirm BEFORE the original is
+// trashed). Everything below is the Google Photos web UI side of it.
+// ---------------------------------------------------------------------------
+
+const execFileAsync = promisify(execFile);
+const UPLOAD_MENU_ITEM = '[role=menuitem]:has-text("Import photos from your computer"), [aria-label="Import photos from your computer"]';
+// Upload finished toast. Measured live 2026-10-16: "You backed up 1 item".
+const UPLOAD_DONE_PATTERN = /You backed up \d+ items?/i;
+const UPLOAD_FAILED_PATTERN = /couldn.t (?:be )?(?:upload|back up)|upload failed|can.t upload|storage is full|out of storage/i;
+const UPLOAD_TIMEOUT_MS = 15 * 60 * 1000; // generous: 100MB+ clips over a home uplink
+const REPLACE_FIND_PATIENCE_PASSES = 6; // after an upload, Google needs a while before the item is searchable
+const REPLACE_FIND_PATIENCE_WAIT_MS = 10000;
+
+/**
+ * The open video's total length in seconds, from the player's <video>
+ * element. Measured live 2026-10-16: the viewer plays inside a cross-origin
+ * youtube.googleapis.com/embed iframe, so the main document has NO <video> and
+ * no "0:04 / 0:05" control text; and the grid behind the viewer still holds
+ * other tiles' "0:12" duration badges, so scanning the main DOM for clock text
+ * reads the WRONG video. Playwright can evaluate inside the frame directly.
+ * Polls because the frame mounts a moment after the viewer opens.
+ */
+async function readViewerDurationSec(page) {
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    // Several embed frames can coexist (measured: 2, the first one stale and
+    // video-less), so take the NEWEST one that actually has a video.
+    for (const frame of page.frames().filter((f) => f.url().includes('youtube.googleapis.com/embed')).reverse()) {
+      const d = await frame.evaluate(() => document.querySelector('video')?.duration ?? null).catch(() => null);
+      if (Number.isFinite(d) && d > 0) return d;
+    }
+    await sleep(FAST_DELAYS ? 5 : 500);
+  }
+  return null;
+}
+
+/**
+ * Open every video tile whose capture time could be this job's (date search for
+ * the job's UTC date, then -1/+1 day, like the delete flow) and hand each
+ * opened viewer to `visitor({ tile, url, parsed, text, getDurationSec })`. The
+ * first non-undefined return value stops the scan and is returned, leaving
+ * that photo OPEN (the trash step needs to act on it in place).
+ */
+async function visitReplaceCandidates(page, job, visitor) {
+  const jobDate = utcDateOf(job.creationDate);
+  for (const dateStr of [jobDate, shiftDateDays(jobDate, -1), shiftDateDays(jobDate, 1)]) {
+    await searchByDate(page, dateStr);
+    // Pre-scroll so a virtualized grid has mounted the whole day (same
+    // accumulate-by-identity approach processDateGroup uses).
+    const seen = new Map();
+    for (let scrolls = 0; scrolls <= MAX_SCROLL_ATTEMPTS_PER_DATE; scrolls++) {
+      let added = false;
+      for (const t of await collectResultTiles(page)) {
+        if (!seen.has(tileIdentity(t))) { seen.set(tileIdentity(t), t); added = true; }
+      }
+      if (!added && scrolls > 0) break;
+      await scrollResults(page);
+    }
+    const candidates = [...seen.values()].filter((t) => {
+      const parsed = parseTileAriaLabel(t.ariaLabel);
+      return parsed && parsed.mediaType === 'video' && offsetFits(parsed.wallClockAsUtcMs, job.creationDate);
+    });
+    if (VERBOSE) console.log(`[replace] ${formatSearchDate(dateStr)}: ${candidates.length} video tile(s) at the job's capture second`);
+    for (const tile of candidates) {
+      try {
+        await openTile(page, tile);
+      } catch (err) {
+        if (err instanceof StaleTileError) continue; // grid shifted; the caller's retry re-scans
+        throw err;
+      }
+      await openInfoPanelOnce(page);
+      const text = await readPanelText(page);
+      const parsed = parsePanelText(text);
+      const verdict = await visitor({ tile, url: page.url(), parsed, text, getDurationSec: () => readViewerDurationSec(page) });
+      if (verdict !== undefined) return verdict;
+      await closeAnyOpenPhoto(page);
+    }
+  }
+  return undefined;
+}
+
+/** /search/<token>/(top/)photo/<id> -> https://photos.google.com/photo/<id> (see verifyTrashByUrl for why). */
+export function plainPhotoUrl(url) {
+  const id = /\/photo\/([^/?#]+)/.exec(url)?.[1];
+  if (!id) throw new Error(`no photo id in viewer url: ${url}`);
+  return `https://photos.google.com/photo/${id}`;
+}
+
+/** Push `path` through Google Photos' "Import photos from your computer" and wait for its completion toast. */
+async function uploadToGooglePhotos(page, path) {
+  await openPhotosHome(page);
+  await page.locator('[aria-label="Create and add photos"]').first().click();
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser', { timeout: 15000 }),
+    page.locator(UPLOAD_MENU_ITEM).first().click(),
+  ]);
+  await chooser.setFiles(path);
+  const deadline = Date.now() + UPLOAD_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await sleep(FAST_DELAYS ? 5 : 2000);
+    const bodyText = await page.evaluate(() => document.body.innerText);
+    if (UPLOAD_DONE_PATTERN.test(bodyText)) return;
+    const failed = UPLOAD_FAILED_PATTERN.exec(bodyText);
+    if (failed) throw new Error(`Google Photos reported an upload problem: "${failed[0]}"`);
+  }
+  throw new Error(`upload did not finish within ${UPLOAD_TIMEOUT_MS / 60000} minutes`);
+}
+
+/**
+ * The browser-side ops for processReplaceJob. `stagingDir` holds the
+ * metadata-fixed copy under its distinctive upload name.
+ */
+export function makeReplaceOps(page, { stagingDir = join(dirname(QUEUE_PATH), 'replace', 'staging') } = {}) {
+  let justUploaded = false;
+  return {
+    async stage(job) {
+      const uploadName = replaceUploadName(job.filename);
+      mkdirSync(stagingDir, { recursive: true });
+      // The name Google shows is the file's basename, so stage it in a per-job
+      // directory under the exact upload name.
+      const jobDir = join(stagingDir, job.id);
+      mkdirSync(jobDir, { recursive: true });
+      const path = join(jobDir, uploadName);
+      rmSync(path, { force: true });
+      await execFileAsync('ffmpeg', buildStageArgs({ input: job.replace.file, output: path, creationDate: job.creationDate }));
+      return { path, uploadName };
+    },
+
+    /** Is the trimmed copy (matching name AND ~trimmed duration) in Google Photos? Patient right after an upload. */
+    async findNew(job, staged) {
+      const passes = justUploaded ? REPLACE_FIND_PATIENCE_PASSES : 1;
+      for (let pass = 1; pass <= passes; pass++) {
+        const found = await visitReplaceCandidates(page, job, async ({ url, parsed, getDurationSec }) => {
+          if (!parsed.filename || parsed.filename.toLowerCase() !== staged.uploadName.toLowerCase()) return undefined;
+          const durationSec = await getDurationSec();
+          if (!durationMatches(durationSec, job.replace.durationSec)) {
+            console.log(`[replace] ${staged.uploadName} found at ${url} but shows duration ${durationSec}s, expected ~${job.replace.durationSec.toFixed(1)}s -- not confirming it`);
+            return undefined;
+          }
+          return { url, filename: parsed.filename, durationSec };
+        });
+        if (found) return found;
+        if (pass < passes) await sleep(FAST_DELAYS ? 5 : REPLACE_FIND_PATIENCE_WAIT_MS);
+      }
+      return null;
+    },
+
+    async upload(job, staged) {
+      await uploadToGooglePhotos(page, staged.path);
+      justUploaded = true;
+    },
+
+    /** Find the ORIGINAL (same capture second, original filename, NOT the new copy) and Trash it, verified by URL. */
+    async trashOriginal(job, newItem) {
+      const outcome = await visitReplaceCandidates(page, job, async ({ url, parsed, text, getDurationSec }) => {
+        if (url === newItem.url) return undefined;
+        if (!parsed.filename || !filenamesAgree(parsed.filename, job.filename)) return undefined;
+        // Identity is the filename (the trimmed copy was uploaded under a
+        // different name); duration is only recorded for the audit trail.
+        const originalDurationSec = await getDurationSec();
+        const { confirmed, guardFailed } = await moveToTrash(page, text, { matchedUrl: url, expectedFilename: parsed.filename, verifyByUrl: true, verifyUrl: plainPhotoUrl(url) });
+        if (guardFailed) return { outcome: 'unverified', detail: 'viewer moved before the trash (guard refused)' };
+        return confirmed
+          ? { outcome: 'trashed', originalUrl: url, originalDurationSec }
+          : { outcome: 'unverified', detail: 'trash not verified by URL' };
+      });
+      return outcome ?? { outcome: 'original_not_found', detail: `no video named ${job.filename} at the capture time` };
+    },
+
+    async cleanup(job) {
+      rmSync(job.replace.file, { force: true });
+      rmSync(join(stagingDir, job.id), { recursive: true, force: true });
+    },
+  };
+}
+
+/**
+ * Run queued replace jobs in the already-open page. A closed tab leaves the
+ * remaining jobs queued (nothing was learned); any other failure is handled
+ * per-attempt inside processReplaceJob and ends in needs_review.
+ */
+export async function runReplaceJobs(page, jobs, queue, { dryRun = false, ops = makeReplaceOps(page) } = {}) {
+  for (const job of jobs) {
+    if (dryRun) {
+      console.log(`[dry-run replace] ${job.filename}: would upload ${job.replace.file} then trash the original`);
+      continue;
+    }
+    try {
+      await processReplaceJob(job, queue, ops, { isFatal: (err) => isPageClosedError(page, err) });
+    } catch (err) {
+      if (isPageClosedError(page, err)) {
+        console.log('[worker] browser tab went away mid-replace -- remaining replace job(s) stay queued for the next run.');
+        return;
+      }
+      throw err;
+    }
+  }
+}
+
 export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'photo', revisitFile = null } = {}) {
   const queue = new JobQueue(QUEUE_PATH);
-  const jobs = queue.loadAll().filter((j) => j.status === 'queued').slice(0, cap);
+  const queued = queue.loadAll().filter((j) => j.status === 'queued');
+  // Trim-replace jobs are a different flow (upload, then trash) with their own
+  // browser steps; the delete walks below only ever see plain delete jobs.
+  const replaceJobs = queued.filter(isReplaceJob).slice(0, cap);
+  const jobs = queued.filter((j) => !isReplaceJob(j)).slice(0, cap);
 
-  if (jobs.length === 0) {
+  if (jobs.length === 0 && replaceJobs.length === 0) {
     console.log('no queued jobs');
     return;
   }
@@ -3735,9 +3949,9 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'pho
   // timeline walk takes the flat job list directly (see runTimelineWalk's
   // header for why it needs no per-date loop), and --revisit-file skips
   // grouping/walking entirely (runRevisitFromFile's own header).
-  const groups = revisitFile || walk === 'timeline' ? null : groupJobsByDate(jobs);
+  const groups = revisitFile || walk === 'timeline' || jobs.length === 0 ? null : groupJobsByDate(jobs);
 
-  if (dryRun) {
+  if (dryRun && jobs.length > 0) {
     console.log(
       revisitFile
         ? `--dry-run: will revisit ${jobs.length} job(s) against the URL list in ${revisitFile} but never trash or mutate the queue.`
@@ -3778,7 +3992,10 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'pho
     const context = browser.contexts()[0] ?? (await browser.newContext());
     page = await context.newPage();
     await openPhotosHome(page); // lands on the main timeline either way -- no search is ever performed for --walk=timeline
-    if (revisitFile) {
+    if (replaceJobs.length > 0) await runReplaceJobs(page, replaceJobs, queue, { dryRun });
+    if (jobs.length === 0) {
+      // only replace jobs were queued: nothing for the delete walks to do
+    } else if (revisitFile) {
       // Standalone revisit -- skips the walk (--walk) entirely, see
       // runRevisitFromFile's own header.
       await runRevisitFromFile(page, revisitFile, jobs, queue, { dryRun });

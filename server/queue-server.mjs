@@ -3,8 +3,9 @@ import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, openSync, closeSync, statSync, createReadStream } from 'node:fs';
-import { JobQueue, STATUSES } from './lib/queue.mjs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, openSync, closeSync, statSync, createReadStream, createWriteStream, renameSync, rmSync } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { JobQueue, STATUSES, replaceJobId } from './lib/queue.mjs';
 import { loadToken, checkBearerAuth, tokensMatch } from './lib/auth.mjs';
 import { createAutoDrain, createCdpProbe, createWorkerSpawn, isAutoDrainEnabled } from './lib/autodrain.mjs';
 import { ReconcileStore, sectionForCameraModel } from './lib/reconcile.mjs';
@@ -30,6 +31,11 @@ const MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024;
 // Overridable the same way as QUEUE_PATH so tests never touch the real
 // ~/.local/share/picnic/reconcile — see lib/reconcile.mjs's ReconcileStore.
 const RECONCILE_DIR = process.env.PICNIC_RECONCILE_DIR || join(homedir(), '.local', 'share', 'picnic', 'reconcile');
+
+// Trimmed videos uploaded by POST /replace, one <jobId>.mov per replace job
+// (never inline in queue.jsonl). Resolved per request so tests can set it late.
+const replaceDir = () => process.env.PICNIC_REPLACE_DIR || join(homedir(), '.local/share/picnic/replace');
+const MAX_REPLACE_BYTES = 4 * 1024 * 1024 * 1024;
 
 const queue = new JobQueue(QUEUE_PATH);
 // Created eagerly (mirrors JobQueue's own directory bootstrap) so the first
@@ -182,7 +188,7 @@ function renderIssuesPage(jobs, token) {
         <div class="card">
           ${thumb}
           <div class="meta">
-            <div class="filename">${escapeHtml(job.filename)}</div>
+            <div class="filename">${escapeHtml(job.filename)}${job.kind === 'replace' ? ' <span class="status">trim replace</span>' : ''}</div>
             <div class="row"><span class="label">captured</span> ${escapeHtml(job.creationDate)}</div>
             <div class="row"><span class="label">size</span> ${escapeHtml(job.pixelWidth)}&times;${escapeHtml(job.pixelHeight)}</div>
             <div class="row"><span class="status ${escapeHtml(job.status)}">${escapeHtml(job.status)}</span></div>
@@ -379,6 +385,63 @@ export function createApp({
         return send(res, 200, { ok: true });
       }
 
+      if (req.method === 'POST' && url.pathname === '/replace') {
+        // Trim-replace upload: the app trimmed a video and sends the trimmed
+        // file so the worker can swap it into Google Photos (upload the trim,
+        // confirm it, only then trash the full-length original). Raw
+        // application/octet-stream body streamed to disk (videos are 100MB+,
+        // so no JSON/base64); metadata rides in headers. 2xx means the whole
+        // file is on disk and parses as video -- the app deletes its copy on it.
+        if (!requireAuth(req, res)) return;
+        const h = (name) => req.headers[name];
+        const clientId = String(h('x-replace-id') ?? '');
+        const filename = h('x-filename') ? decodeURIComponent(String(h('x-filename'))) : '';
+        const creationDate = String(h('x-creation-date') ?? '');
+        const pixelWidth = Number(h('x-pixel-width'));
+        const pixelHeight = Number(h('x-pixel-height'));
+        const declaredBytes = Number(h('content-length'));
+        if (!/^[0-9A-Za-z-]{8,64}$/.test(clientId) || !filename || Number.isNaN(Date.parse(creationDate))
+          || !(pixelWidth > 0) || !(pixelHeight > 0)) {
+          req.resume();
+          return send(res, 400, { error: 'x-replace-id, x-filename, x-creation-date (ISO8601), x-pixel-width, x-pixel-height are required' });
+        }
+        if (!(declaredBytes > 0) || declaredBytes > MAX_REPLACE_BYTES) {
+          req.resume();
+          return send(res, 400, { error: `content-length must be 1..${MAX_REPLACE_BYTES}` });
+        }
+        const jobId = replaceJobId(clientId);
+        const existing = queue.getById(jobId);
+        if (existing) {
+          req.resume();
+          await new Promise((resolve) => req.on('end', resolve));
+          return send(res, 200, { job: existing, created: false });
+        }
+        const dir = replaceDir();
+        mkdirSync(dir, { recursive: true });
+        const finalPath = join(dir, `${jobId}.mov`);
+        const partPath = `${finalPath}.part`;
+        let received = 0;
+        req.on('data', (chunk) => { received += chunk.length; });
+        await pipeline(req, createWriteStream(partPath));
+        if (received !== declaredBytes) {
+          rmSync(partPath, { force: true });
+          return send(res, 400, { error: `received ${received} bytes, content-length said ${declaredBytes}` });
+        }
+        let durationSec;
+        try {
+          durationSec = await probeDurationSec(partPath);
+        } catch (err) {
+          rmSync(partPath, { force: true });
+          return send(res, 400, { error: `uploaded file is not a readable video: ${err.message}` });
+        }
+        renameSync(partPath, finalPath);
+        const { job, created } = queue.enqueueReplace({
+          clientId, filename, creationDate, pixelWidth, pixelHeight, file: finalPath, bytes: received, durationSec,
+        });
+        autoDrain.notifyEnqueued();
+        return send(res, created ? 201 : 200, { job, created });
+      }
+
       if (req.method === 'POST' && url.pathname === '/queue') {
         if (!requireAuth(req, res)) return;
         const body = await readJsonBody(req);
@@ -455,7 +518,7 @@ export function createApp({
           ...autoDrain.getStatus(),
           oldestQueuedWaitMs: oldestQueued === null ? null : Date.now() - Date.parse(oldestQueued),
         };
-        return send(res, 200, { counts, total: jobs.length, jobs: recent, autoDrain: autoDrainStatus });
+        return send(res, 200, { counts, replaceCounts: queue.counts('replace'), total: jobs.length, jobs: recent, autoDrain: autoDrainStatus });
       }
 
       const retryMatch = /^\/retry\/([^/]+)$/.exec(url.pathname);
