@@ -105,6 +105,7 @@ import {
   filenamesAgree,
   parseCameraModel,
 } from './lib/matcher.mjs';
+import { closePageOnSignal } from './lib/page-cleanup.mjs';
 import { ReconcileStore, diffGoogleVsManifest, matchListingToManifest, dimensionsAgree } from './lib/reconcile.mjs';
 import { parseListingBody, filterItemsToMonth, mergeItems } from './lib/listing.mjs';
 
@@ -3715,9 +3716,11 @@ async function reconcileEntry(month, mode) {
     return;
   }
   let page;
+  let stopSignalCleanup = () => {};
   try {
     const context = browser.contexts()[0] ?? (await browser.newContext());
     page = await context.newPage();
+    stopSignalCleanup = closePageOnSignal(page); // finally{} is skipped on SIGTERM
     const store = new ReconcileStore(RECONCILE_DIR);
     if (mode === 'scan') {
       await openPhotosHome(page); // the search box must be reachable before searchByDate
@@ -3731,6 +3734,7 @@ async function reconcileEntry(month, mode) {
     loud(`BLOCKER: worker error: ${err.stack || err}`);
     process.exitCode = 1;
   } finally {
+    stopSignalCleanup();
     await page?.close().catch(() => {});
   }
 }
@@ -4042,9 +4046,11 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'pho
   // Opened by this worker; closed in the finally block below. Deliberately
   // NOT browser itself — see the comment on browser.close() there.
   let page;
+  let stopSignalCleanup = () => {};
   try {
     const context = browser.contexts()[0] ?? (await browser.newContext());
     page = await context.newPage();
+    stopSignalCleanup = closePageOnSignal(page); // finally{} is skipped on SIGTERM
     await openPhotosHome(page); // lands on the main timeline either way -- no search is ever performed for --walk=timeline
     if (replaceJobs.length > 0) await runReplaceJobs(page, replaceJobs, queue, { dryRun });
     if (jobs.length === 0) {
@@ -4068,6 +4074,7 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'pho
     // browser.close() on a CDP connection sends Browser.close and kills
     // that real Chrome process outright (not just this tab), same as
     // "never kill a Chrome to free a port" in CLAUDE.md.
+    stopSignalCleanup();
     await page?.close().catch(() => {});
   }
 }
