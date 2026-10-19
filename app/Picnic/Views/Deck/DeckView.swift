@@ -923,6 +923,7 @@ struct DeckView: View {
                 // before the current card. markSortedUpToCurrent also no-ops
                 // for remote as a second line of defense.
                 HideSortedPopover(hideSorted: $viewModel.hideSorted, offlineOnly: $viewModel.offlineOnly,
+                                  newestFirst: $viewModel.newestFirst,
                                   offlineReadyAhead: viewModel.offlineReadyAhead, markSortedToHere: {
                     viewModel.markSortedUpToCurrent()
                     showHidePopover = false

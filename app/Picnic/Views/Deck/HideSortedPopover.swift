@@ -3,6 +3,7 @@ import SwiftUI
 struct HideSortedPopover: View {
     @Binding var hideSorted: Bool
     @Binding var offlineOnly: Bool
+    @Binding var newestFirst: Bool
     /// Unsorted, downloaded cards after the current one (`DeckViewModel.offlineReadyAhead`).
     var offlineReadyAhead: Int
     var markSortedToHere: () -> Void = {}
@@ -53,6 +54,20 @@ struct HideSortedPopover: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("deck.offlineReadyCount")
+
+            Divider()
+
+            Button {
+                newestFirst.toggle()
+            } label: {
+                HStack {
+                    Image(systemName: newestFirst ? "checkmark.square.fill" : "square")
+                    Text("Newest first")
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("deck.newestFirstToggle")
+            .accessibilityValue(newestFirst ? "on" : "off")
 
             if showsMarkSortedToHere {
                 Divider()

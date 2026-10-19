@@ -78,6 +78,24 @@ final class DeckViewModel: ObservableObject {
             refresh(follow: currentItem?.id ?? lastAnchorID)
         }
     }
+    /// Newest-first: the deck walks the month from its latest photo back to
+    /// its earliest instead of the default oldest-first. Implemented by
+    /// reversing `orderedItems` itself rather than only `visibleItems`, so
+    /// every "ahead of the current card" notion (prefetch window, offline
+    /// ready count, "Mark sorted till here", reanchoring) follows the order
+    /// the user is actually swiping in. Persisted the same way as `hideSorted`.
+    static let newestFirstDefaultsKey = "deck.newestFirst"
+    @Published var newestFirst = UserDefaults.standard.bool(forKey: DeckViewModel.newestFirstDefaultsKey) {
+        didSet {
+            UserDefaults.standard.set(newestFirst, forKey: DeckViewModel.newestFirstDefaultsKey)
+            // Captured before the reverse: orderedItems' didSet refreshes with
+            // no anchor, which only clamps currentIndex and would leave the
+            // deck on whatever photo now sits at the old index.
+            let anchor = currentItem?.id ?? lastAnchorID
+            orderedItems.reverse()
+            refresh(follow: anchor)
+        }
+    }
     /// What is downloaded, as far as probing and prefetching have found out.
     /// Owned here (not by the view) so `refresh` can read it and so unit tests
     /// can inject answers with `availability.markAvailable`.
@@ -142,7 +160,10 @@ final class DeckViewModel: ObservableObject {
         self.photoLibrary = photoLibrary
         self.mirrorQueue = mirrorQueue
         self.remote = nil
-        self.orderedItems = month.assets.map(DeckItem.local)
+        // MonthBucket assets are oldest-first (PhotoLibraryService fetches
+        // ascending by creationDate).
+        let items = month.assets.map(DeckItem.local)
+        self.orderedItems = newestFirst ? items.reversed() : items
         wireAvailability()
         // didSet doesn't fire for assignments inside init, so seed it here.
         // This is also what makes pendingDeleteIDs (and every other mark)
@@ -250,7 +271,8 @@ final class DeckViewModel: ObservableObject {
             remoteTrimOverrides = [:]
             // orderedItems' didSet runs refresh(), which rebuilds visibleItems
             // (honoring hideSorted); the index below is into THAT list.
-            orderedItems = snapshot.items.map(DeckItem.remote)
+            let items = snapshot.items.map(DeckItem.remote)
+            orderedItems = newestFirst ? items.reversed() : items
             currentIndex = visibleItems.firstIndex { sortStore.state(forID: $0.id) == .unsorted } ?? 0
         } catch {
             remoteError = "\(error)"
