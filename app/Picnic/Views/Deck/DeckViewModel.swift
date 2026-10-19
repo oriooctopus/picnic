@@ -343,7 +343,7 @@ final class DeckViewModel: ObservableObject {
         // sort or delete state depends on what is downloaded.
         visibleItems = orderedItems.filter { item in
             (!hideSorted || (marks[item.id] ?? .unsorted) == .unsorted)
-                && true
+                && (!offlineOnly || availability.isAvailable(item.id))
         }
 
         // Grouped over orderedItems, NOT visibleItems: a burst is defined by
