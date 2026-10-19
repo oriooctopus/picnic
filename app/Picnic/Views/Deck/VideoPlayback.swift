@@ -472,8 +472,11 @@ struct VideoControlBar: View {
             // Attached to the background fill layers, not the buttons
             // overlaid on top, so a drag starting anywhere on the bar seeks
             // while the buttons still receive their own taps normally.
+            // minimumDistance > 0 so only a real drag seeks: with 0, a tap
+            // that just missed the play/pause icon jumped the video to that
+            // spot instead of pausing (reported on device).
             .gesture(
-                DragGesture(minimumDistance: 0)
+                DragGesture(minimumDistance: 10)
                     .onChanged { value in
                         guard isEnabled else { return }
                         controller.seek(toFraction: Double(value.location.x / geo.size.width))
@@ -487,11 +490,17 @@ struct VideoControlBar: View {
 
                     Spacer()
 
+                    // Hit area is the full bar height and well past the
+                    // 16pt glyph: the bare glyph was too small to hit, and a
+                    // near miss fell through to the seek layer underneath.
                     Button { controller.togglePlayback() } label: {
                         Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(.white)
+                            .frame(width: 88, height: barHeight)
+                            .contentShape(Rectangle())
                     }
+                    .accessibilityIdentifier("deck.videoPlayPause")
 
                     Spacer()
 
@@ -499,9 +508,14 @@ struct VideoControlBar: View {
                         Image(systemName: controller.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(.white)
+                            .frame(width: 56, height: barHeight)
+                            .contentShape(Rectangle())
                     }
                 }
-                .padding(.horizontal, 18)
+                // No trailing inset: the 56pt mute frame's own margin keeps the
+                // glyph ~28pt from the edge, about where the old 18pt inset
+                // put the bare glyph.
+                .padding(.leading, 18)
                 .disabled(!isEnabled)
                 .allowsHitTesting(true)
             )

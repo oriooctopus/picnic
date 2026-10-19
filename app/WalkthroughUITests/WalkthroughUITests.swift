@@ -3193,6 +3193,42 @@ final class WalkthroughUITests: XCTestCase {
                           "an uncached video must show its dark still, not a video frame: \(stillMean)")
     }
 
+    /// The play/pause button must be easy to hit, and a stray tap on the bar
+    /// must not seek. Reported on device: a tap just beside the small pause
+    /// glyph fell through to the bar's seek gesture and jumped the video.
+    /// Checks pixels, not AX frames: after pausing, the card's frame must
+    /// stay put when the bar is tapped away from any button.
+    func testVideoBarNearMissPausesWithoutSeeking() throws {
+        relaunch(withExtraArguments: ["--seed-remote-album", "--seed-remote-album-video-first", "--reset-sort-state"])
+        _ = openRemoteAlbumDeckFromUtilities()
+        let bar = app.descendants(matching: .any)["deck.videoControls"].firstMatch
+        XCTAssertTrue(bar.waitForExistence(timeout: 15), "a remote video card must show the video control bar")
+        XCTAssertTrue(waitFor(bar, value: "playing", timeout: 15), "video should autoplay")
+
+        // 30pt right of centre: outside the 16pt glyph, inside its hit area.
+        bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .withOffset(CGVector(dx: 30, dy: 0)).tap()
+        XCTAssertTrue(waitFor(bar, value: "paused", timeout: 3),
+                      "a tap just beside the pause glyph must pause, not seek")
+
+        Thread.sleep(forTimeInterval: 0.5)
+        let before = centerMeanRGB(app.screenshot())
+        // 20% across the bar: no button there. A tap must not seek.
+        bar.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        let after = centerMeanRGB(capture("76-video-bar-tap-no-seek", delay: 0))
+        let distance = ((before.r - after.r) * (before.r - after.r)
+            + (before.g - after.g) * (before.g - after.g)
+            + (before.b - after.b) * (before.b - after.b)).squareRoot()
+        XCTAssertLessThan(distance, 20, "a tap on the bar must not seek: \(before) vs \(after)")
+        XCTAssertEqual(bar.value as? String, "paused")
+    }
+
+    private func waitFor(_ element: XCUIElement, value: String, timeout: TimeInterval) -> Bool {
+        let exp = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", value), object: element)
+        return XCTWaiter().wait(for: [exp], timeout: timeout) == .completed
+    }
+
     /// The remote video must not start until its lead-in is buffered. With
     /// `--hold-remote-video-load` the gate is kept closed for 5s even though the
     /// fixture file is fully loaded at once, so the loading state is on screen
