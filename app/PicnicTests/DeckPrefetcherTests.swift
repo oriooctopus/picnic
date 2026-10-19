@@ -18,8 +18,10 @@ final class DeckPrefetcherTests: XCTestCase {
     func testWindowLargerThanList() {
         XCTAssertEqual(DeckPrefetcher.window(count: 4, current: 1), [2, 3, 0])
     }
-    func testDefaultRadiusIs15() {
-        let w = DeckPrefetcher.window(count: 100, current: 50)
+    /// The old symmetric window, still reachable by passing the radius; the
+    /// production local window is forward 150 / behind 15 (OfflineOnlyTests).
+    func testSymmetricWindowOf15() {
+        let w = DeckPrefetcher.window(count: 100, current: 50, radius: 15)
         XCTAssertEqual(w.count, 30)
         XCTAssertEqual(w.first, 51)
         XCTAssertEqual(w[14], 65)

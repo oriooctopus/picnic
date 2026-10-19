@@ -2,6 +2,9 @@ import SwiftUI
 
 struct HideSortedPopover: View {
     @Binding var hideSorted: Bool
+    @Binding var offlineOnly: Bool
+    /// Unsorted, downloaded cards after the current one (`DeckViewModel.offlineReadyAhead`).
+    var offlineReadyAhead: Int
     var markSortedToHere: () -> Void = {}
     /// False for a remote-album deck: "Mark sorted till here" would mass-keep
     /// (= queue server downloads for) every earlier item in one tap.
@@ -30,6 +33,26 @@ struct HideSortedPopover: View {
             // stable "on"/"off" string to assert on instead of trying to
             // infer state from the symbol name.
             .accessibilityValue(hideSorted ? "on" : "off")
+
+            Button {
+                offlineOnly.toggle()
+            } label: {
+                HStack {
+                    Image(systemName: offlineOnly ? "checkmark.square.fill" : "square")
+                    Text("Offline only")
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("deck.offlineOnlyToggle")
+            // Same reason as the hideSorted toggle: the check is only a symbol swap.
+            .accessibilityValue(offlineOnly ? "on" : "off")
+
+            // How many swipes remain with no network. The prefetcher works
+            // toward 150; this shows how far along it is.
+            Text("\(offlineReadyAhead) ready offline")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("deck.offlineReadyCount")
 
             if showsMarkSortedToHere {
                 Divider()

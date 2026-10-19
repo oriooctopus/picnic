@@ -47,6 +47,13 @@ enum ThumbnailLoader {
     /// stand-in. Same DEBUG-only, read-once pattern as `--slow-image-loads`.
     static let simulateUndownloaded = ProcessInfo.processInfo.arguments.contains("--simulate-undownloaded-images")
     static let simulateICloudLowRes = ProcessInfo.processInfo.arguments.contains("--simulate-icloud-lowres")
+    /// `--simulate-partially-downloaded` makes `LocalAvailability` report every
+    /// odd-positioned item (month order) as not downloaded, so a UI test can
+    /// see offline-only mode filter a deck without a real iCloud library.
+    /// Only the availability probe reads it; card loads are untouched, and
+    /// `DeckPrefetcher` stands down while it is set (its real downloads would
+    /// otherwise "make" the simulated-missing items available mid-test).
+    static let simulatePartiallyDownloaded = ProcessInfo.processInfo.arguments.contains("--simulate-partially-downloaded")
 
     static func simulatedUpdates() -> [DeckImageUpdate]? {
         if simulateUndownloaded {

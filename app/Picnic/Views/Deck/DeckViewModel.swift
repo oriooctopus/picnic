@@ -65,6 +65,28 @@ final class DeckViewModel: ObservableObject {
             refresh(follow: currentItem?.id)
         }
     }
+    /// Offline-only mode: the deck steps through ONLY items whose full-quality
+    /// image is already on this phone (see `LocalAvailability`). Persisted the
+    /// same way and for the same reason as `hideSorted`.
+    static let offlineOnlyDefaultsKey = "deck.offlineOnly"
+    @Published var offlineOnly = UserDefaults.standard.bool(forKey: DeckViewModel.offlineOnlyDefaultsKey) {
+        didSet {
+            UserDefaults.standard.set(offlineOnly, forKey: DeckViewModel.offlineOnlyDefaultsKey)
+            // Same read-before-refresh ordering as hideSorted. Falls back to
+            // the last known anchor so toggling on while the current card
+            // itself is hidden still lands on the next remaining one.
+            refresh(follow: currentItem?.id ?? lastAnchorID)
+        }
+    }
+    /// What is downloaded, as far as probing and prefetching have found out.
+    /// Owned here (not by the view) so `refresh` can read it and so unit tests
+    /// can inject answers with `availability.markAvailable`.
+    let availability = LocalAvailability()
+    /// The last card the deck was actually pointing at. When offline-only
+    /// empties the deck `currentItem` is nil, and without this the first item
+    /// that probing then confirms would be wherever index 0 falls, not near
+    /// the card the user was on.
+    private var lastAnchorID: String?
     @Published var currentIndex = 0
     /// Trims saved this session, by DeckItem id. The server listing is the
     /// source of truth (`RemoteAlbumItem.trim`), but the in-memory items are
@@ -121,6 +143,7 @@ final class DeckViewModel: ObservableObject {
         self.mirrorQueue = mirrorQueue
         self.remote = nil
         self.orderedItems = month.assets.map(DeckItem.local)
+        wireAvailability()
         // didSet doesn't fire for assignments inside init, so seed it here.
         // This is also what makes pendingDeleteIDs (and every other mark)
         // survive relaunch for free: refresh() derives them from
@@ -142,7 +165,64 @@ final class DeckViewModel: ObservableObject {
         self.remote = remoteAlbum
         self.orderedItems = []
         self.isLoadingRemote = true
+        wireAvailability()
         refresh(follow: nil)
+    }
+
+    private func wireAvailability() {
+        availability.onChange = { [weak self] in self?.availabilityChanged() }
+    }
+
+    /// The set of downloaded items grew (probe flush or finished prefetch).
+    /// Re-derive the visible list only when offline-only is filtering by it;
+    /// otherwise just republish so the "N ready offline" count updates, since
+    /// a refresh rebuilds Compare groups over the whole month. `follow` keeps
+    /// the deck on the card the user is looking at while items appear around it.
+    private func availabilityChanged() {
+        if offlineOnly {
+            refresh(follow: currentItem?.id ?? lastAnchorID)
+        } else {
+            objectWillChange.send()
+        }
+    }
+
+    /// Probes every item for local availability, nearest the current card
+    /// first. Long-running and cancellable; the view runs it only while
+    /// offline-only is on or the filter popover (which shows the ready count)
+    /// is open, since each probe decodes a screen-size image.
+    func probeAvailability() async {
+        let anchor = currentItem.flatMap { item in orderedItems.firstIndex { $0.id == item.id } } ?? 0
+        await availability.probe(items: orderedItems, startIndex: anchor)
+    }
+
+    /// Unsorted, downloaded items after the current card in month order: the
+    /// swipes the user could do right now with no network. Counts from the
+    /// last known anchor when the current card is hidden by the filter.
+    var offlineReadyAhead: Int {
+        let anchorID = currentItem?.id ?? lastAnchorID
+        let start = anchorID.flatMap { id in orderedItems.firstIndex { $0.id == id } }.map { $0 + 1 } ?? 0
+        return orderedItems[start...].reduce(0) { count, item in
+            (marks[item.id] ?? .unsorted) == .unsorted && availability.isAvailable(item.id) ? count + 1 : count
+        }
+    }
+
+    /// What `DeckPrefetcher` should window over: the month's UNSORTED items in
+    /// month order, plus the position of the current card in that list. NOT
+    /// `visibleItems`: with offline-only on, that list drops exactly the
+    /// undownloaded items the prefetcher exists to fetch. `anchor` is the
+    /// current card's index, or, when the current card is itself sorted (or
+    /// absent), the index of the last unsorted item before it (-1 if none) so
+    /// the window still starts at the first unsorted item after it.
+    var prefetchSource: (items: [DeckItem], anchor: Int) {
+        let anchorID = currentItem?.id ?? lastAnchorID
+        let anchorOrdered = anchorID.flatMap { id in orderedItems.firstIndex { $0.id == id } } ?? 0
+        var items: [DeckItem] = []
+        var anchor = -1
+        for (i, item) in orderedItems.enumerated() where (marks[item.id] ?? .unsorted) == .unsorted {
+            if i <= anchorOrdered { anchor = items.count }
+            items.append(item)
+        }
+        return (items, anchor)
     }
 
     /// Fetches the server's listing and makes it the deck. The server is the
@@ -222,6 +302,12 @@ final class DeckViewModel: ObservableObject {
     /// any read site.
     @Published private(set) var marks: [String: SortState] = [:]
 
+    /// How many items are unsorted, kept in step with `marks`. Exists so the
+    /// view can key the prefetch task on it cheaply: sorting a card changes
+    /// the unsorted list the prefetcher windows over even when `visibleItems`
+    /// and `currentIndex` do not move (hideSorted off, swipe at the last card).
+    @Published private(set) var unsortedCount = 0
+
     /// The single choke point for every mutation that can change what's
     /// sorted, what's visible, or which photo the deck is pointing at.
     /// Replaces the scattered `recomputeVisibleAssets()` calls that used to
@@ -233,10 +319,15 @@ final class DeckViewModel: ObservableObject {
     /// deck should try to keep showing (nil just clamps currentIndex back
     /// into range instead) — see `reanchorCurrentIndex(toFollow:)`.
     private func refresh(follow assetID: String?) {
+        // Remember where the user was BEFORE the filters possibly empty the deck
+        // (see lastAnchorID); the post-reanchor update below only runs when a
+        // current card survives.
+        if let assetID { lastAnchorID = assetID }
         marks = Dictionary(uniqueKeysWithValues: orderedItems.map {
             ($0.id, sortStore.state(forID: $0.id))
         })
         pendingDeleteIDs = Set(marks.filter { $0.value == .markedForDelete }.keys)
+        unsortedCount = marks.values.reduce(0) { $1 == .unsorted ? $0 + 1 : $0 }
 
         // hideSorted is an "anything marked" filter, not a "hide kept"
         // filter: from the user's perspective any non-.unsorted photo is
@@ -244,9 +335,16 @@ final class DeckViewModel: ObservableObject {
         // filmstrip when the toggle is on. With the toggle off, marked
         // photos stay visible (with their badge) so they're still
         // reviewable/undoable up until an explicit commit.
-        visibleItems = hideSorted
-            ? orderedItems.filter { (marks[$0.id] ?? .unsorted) == .unsorted }
-            : orderedItems
+        //
+        // offlineOnly is a second, independent filter: an item not CONFIRMED
+        // downloaded is hidden (unprobed counts as not downloaded, so the
+        // deck can never show a card that would load blank). It does not
+        // touch `marks`, `pendingDeleteIDs` or Compare groups below, so no
+        // sort or delete state depends on what is downloaded.
+        visibleItems = orderedItems.filter { item in
+            (!hideSorted || (marks[item.id] ?? .unsorted) == .unsorted)
+                && (!offlineOnly || availability.isAvailable(item.id))
+        }
 
         // Grouped over orderedItems, NOT visibleItems: a burst is defined by
         // when the photos were taken, not by how far through sorting you are.
@@ -272,6 +370,7 @@ final class DeckViewModel: ObservableObject {
         groupByAssetID = lookup
 
         reanchorCurrentIndex(toFollow: assetID)
+        if let current = currentItem { lastAnchorID = current.id }
     }
 
     var currentItem: DeckItem? {

@@ -235,11 +235,28 @@ struct DeckView: View {
             let start = min(viewModel.currentIndex, items.count)
             await ThumbnailLoader.warmCache(for: Array(items[start...] + items[..<start]))
         }
-        // Pull the 15 photos either side of the current card down from iCloud
-        // so swiping to them doesn't wait on the network. Id includes the
-        // count because a remote deck fills in after open.
-        .task(id: "\(viewModel.currentIndex)#\(viewModel.visibleItems.count)") {
-            prefetcher.recenter(items: viewModel.visibleItems, currentIndex: viewModel.currentIndex)
+        // Pull the next 150 UNSORTED photos (and 15 behind) down from iCloud so
+        // swiping to them doesn't wait on the network, and so offline-only mode
+        // always has swipes available. Windows over `prefetchSource`, not
+        // `visibleItems`: offline-only hides the very items to be fetched.
+        // Id includes the count because a remote deck fills in after open, and
+        // the unsorted count because sorting a card changes the unsorted list
+        // even when hideSorted is off and the visible list does not move.
+        .task(id: "\(viewModel.currentIndex)#\(viewModel.visibleItems.count)#\(viewModel.unsortedCount)") {
+            prefetcher.onLocalAvailable = { [viewModel] id in viewModel.availability.markAvailable(id) }
+            prefetcher.onRemoteAvailable = { [viewModel] id in viewModel.availability.markAvailable(id) }
+            let source = viewModel.prefetchSource
+            prefetcher.recenter(items: source.items, currentIndex: source.anchor) { [viewModel] in
+                viewModel.availability.isAvailable($0)
+            }
+        }
+        // Finds out which cards are downloaded. Only worth its cost (a
+        // screen-size decode per photo) while offline-only filters by it or the
+        // popover that shows the ready count is open; cancelled when either
+        // stops being true.
+        .task(id: "\(viewModel.monthKey)#\(viewModel.orderedItems.count)#\(viewModel.offlineOnly)#\(showHidePopover)") {
+            guard viewModel.offlineOnly || showHidePopover else { return }
+            await viewModel.probeAvailability()
         }
         // Remote deck: fetch the album (and its server-side decisions) once
         // on open. Local decks have nothing to load. A failure lands in
@@ -705,11 +722,22 @@ struct DeckView: View {
 
     private var emptyState: some View {
         VStack(spacing: 12) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 44))
-                .foregroundStyle(.green)
-            Text("All sorted for \(viewModel.title)")
-                .foregroundStyle(.white)
+            if viewModel.offlineOnly && !viewModel.orderedItems.isEmpty {
+                // Offline-only emptied the deck: "All sorted" would be a lie,
+                // the photos are merely not downloaded (or still being checked).
+                Image(systemName: viewModel.availability.isProbing ? "arrow.triangle.2.circlepath.icloud" : "icloud.slash")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.white.opacity(0.7))
+                Text(viewModel.availability.isProbing ? "Checking what's downloaded" : "No downloaded photos")
+                    .foregroundStyle(.white)
+                    .accessibilityIdentifier("deck.offlineEmpty")
+            } else {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.green)
+                Text("All sorted for \(viewModel.title)")
+                    .foregroundStyle(.white)
+            }
         }
     }
 
@@ -894,7 +922,8 @@ struct DeckView: View {
                 // where it would mass-keep (= queue downloads for) everything
                 // before the current card. markSortedUpToCurrent also no-ops
                 // for remote as a second line of defense.
-                HideSortedPopover(hideSorted: $viewModel.hideSorted, markSortedToHere: {
+                HideSortedPopover(hideSorted: $viewModel.hideSorted, offlineOnly: $viewModel.offlineOnly,
+                                  offlineReadyAhead: viewModel.offlineReadyAhead, markSortedToHere: {
                     viewModel.markSortedUpToCurrent()
                     showHidePopover = false
                 }, showsMarkSortedToHere: !viewModel.isRemote)

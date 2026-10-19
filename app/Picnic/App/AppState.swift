@@ -79,6 +79,11 @@ final class AppState: ObservableObject {
         if args.contains("--reset-hide-sorted") {
             UserDefaults.standard.removeObject(forKey: DeckViewModel.hideSortedDefaultsKey)
         }
+        // Same persistence story for offline-only mode: left on by one test it
+        // would hide every undownloaded item from all later tests' decks.
+        if args.contains("--reset-offline-only") {
+            UserDefaults.standard.removeObject(forKey: DeckViewModel.offlineOnlyDefaultsKey)
+        }
         // Debug-only, UI-test-only: unlike hideSorted's single UserDefaults
         // key, actual sort progress (kept/markedForDelete marks, per-month
         // "manually sorted" flags, and resolved compare-group choices) lives

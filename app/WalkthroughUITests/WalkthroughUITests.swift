@@ -3428,4 +3428,49 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(totalCount(fromPosition: position.label), 2,
                        "Offline, only the two photos should be sorted; the first video must stay unsorted")
     }
+
+    /// Offline-only mode filters the deck to what is downloaded.
+    /// `--simulate-partially-downloaded` reports every odd-positioned item
+    /// (month order) of every deck as not downloaded, so May 2025 (5 seeded
+    /// assets) must shrink to the 3 even-positioned ones. Asserts labels and
+    /// values only, never frames. `--reset-offline-only` / the closing toggle
+    /// keep the persisted setting from leaking into later tests.
+    func testOfflineOnlyFiltersDeckToDownloadedItems() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-offline-only", "--simulate-partially-downloaded"])
+        openMayDeck()
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10), "Position label should appear")
+        let before = totalCount(fromPosition: position.label)
+        XCTAssertGreaterThan(before, 2, "Need a deck big enough for the filter to visibly shrink it")
+
+        app.buttons["deck.filter"].tap()
+        let toggle = app.descendants(matching: .any)["deck.offlineOnlyToggle"].firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5), "Popover should offer the 'Offline only' toggle")
+        XCTAssertEqual(toggle.value as? String, "off", "Offline-only must start off")
+        toggle.tap()
+        XCTAssertEqual(toggle.value as? String, "on", "Toggle should read on after the tap")
+
+        // The probe is async, so poll for the settled count instead of sleeping.
+        let expected = (before + 1) / 2
+        let deadline = Date().addingTimeInterval(20)
+        var after = -1
+        while Date() < deadline {
+            after = position.exists ? totalCount(fromPosition: position.label) : 0
+            if after == expected { break }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        capture("offline-only-on")
+        XCTAssertEqual(after, expected,
+                       "Offline-only should leave just the downloaded items (was \(before), expected \(expected), got \(after))")
+
+        let ready = app.descendants(matching: .any)["deck.offlineReadyCount"].firstMatch
+        XCTAssertTrue(ready.waitForExistence(timeout: 5), "Popover should show how many swipes are ready offline")
+        XCTAssertTrue(ready.label.hasSuffix("ready offline"), "Ready-count caption, got '\(ready.label)'")
+
+        // Off again: full deck back, and the persisted setting is cleared.
+        toggle.tap()
+        XCTAssertEqual(toggle.value as? String, "off")
+        tapOutside()
+        XCTAssertEqual(totalCount(fromPosition: position.label), before, "Turning offline-only off should restore the whole deck")
+    }
 }
