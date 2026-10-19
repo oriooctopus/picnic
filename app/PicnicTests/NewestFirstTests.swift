@@ -80,8 +80,10 @@ final class NewestFirstTests: XCTestCase {
         let vm = try await makeDeck(count: 5)
         vm.newestFirst = true
         vm.currentIndex = 1  // k3
-        for i in 0..<5 { vm.availability.markAvailable(id(i)) }
-        // Ahead of k3 when walking newest→oldest is k2, k1, k0.
+        // Only the older half is downloaded, so the count differs by direction:
+        // ahead of k3 walking newest→oldest is k2, k1, k0 (3); oldest-first would be just k4's side (0).
+        for i in 0..<3 { vm.availability.markAvailable(id(i)) }
+        XCTAssertEqual(vm.currentItem?.id, id(3))
         XCTAssertEqual(vm.offlineReadyAhead, 3)
     }
 }

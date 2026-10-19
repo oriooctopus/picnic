@@ -161,8 +161,11 @@ final class DeckViewModel: ObservableObject {
         self.mirrorQueue = mirrorQueue
         self.remote = nil
         // MonthBucket assets are oldest-first (PhotoLibraryService fetches
-        // ascending by creationDate).
+        // ascending by creationDate). Reads the default directly because
+        // `self.newestFirst` can't be read before every stored property is
+        // initialized, and orderedItems is one of them.
         let items = month.assets.map(DeckItem.local)
+        let newestFirst = UserDefaults.standard.bool(forKey: Self.newestFirstDefaultsKey)
         self.orderedItems = newestFirst ? items.reversed() : items
         wireAvailability()
         // didSet doesn't fire for assignments inside init, so seed it here.
