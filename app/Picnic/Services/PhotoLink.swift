@@ -16,8 +16,8 @@ enum PhotoLink {
     static func assetID(from url: URL) -> String? {
         guard url.scheme == scheme, url.host == host else { return nil }
         // url.path decodes %2F back into "/", so take the raw path instead.
-        let raw = url.path
-        guard raw.count > 1 else { return nil }
+        guard let raw = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
+              raw.count > 1 else { return nil }
         return String(raw.dropFirst())
     }
 }
