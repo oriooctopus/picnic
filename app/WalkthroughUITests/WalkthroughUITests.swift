@@ -3522,21 +3522,26 @@ final class WalkthroughUITests: XCTestCase {
         capture("53-share-sheet")
         copy.tap()
 
-        // Read the clipboard from the runner; iOS may gate it behind a paste prompt.
+        // Read the clipboard from the runner; iOS may gate it behind a paste
+        // prompt. The copy happens a beat after the tap, so poll until a link
+        // shows up (a read that never yields one still fails below).
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         final class Box: @unchecked Sendable { var value: String? }
         let box = Box()
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            box.value = UIPasteboard.general.string
-            done.signal()
-        }
-        let deadline = Date().addingTimeInterval(30)
-        while done.wait(timeout: .now() + 1) == .timedOut && Date() < deadline {
-            for container in [springboard, app!] {
-                let allow = container.buttons["Allow Paste"]
-                if allow.exists { allow.tap() }
+        let deadline = Date().addingTimeInterval(40)
+        while Date() < deadline, box.value?.hasPrefix("picnic://photo/") != true {
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async {
+                box.value = UIPasteboard.general.string
+                done.signal()
             }
+            while done.wait(timeout: .now() + 1) == .timedOut && Date() < deadline {
+                for container in [springboard, app!] {
+                    let allow = container.buttons["Allow Paste"]
+                    if allow.exists { allow.tap() }
+                }
+            }
+            if box.value?.hasPrefix("picnic://photo/") != true { Thread.sleep(forTimeInterval: 1.0) }
         }
         let url = try XCTUnwrap(box.value, "clipboard should hold the copied link")
         XCTAssertTrue(url.hasPrefix("picnic://photo/"), "got \(url)")
