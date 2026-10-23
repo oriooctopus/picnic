@@ -3509,4 +3509,53 @@ final class WalkthroughUITests: XCTestCase {
         tapOutside()
         XCTAssertEqual(totalCount(fromPosition: position.label), before, "Turning offline-only off should restore the whole deck")
     }
+    /// Copy Picnic Link from the share sheet, then open that link: the linked
+    /// photo must show, with real pixels, and close.
+    func test53CopyPicnicLinkOpensPhotoFullScreen() throws {
+        openMayDeck()
+        let share = app.buttons["deck.share"]
+        XCTAssertTrue(share.waitForExistence(timeout: 10), "Deck should show the share button")
+        share.tap()
+
+        let copy = app.descendants(matching: .any)["Copy Picnic Link"].firstMatch
+        XCTAssertTrue(copy.waitForExistence(timeout: 15), "Share sheet should offer Copy Picnic Link")
+        capture("53-share-sheet")
+        copy.tap()
+
+        // Read the clipboard from the runner; iOS may gate it behind a paste prompt.
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        final class Box: @unchecked Sendable { var value: String? }
+        let box = Box()
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            box.value = UIPasteboard.general.string
+            done.signal()
+        }
+        let deadline = Date().addingTimeInterval(30)
+        while done.wait(timeout: .now() + 1) == .timedOut && Date() < deadline {
+            for container in [springboard, app!] {
+                let allow = container.buttons["Allow Paste"]
+                if allow.exists { allow.tap() }
+            }
+        }
+        let url = try XCTUnwrap(box.value, "clipboard should hold the copied link")
+        XCTAssertTrue(url.hasPrefix("picnic://photo/"), "got \(url)")
+
+        // Dismiss the share sheet if it is still up.
+        if app.buttons["Close"].exists { app.buttons["Close"].tap() }
+        Thread.sleep(forTimeInterval: 1.0)
+
+        app.open(try XCTUnwrap(URL(string: url)))
+        let image = app.descendants(matching: .any)["linkedPhoto.image"].firstMatch
+        XCTAssertTrue(image.waitForExistence(timeout: 20), "Opening the link should show the photo")
+        let shot = capture("53-linked-photo", delay: 1.5)
+        let mean = centerMeanRGB(shot)
+        let sd = centerLuminanceStdDev(shot)
+        add(XCTAttachment(string: "center mean \(mean) stddev \(sd)"))
+        XCTAssertGreaterThan(mean.r + mean.g + mean.b, 30, "centre must not be black: \(mean)")
+
+        app.buttons["linkedPhoto.close"].tap()
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: image)
+        XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 10), .completed, "Close should dismiss the photo")
+    }
 }

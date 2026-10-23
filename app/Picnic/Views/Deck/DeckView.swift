@@ -784,6 +784,7 @@ struct DeckView: View {
             } label: {
                 Image(systemName: "square.and.arrow.up").foregroundStyle(.white)
             }
+            .accessibilityIdentifier("deck.share")
             if viewModel.currentItem?.phAsset?.mediaType == .video {
                 Button { isTrimming = true } label: {
                     Image(systemName: "scissors").foregroundStyle(.white)

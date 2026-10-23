@@ -438,8 +438,14 @@ enum ShareSheetPresenter {
             guard let scene = UIApplication.shared.connectedScenes
                 .first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene,
                   let root = scene.windows.first(where: \.isKeyWindow)?.rootViewController else { return }
-            let activityVC = UIActivityViewController(activityItems: [image], applicationActivities: nil)
-            root.present(activityVC, animated: true)
+            let activityVC = UIActivityViewController(
+                activityItems: [image],
+                applicationActivities: [CopyPhotoLinkActivity(assetID: asset.localIdentifier)]
+            )
+            // Present over whatever is already up (the linked-photo cover).
+            var presenter = root
+            while let next = presenter.presentedViewController { presenter = next }
+            presenter.present(activityVC, animated: true)
         }
     }
 }

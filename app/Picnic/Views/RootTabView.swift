@@ -1,5 +1,9 @@
 import SwiftUI
 
+private struct LinkedPhoto: Identifiable {
+    let id: String
+}
+
 enum RootTab {
     case myLife, utilities, profile
 }
@@ -10,6 +14,7 @@ enum RootTab {
 struct RootTabView: View {
     @EnvironmentObject var appState: AppState
     @State private var selectedTab: RootTab = .myLife
+    @State private var linkedPhoto: LinkedPhoto?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -33,6 +38,12 @@ struct RootTabView: View {
                 Text(check).font(.system(size: 1)).opacity(0.02).accessibilityIdentifier("debug.resourceSizeCheck")
             }
             #endif
+        }
+        .onOpenURL { url in
+            if let id = PhotoLink.assetID(from: url) { linkedPhoto = LinkedPhoto(id: id) }
+        }
+        .fullScreenCover(item: $linkedPhoto) { photo in
+            LinkedPhotoView(assetID: photo.id) { linkedPhoto = nil }
         }
     }
 
