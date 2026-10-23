@@ -90,6 +90,8 @@ OPTIONAL = [
     "82-remote-trim-reopened-after-reopen-deck",
     "83-remote-card-display-resolution", "84-remote-card-no-display-keeps-thumb",
     "99-final-testRemoteAlbumDeck",
+    # Copy Picnic Link (test53).
+    "53-share-sheet", "53-linked-photo", "99-final-test53CopyPicnicLinkOpensPhotoFullScreen",
 ]
 
 EXPECTED = REQUIRED + OPTIONAL
