@@ -39,9 +39,6 @@ struct RootTabView: View {
             }
             #endif
         }
-        .onOpenURL { url in
-            if let id = PhotoLink.assetID(from: url) { linkedPhoto = LinkedPhoto(id: id) }
-        }
         .fullScreenCover(item: $linkedPhoto) { photo in
             LinkedPhotoView(assetID: photo.id) { linkedPhoto = nil }
         }

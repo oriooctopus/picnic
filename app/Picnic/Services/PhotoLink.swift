@@ -18,7 +18,7 @@ enum PhotoLink {
         // url.path decodes %2F back into "/", so take the raw path instead.
         guard let raw = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
               raw.count > 1 else { return nil }
-        return String(raw.dropFirst())
+        return String(raw.dropFirst()).removingPercentEncoding
     }
 }
 
