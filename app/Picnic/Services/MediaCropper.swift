@@ -49,9 +49,7 @@ enum MediaCropper {
         } else {
             try renderPhoto(input: input, rect: normalizedRect, to: output.renderedContentURL)
         }
-        try await PHPhotoLibrary.shared().performChanges {
-            PHAssetChangeRequest(for: asset).contentEditingOutput = output
-        }
+        // MUTATION: performChanges skipped
     }
 
     /// Unit rect → whole-pixel rect inside `size` (top-left origin). `even`
@@ -60,7 +58,7 @@ enum MediaCropper {
     /// either rejected or padded with a green edge). Never returns an empty
     /// rect: the minimum is one (or two, when even) pixels.
     static func pixelRect(normalized: CGRect, in size: CGSize, even: Bool) -> CGRect {
-        let step: CGFloat = even ? 2 : 1
+        let step: CGFloat = 1 // MUTATION: even ignored
         let snap: (CGFloat) -> CGFloat = { (($0 / step).rounded(.down)) * step }
         let x = min(snap(normalized.minX * size.width), max(0, size.width - step))
         let y = min(snap(normalized.minY * size.height), max(0, size.height - step))
