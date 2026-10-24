@@ -853,7 +853,6 @@ struct DeckView: View {
                 outfitLog.log(assetID: asset.localIdentifier, takenAt: asset.creationDate ?? Date())
                 showToast(.logged(assetID: asset.localIdentifier), seconds: 4)
                 // Logging an outfit implies keeping the photo: swipe it right.
-                cardKeepNonce += 1
             }
         } label: {
             Image(systemName: "hanger")
