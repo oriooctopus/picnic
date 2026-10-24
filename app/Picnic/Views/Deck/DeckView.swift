@@ -692,13 +692,13 @@ struct DeckView: View {
     private func saveTrim(asset: PHAsset, window: ClosedRange<Double>) {
         let id = asset.localIdentifier
         videoController.setLoopWindow(window)
-        isTrimming = false
         pendingTrimIDs.insert(id)
         Task {
             // Removed only after the reload below, so the scissors never
             // re-enable on the stale untrimmed player.
             defer { pendingTrimIDs.remove(id) }
             let saved = await commitTrim(asset: asset, window: window)
+            isTrimming = false
             guard viewModel.currentItem?.id == id, !isTrimming else { return }
             guard saved else {
                 videoController.setLoopWindow(nil)
