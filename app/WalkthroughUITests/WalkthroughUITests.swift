@@ -2128,27 +2128,36 @@ final class WalkthroughUITests: XCTestCase {
         return (idleSummary, dragSummary)
     }
 
-    /// One tap on the hanger fills it lilac and shows the "Logged to Outfits"
-    /// toast; the filled state survives relaunch. Asserted on screenshot
-    /// pixels by .github/scripts/check_outfit_button.py (before / after /
-    /// relaunched), never on element frames.
+    /// One tap on the hanger logs the photo and swipes it right: the deck
+    /// moves to the next (unlogged) photo, the first photo reads "kept", and
+    /// the "Logged to Outfits" toast is up. After relaunch the deck reopens on
+    /// the first photo with its hanger lilac (logged state persisted).
+    /// Asserted on screenshot pixels by .github/scripts/check_outfit_button.py
+    /// (before / after / relaunched), never on element frames.
     func test52DeckLogOutfitFillsButtonAndPersists() throws {
         relaunch(withExtraArguments: ["--reset-outfit-log"])
         openMayDeck()
         let button = app.buttons["deck.logOutfit"]
         XCTAssertTrue(button.waitForExistence(timeout: 10), "Log-as-outfit button should exist on a photo card")
         XCTAssertEqual(button.value as? String, "not logged")
+        let thumb0 = app.descendants(matching: .any)["filmstrip.thumb.0"].firstMatch
+        XCTAssertTrue(thumb0.waitForExistence(timeout: 5))
+        XCTAssertEqual(thumb0.value as? String, "unsorted")
         capture("60-outfit-before-tap", delay: 0.5)
 
         button.tap()
-        // Toast is up for ~4s; capture well inside that window.
-        capture("61-outfit-after-tap", delay: 0.6)
+        // Toast is up for ~4s; capture well inside that window, after the
+        // fly-off has finished.
+        capture("61-outfit-after-tap", delay: 0.8)
         XCTAssertTrue(app.buttons["deck.outfitToast.review"].exists, "Review now action should be on the toast")
-        XCTAssertEqual(button.value as? String, "logged")
+        XCTAssertEqual(thumb0.value as? String, "kept", "Logging an outfit should swipe the photo right (keep)")
+        XCTAssertEqual(button.value as? String, "not logged", "Deck should have advanced to the next, unlogged photo")
 
         relaunch(withExtraArguments: [])
         openMayDeck()
         XCTAssertTrue(app.buttons["deck.logOutfit"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.buttons["deck.logOutfit"].value as? String, "logged",
+                       "Reopened deck starts on the logged photo, whose logged state should persist")
         // Past the toast's 4s lifetime, and no toast is ever shown on a plain reopen.
         capture("62-outfit-after-relaunch", delay: 1.0)
     }

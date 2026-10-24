@@ -2,8 +2,10 @@
 """Pixel check for test52DeckLogOutfitFillsButtonAndPersists.
 
 Counts lilac (#c9a2ff, the outfit accent) pixels in two bands of the 3 screenshots:
-  - action row band (hanger button): 0 before the tap, filled after the tap, and
-    still filled after relaunch.
+  - action row band (hanger button): 0 before the tap; still 0 right after the
+    tap, because the tap swipes the logged photo right and the deck shows the
+    next (unlogged) photo; filled after relaunch, when the deck reopens on the
+    logged photo.
   - top band (toast): lilac "Review now" text + border present right after the
     tap, absent before the tap and after relaunch.
 Seed photos are flat systemColors, none within tolerance of lilac.
@@ -45,8 +47,8 @@ def main():
     ok = True
     if r[0] >= MIN_ROW_PIXELS:
         print("FAIL: button already lilac before tap"); ok = False
-    if r[1] < MIN_ROW_PIXELS:
-        print("FAIL: button not lilac after tap"); ok = False
+    if r[1] >= MIN_ROW_PIXELS:
+        print("FAIL: button lilac after tap (deck did not swipe to the next photo)"); ok = False
     if r[2] < MIN_ROW_PIXELS:
         print("FAIL: button not lilac after relaunch (persistence)"); ok = False
     if t[0] >= MIN_TOAST_PIXELS:

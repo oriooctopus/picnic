@@ -430,6 +430,20 @@ final class PicnicSwipeCard: SwipeCard {
         onTranslationChange?(.zero)
     }
 
+    /// Last `keepNonce` the SwiftUI side asked us to honour (see `forceKeep`).
+    /// Seeded from the current nonce in makeUIView, so a freshly mounted card
+    /// (the next photo, after the advance) never re-fires the keep.
+    var lastKeepNonce = 0
+
+    /// Programmatic right swipe (the hanger button logs the photo, then keeps
+    /// it). Shuffle's public `swipe(direction:)` plays the same fly-off but
+    /// only reports to its internal delegate, never to the `didSwipe` hook
+    /// below, so `onKeep` has to be called here — same order as `didSwipe`.
+    func forceKeep() {
+        swipe(direction: .right)
+        onKeep?()
+    }
+
     override func didSwipe(_ recognizer: UIPanGestureRecognizer, with direction: SwipeDirection) {
         super.didSwipe(recognizer, with: direction)
         onTranslationChange?(.zero)

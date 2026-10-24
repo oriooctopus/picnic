@@ -60,6 +60,8 @@ struct DeckView: View {
     /// videos ahead): the flung card keeps its off-screen transform until told
     /// to come back, and would sit over the filmstrip swallowing taps.
     @State private var cardResetNonce = 0
+    /// Bumped by the hanger button to throw the current card right (keep).
+    @State private var cardKeepNonce = 0
     @State private var toastDismissTask: Task<Void, Never>?
 
     enum DeckToast: Equatable {
@@ -154,7 +156,8 @@ struct DeckView: View {
                         videoController: videoController,
                         onVideoRetry: { videoRetryNonce += 1 },
                         isRemote: viewModel.isRemote,
-                        resetNonce: cardResetNonce
+                        resetNonce: cardResetNonce,
+                        keepNonce: cardKeepNonce
                     )
                     .id(item.id)
                     // The photo itself is still assigned synchronously in
@@ -796,8 +799,9 @@ struct DeckView: View {
         .padding(.vertical, 16)
     }
 
-    /// One-tap "Log as outfit". Outline until the photo is logged, then lilac;
-    /// tapping a logged photo opens Review instead of re-importing. Photos only.
+    /// One-tap "Log as outfit": logs the photo, then swipes it right (keep).
+    /// The hanger is lilac on an already-logged photo (e.g. after undo), and
+    /// tapping that opens Review instead of re-importing. Photos only.
     private var outfitButton: some View {
         // Only reachable from localActionsRow, so the item is always local.
         let asset = viewModel.currentItem?.phAsset
@@ -811,6 +815,8 @@ struct DeckView: View {
             } else {
                 outfitLog.log(assetID: asset.localIdentifier, takenAt: asset.creationDate ?? Date())
                 showToast(.logged(assetID: asset.localIdentifier), seconds: 4)
+                // Logging an outfit implies keeping the photo: swipe it right.
+                cardKeepNonce += 1
             }
         } label: {
             Image(systemName: "hanger")
@@ -971,6 +977,7 @@ private struct DeckCard: View {
     /// Draws the remote-album accent frame on the card (RemoteDeckStyle).
     let isRemote: Bool
     var resetNonce = 0
+    var keepNonce = 0
 
     var body: some View {
         // Same order as the dimmed peek card below it (aspectRatio, THEN
@@ -1002,7 +1009,8 @@ private struct DeckCard: View {
             onDismiss: onDismiss,
             onTranslationChange: { dragState.translation = $0 },
             isRemote: isRemote,
-            resetNonce: resetNonce
+            resetNonce: resetNonce,
+            keepNonce: keepNonce
         )
         .aspectRatio(cardAspectRatio, contentMode: .fit)
         // 8pt, not 20pt: the reference app runs its card almost edge to edge
@@ -1046,9 +1054,14 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
     let onTranslationChange: (CGSize) -> Void
     let isRemote: Bool
     var resetNonce = 0
+    var keepNonce = 0
 
     func makeUIView(context: Context) -> PicnicSwipeCard {
-        PicnicSwipeCard()
+        let card = PicnicSwipeCard()
+        // Load-bearing: without this the next card mounts with 0 != keepNonce
+        // and updateUIView would swipe it away too.
+        card.lastKeepNonce = keepNonce
+        return card
     }
 
     func updateUIView(_ card: PicnicSwipeCard, context: Context) {
@@ -1067,6 +1080,12 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
         if card.lastResetNonce != resetNonce {
             card.lastResetNonce = resetNonce
             card.snapBackAfterUncommittedSwipe()
+        }
+        if card.lastKeepNonce != keepNonce {
+            card.lastKeepNonce = keepNonce
+            // Next turn: onKeep mutates the view model, which SwiftUI forbids
+            // from inside a view update.
+            DispatchQueue.main.async { card.forceKeep() }
         }
     }
 

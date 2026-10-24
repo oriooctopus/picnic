@@ -14,14 +14,16 @@ import AVFoundation
 struct VideoTrimBar: View {
     @ObservedObject var controller: VideoPlaybackController
     let onCancel: () -> Void
-    /// Returns true once the trim is saved; false keeps trim mode open
-    /// (failure, or the user declined iOS's "Allow Picnic to modify" prompt).
-    let onSave: (ClosedRange<Double>) async -> Bool
+    /// Fire-and-forget: the caller closes trim mode immediately and finishes
+    /// the save in the background (optimistic), so the user can swipe on
+    /// instead of waiting out an iCloud download + export. Failures surface
+    /// later as the caller's alert, not here.
+    let onSave: (ClosedRange<Double>) -> Void
 
     /// `initialWindow` reopens the bar on an already-saved range (remote
     /// trims, which persist server-side); nil starts at the whole clip.
     init(controller: VideoPlaybackController, initialWindow: ClosedRange<Double>? = nil,
-         onCancel: @escaping () -> Void, onSave: @escaping (ClosedRange<Double>) async -> Bool) {
+         onCancel: @escaping () -> Void, onSave: @escaping (ClosedRange<Double>) -> Void) {
         self.controller = controller
         self.onCancel = onCancel
         self.onSave = onSave
