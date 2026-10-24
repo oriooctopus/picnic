@@ -2900,6 +2900,9 @@ final class WalkthroughUITests: XCTestCase {
     /// edited version -- proven by re-opening trim mode afterwards and
     /// seeing the shorter clip length as the new "full" length.
     func test51DeckVideoTrimSavesShorterClip() throws {
+        // Holds the background save 6s so "the bar closed at once" can't be
+        // satisfied by a fast blocking save (the simulator's takes <1s).
+        relaunch(withExtraArguments: ["--slow-trim-save"])
         openMyLifeGrid()
         let marchMonth = app.descendants(matching: .any)["monthCard.2026-03"].firstMatch
         XCTAssertTrue(waitForElementByScrolling(marchMonth, initialTimeout: 30),
@@ -2955,7 +2958,7 @@ final class WalkthroughUITests: XCTestCase {
         // at once, BEFORE iOS's modify prompt is even answered. The old
         // blocking save kept the bar open on a spinner until the edit
         // committed, so this fails against it.
-        XCTAssertTrue(trimButton.waitForExistence(timeout: 3),
+        XCTAssertTrue(trimButton.waitForExistence(timeout: 2),
                       "Save must close the trim bar immediately, before the Photos edit commits")
         capture("51-video-trim-closed-optimistically")
 

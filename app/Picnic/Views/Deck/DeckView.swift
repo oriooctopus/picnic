@@ -697,6 +697,14 @@ struct DeckView: View {
             // Removed only after the reload below, so the scissors never
             // re-enable on the stale untrimmed player.
             defer { pendingTrimIDs.remove(id) }
+            #if DEBUG
+            // `--slow-trim-save` (test51): on the simulator the whole commit
+            // finishes in under a second, so without this a blocking save
+            // would pass the test's "closed immediately" check too.
+            if ProcessInfo.processInfo.arguments.contains("--slow-trim-save") {
+                try? await Task.sleep(for: .seconds(6))
+            }
+            #endif
             let saved = await commitTrim(asset: asset, window: window)
             isTrimming = false
             guard viewModel.currentItem?.id == id, !isTrimming else { return }
