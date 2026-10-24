@@ -37,7 +37,6 @@ struct VideoTrimBar: View {
     /// view appears.
     @State private var end: Double?
     @State private var frames: [CGImage] = []
-    @State private var isSaving = false
 
     private let stripHeight: CGFloat = 52
     private let handleWidth: CGFloat = 16
@@ -61,7 +60,6 @@ struct VideoTrimBar: View {
             HStack {
                 Button("Cancel", action: onCancel)
                     .foregroundStyle(.white)
-                    .disabled(isSaving)
                     .accessibilityIdentifier("trim.cancel")
 
                 Spacer()
@@ -73,21 +71,11 @@ struct VideoTrimBar: View {
 
                 Spacer()
 
-                if isSaving {
-                    ProgressView().tint(.white)
-                } else {
-                    Button("Save") {
-                        isSaving = true
-                        Task {
-                            let saved = await onSave(start...effectiveEnd)
-                            if !saved { isSaving = false }
-                        }
-                    }
+                Button("Save") { onSave(start...effectiveEnd) }
                     .fontWeight(.bold)
                     .foregroundStyle(isUntrimmed ? Self.accent.opacity(0.35) : Self.accent)
                     .disabled(isUntrimmed)
                     .accessibilityIdentifier("trim.save")
-                }
             }
             .font(.system(size: 17))
             .padding(.horizontal, 28)

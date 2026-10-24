@@ -53,6 +53,11 @@ struct DeckView: View {
     /// Only flips on enter/exit, so it's fine for this to rebuild the body.
     @State private var isTrimming = false
     @State private var trimError: String?
+    /// Local videos whose optimistic trim save is still running. Their
+    /// scissors stay disabled until it finishes: a second trim started on the
+    /// still-untrimmed player would pick a range on the OLD timeline and then
+    /// apply it to the freshly edited (shorter) asset.
+    @State private var pendingTrimIDs: Set<String> = []
     /// Transient note at the top of the deck: "Logged to Outfits | Review now",
     /// or the short failure note when Overland won't open.
     @State private var toast: DeckToast?
@@ -193,14 +198,14 @@ struct DeckView: View {
                 VideoTrimBar(
                     controller: videoController,
                     onCancel: { endTrimming() },
-                    onSave: { await saveTrim(asset: asset, window: $0) }
+                    onSave: { saveTrim(asset: asset, window: $0) }
                 )
             } else if let item = remoteTrimTarget, isTrimming {
                 VideoTrimBar(
                     controller: videoController,
                     initialWindow: viewModel.remoteTrim(for: item).map { $0.startSec...$0.endSec },
                     onCancel: { endTrimming() },
-                    onSave: { await saveRemoteTrim(item: item, window: $0) }
+                    onSave: { saveRemoteTrim(item: item, window: $0) }
                 )
             } else {
                 if let item = viewModel.currentItem, item.isVideo {
@@ -661,21 +666,59 @@ struct DeckView: View {
         isTrimming = false
     }
 
-    /// Remote Save: POST the range, then keep looping exactly that range.
-    /// The cached playback file is untouched (the cut happens at download).
-    private func saveRemoteTrim(item: DeckItem, window: ClosedRange<Double>) async -> Bool {
+    /// Remote Save, optimistic: close the bar and loop exactly the kept range
+    /// right away, POST in the background. The cached playback file is
+    /// untouched (the cut happens at download). On a server refusal the view
+    /// model rolls its override back and raises the alert; the preview drops
+    /// back to the saved range unless the user already moved on or reopened
+    /// the trim bar (whose own drag owns the loop window then).
+    private func saveRemoteTrim(item: DeckItem, window: ClosedRange<Double>) {
         let trim = RemoteTrim(startSec: window.lowerBound, endSec: window.upperBound)
-        guard await viewModel.saveRemoteTrim(trim, on: item) else { return false }
-        if viewModel.currentItem?.id == item.id { endTrimming() }
-        return true
+        videoController.setLoopWindow(window)
+        isTrimming = false
+        Task {
+            guard !(await viewModel.saveRemoteTrim(trim, on: item)) else { return }
+            if viewModel.currentItem?.id == item.id, !isTrimming { endTrimming() }
+        }
     }
 
-    /// Writes the trim to Photos, then reloads the shared player from the
-    /// edited asset so the card immediately plays the trimmed clip.
-    /// Returns false (keeping trim mode open) on failure or when the user
-    /// declines iOS's modify-permission prompt — that decline is a choice,
-    /// not an error, so it gets no alert.
-    private func saveTrim(asset: PHAsset, window: ClosedRange<Double>) async -> Bool {
+    /// Local Save, optimistic: close the bar and loop the kept range at once
+    /// so the user can swipe on, while the slow part (iCloud original
+    /// download, export, iOS's "Allow Picnic to modify" prompt, which still
+    /// pops up whenever the export finishes) runs in the background. When it
+    /// succeeds and the video is still on screen, the player reloads the
+    /// edited asset; on failure or a declined prompt the preview reverts to
+    /// the whole clip.
+    private func saveTrim(asset: PHAsset, window: ClosedRange<Double>) {
+        let id = asset.localIdentifier
+        videoController.setLoopWindow(window)
+        isTrimming = false
+        pendingTrimIDs.insert(id)
+        Task {
+            // Removed only after the reload below, so the scissors never
+            // re-enable on the stale untrimmed player.
+            defer { pendingTrimIDs.remove(id) }
+            let saved = await commitTrim(asset: asset, window: window)
+            guard viewModel.currentItem?.id == id, !isTrimming else { return }
+            guard saved else {
+                videoController.setLoopWindow(nil)
+                return
+            }
+            // requestPlayerItem resolves the asset's current version by
+            // identifier, so this returns the just-saved trimmed render
+            // (test51 checks the reloaded length).
+            if let item = await VideoLoader.playerItem(for: asset),
+               viewModel.currentItem?.id == id {
+                videoController.load(item: item)
+            }
+        }
+    }
+
+    /// Writes the trim to Photos and queues the Google Photos replacement.
+    /// False on failure (alerted via `trimError`) or when the user declines
+    /// iOS's modify-permission prompt — that decline is a choice, not an
+    /// error, so it gets no alert.
+    private func commitTrim(asset: PHAsset, window: ClosedRange<Double>) async -> Bool {
         let range = CMTimeRange(
             start: CMTime(seconds: window.lowerBound, preferredTimescale: 600),
             end: CMTime(seconds: window.upperBound, preferredTimescale: 600)
@@ -701,14 +744,6 @@ struct DeckView: View {
             appState.trimReplace.scheduleDrain()
         } catch {
             trimError = "Trimmed, but couldn't queue the Google Photos update: \(error.localizedDescription)"
-        }
-        isTrimming = false
-        // requestPlayerItem resolves the asset's current version by
-        // identifier, so this returns the just-saved trimmed render
-        // (test51 checks the reloaded length).
-        if let item = await VideoLoader.playerItem(for: asset),
-           viewModel.currentItem?.id == asset.localIdentifier {
-            videoController.load(item: item)
         }
         return true
     }
@@ -789,9 +824,11 @@ struct DeckView: View {
             }
             .accessibilityIdentifier("deck.share")
             if viewModel.currentItem?.phAsset?.mediaType == .video {
+                let trimPending = viewModel.currentItem.map { pendingTrimIDs.contains($0.id) } ?? false
                 Button { isTrimming = true } label: {
-                    Image(systemName: "scissors").foregroundStyle(.white)
+                    Image(systemName: "scissors").foregroundStyle(.white.opacity(trimPending ? 0.35 : 1))
                 }
+                .disabled(trimPending)
                 .accessibilityIdentifier("deck.trim")
             }
         }

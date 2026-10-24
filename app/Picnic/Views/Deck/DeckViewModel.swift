@@ -288,16 +288,22 @@ final class DeckViewModel: ObservableObject {
         remoteTrimOverrides[item.id] ?? item.remoteItem?.trim
     }
 
-    /// POSTs a remote video's kept range and remembers it. False (with the
-    /// error in `remoteError`) when the server refused, so the trim bar stays
-    /// open instead of pretending the trim was saved.
+    /// Optimistically remembers a remote video's kept range, then POSTs it.
+    /// The override is set BEFORE the await so reopening the trim bar while
+    /// the request is in flight already shows the new range. If the server
+    /// refuses, the override rolls back to what was saved before (not nil: an
+    /// earlier successful trim this session must survive a later failed one),
+    /// the error goes to `remoteError`, and false tells the deck to drop its
+    /// preview back to the saved range.
     func saveRemoteTrim(_ trim: RemoteTrim, on item: DeckItem) async -> Bool {
         guard let remote, let remoteItem = item.remoteItem else { return false }
+        let previous = remoteTrimOverrides[item.id]
+        remoteTrimOverrides[item.id] = trim
         do {
             try await remote.saveTrim(mediaKey: remoteItem.mediaKey, trim)
-            remoteTrimOverrides[item.id] = trim
             return true
         } catch {
+            remoteTrimOverrides[item.id] = previous
             remoteError = "Couldn't save trim: \(error)"
             return false
         }

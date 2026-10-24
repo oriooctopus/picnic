@@ -2951,6 +2951,14 @@ final class WalkthroughUITests: XCTestCase {
 
         app.buttons["trim.save"].tap()
 
+        // Optimistic save: the bar closes (action row with the scissors back)
+        // at once, BEFORE iOS's modify prompt is even answered. The old
+        // blocking save kept the bar open on a spinner until the edit
+        // committed, so this fails against it.
+        XCTAssertTrue(trimButton.waitForExistence(timeout: 3),
+                      "Save must close the trim bar immediately, before the Photos edit commits")
+        capture("51-video-trim-closed-optimistically")
+
         // iOS asks "Allow Picnic to modify this video?"
         if let alert = firstSystemAlert(timeout: 20) {
             let names = alert.buttons.allElementsBoundByIndex.map { $0.label }
@@ -2963,9 +2971,10 @@ final class WalkthroughUITests: XCTestCase {
             }
         }
 
-        // Trim bar closes once the save completes.
-        let reappeared = trimButton.waitForExistence(timeout: 60)
-        XCTAssertTrue(reappeared, "Trim bar should close after a successful save")
+        // The scissors stay disabled while the save runs in the background
+        // and re-enable once the edited asset is reloaded into the player.
+        expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: trimButton)
+        waitForExpectations(timeout: 60)
 
         trimButton.tap()
         XCTAssertTrue(lengthLabel.waitForExistence(timeout: 10))
