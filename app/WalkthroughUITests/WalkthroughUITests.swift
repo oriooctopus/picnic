@@ -2991,6 +2991,94 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(reopened, shortened, accuracy: 0.1,
                        "After saving, the edited (shorter) clip should be the new full length; got \(lengthLabel.label)")
     }
+    /// "600 × 800" → (600, 800).
+    private func cropSize(_ label: String) -> (w: Int, h: Int) {
+        let parts = label.components(separatedBy: " × ").compactMap { Int($0) }
+        return parts.count == 2 ? (parts[0], parts[1]) : (-1, -1)
+    }
+
+    /// Opens March's deck, jumps via the filmstrip to the first photo
+    /// (`video: false`, no scissors) or video (scissors shown) card, crops it
+    /// by dragging the bottom-right handle up-left, saves, accepts iOS's
+    /// modify prompt, then reopens the editor: its size readout comes from a
+    /// fresh PHAsset fetch, so it only shows the cropped size if the edit
+    /// really reached the Photos library (not merely the UI).
+    private func runDeckCrop(video: Bool, prefix: String) {
+        openMyLifeGrid()
+        let marchMonth = app.descendants(matching: .any)["monthCard.2026-03"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(marchMonth, initialTimeout: 30),
+                      "Seeded month 2026-03 (photo + two videos) should appear in the grid")
+        marchMonth.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["deck.card"].firstMatch.waitForExistence(timeout: 20))
+
+        let cropButton = app.buttons["deck.crop"]
+        let trimButton = app.buttons["deck.trim"]
+        var found = false
+        for index in 0..<4 {
+            let thumb = app.descendants(matching: .any)["filmstrip.thumb.\(index)"].firstMatch
+            guard thumb.waitForExistence(timeout: 10) else { continue }
+            thumb.tap()
+            guard cropButton.waitForExistence(timeout: 4) else { continue }
+            // The trim button only exists on video cards.
+            if trimButton.waitForExistence(timeout: 2) == video { found = true; break }
+        }
+        XCTAssertTrue(found, "March should have a \(video ? "video" : "photo") card with the crop button")
+        expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: cropButton)
+        waitForExpectations(timeout: 20)
+
+        cropButton.tap()
+        let sizeLabel = app.staticTexts["crop.size"]
+        XCTAssertTrue(sizeLabel.waitForExistence(timeout: 10), "Crop editor should open")
+        let full = cropSize(sizeLabel.label)
+        XCTAssertGreaterThan(full.w, 0, "Size readout should parse, got \(sizeLabel.label)")
+        XCTAssertFalse(app.buttons["crop.save"].isEnabled, "Save must be disabled before any crop")
+        capture("\(prefix)-crop-open")
+
+        let handle = app.descendants(matching: .any)["crop.handle.bottomRight"].firstMatch
+        XCTAssertTrue(handle.exists)
+        let center = handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        center.press(forDuration: 0.2, thenDragTo: center.withOffset(CGVector(dx: -100, dy: -120)),
+                     withVelocity: .slow, thenHoldForDuration: 0.3)
+        let cropped = cropSize(sizeLabel.label)
+        XCTAssertLessThan(cropped.w, full.w, "Dragging the corner left must narrow the crop, got \(sizeLabel.label)")
+        XCTAssertLessThan(cropped.h, full.h, "Dragging the corner up must shorten the crop, got \(sizeLabel.label)")
+        XCTAssertGreaterThan(cropped.w, full.w / 4)
+        capture("\(prefix)-crop-dragged")
+
+        app.buttons["crop.save"].tap()
+        // Optimistic: the editor closes before the Photos edit commits.
+        XCTAssertTrue(cropButton.waitForExistence(timeout: 3), "Save must close the crop editor immediately")
+
+        if let alert = firstSystemAlert(timeout: 30) {
+            let names = alert.buttons.allElementsBoundByIndex.map { $0.label }
+            let modify = alert.buttons["Modify"]
+            if modify.exists { modify.tap() } else { XCTFail("No Modify button in system alert; buttons: \(names)") }
+        }
+        // Re-enabled once the background save finished (a video re-encode can take a while).
+        expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: cropButton)
+        waitForExpectations(timeout: 90)
+        capture("\(prefix)-crop-saved", delay: 3)
+
+        cropButton.tap()
+        XCTAssertTrue(sizeLabel.waitForExistence(timeout: 10))
+        let reopened = cropSize(sizeLabel.label)
+        capture("\(prefix)-crop-reopened")
+        // ±2px: the readout rounds, the encoder floors (and evens, for video).
+        XCTAssertEqual(Double(reopened.w), Double(cropped.w), accuracy: 2,
+                       "After saving, the cropped size should be the asset's new full size; got \(sizeLabel.label), expected ~\(cropped)")
+        XCTAssertEqual(Double(reopened.h), Double(cropped.h), accuracy: 2,
+                       "After saving, the cropped size should be the asset's new full size; got \(sizeLabel.label), expected ~\(cropped)")
+        app.buttons["crop.cancel"].tap()
+    }
+
+    func test54DeckPhotoCropSavesCroppedImage() throws {
+        runDeckCrop(video: false, prefix: "54-photo")
+    }
+
+    func test55DeckVideoCropSavesCroppedVideo() throws {
+        runDeckCrop(video: true, prefix: "55-video")
+    }
+
     // MARK: - Remote album deck
 
     /// Drives the remote Google Photos deck against the DEBUG in-memory fixture

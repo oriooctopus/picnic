@@ -53,11 +53,13 @@ struct DeckView: View {
     /// Only flips on enter/exit, so it's fine for this to rebuild the body.
     @State private var isTrimming = false
     @State private var trimError: String?
-    /// Local videos whose optimistic trim save is still running. Their
-    /// scissors stay disabled until it finishes: a second trim started on the
-    /// still-untrimmed player would pick a range on the OLD timeline and then
-    /// apply it to the freshly edited (shorter) asset.
-    @State private var pendingTrimIDs: Set<String> = []
+    /// Local assets whose optimistic trim or crop save is still running.
+    /// Their scissors and crop buttons stay disabled until it finishes: a
+    /// second edit started on the still-unedited card would pick a range or
+    /// rect against the OLD version and then apply it to the freshly edited
+    /// asset (a trim timeline that got shorter, a frame that got smaller).
+    @State private var pendingEditIDs: Set<String> = []
+    @State private var cropError: String?
     /// Transient note at the top of the deck: "Logged to Outfits | Review now",
     /// or the short failure note when Overland won't open.
     @State private var toast: DeckToast?
@@ -94,11 +96,15 @@ struct DeckView: View {
         // second burst photo used to land on the first one.
         case compare(CompareGroup, startAssetID: String)
         case livePhoto(PHLivePhoto)
+        // The card's current image goes along as the crop canvas (a video's
+        // poster frame); the asset is what gets edited.
+        case crop(PHAsset, UIImage)
 
         var id: String {
             switch self {
             case .compare(let group, _): return "compare-\(group.id)"
             case .livePhoto: return "livePhoto"
+            case .crop(let asset, _): return "crop-\(asset.localIdentifier)"
             }
         }
     }
@@ -338,7 +344,22 @@ struct DeckView: View {
                 ))
             case .livePhoto(let livePhoto):
                 LivePhotoPlayerView(livePhoto: livePhoto) { presentation = nil }
+            case .crop(let asset, let image):
+                CropView(
+                    image: image,
+                    pixelSize: CGSize(width: asset.pixelWidth, height: asset.pixelHeight),
+                    onCancel: { presentation = nil },
+                    onSave: { saveCrop(asset: asset, rect: $0) }
+                )
             }
+        }
+        .alert("Couldn't crop", isPresented: Binding(
+            get: { cropError != nil },
+            set: { if !$0 { cropError = nil } }
+        )) {
+            Button("OK") { cropError = nil }
+        } message: {
+            Text(cropError ?? "")
         }
         .alert("Couldn't trim", isPresented: Binding(
             get: { trimError != nil },
@@ -693,11 +714,11 @@ struct DeckView: View {
         let id = asset.localIdentifier
         videoController.setLoopWindow(window)
         isTrimming = false
-        pendingTrimIDs.insert(id)
+        pendingEditIDs.insert(id)
         Task {
             // Removed only after the reload below, so the scissors never
             // re-enable on the stale untrimmed player.
-            defer { pendingTrimIDs.remove(id) }
+            defer { pendingEditIDs.remove(id) }
             #if DEBUG
             // `--slow-trim-save` (test51): on the simulator the whole commit
             // finishes in under a second, so without this a blocking save
@@ -754,6 +775,47 @@ struct DeckView: View {
             trimError = "Trimmed, but couldn't queue the Google Photos update: \(error.localizedDescription)"
         }
         return true
+    }
+
+    /// Opens CropView on the current card. The asset is re-fetched so the
+    /// size readout reflects any edit saved since the deck loaded it (a
+    /// PHAsset object's pixelWidth/Height are a snapshot). The canvas is the
+    /// image already on the card: aspect-correct and loaded, so the editor
+    /// opens instantly, and Save sends unit coordinates, so its resolution
+    /// doesn't limit the output.
+    private func openCrop() {
+        guard let stale = viewModel.currentItem?.phAsset, let image = currentImage,
+              let asset = PHAsset.fetchAssets(withLocalIdentifiers: [stale.localIdentifier], options: nil).firstObject
+        else { return }
+        presentation = .crop(asset, image)
+    }
+
+    /// Optimistic like saveTrim: close the editor at once and let the slow
+    /// part (iCloud original download, video re-encode, iOS's "Allow Picnic
+    /// to modify" prompt) run in the background. On success, if the card is
+    /// still on screen, re-run its load (videoRetryNonce is part of the load
+    /// task's id) so the cropped version replaces the old one; PhotoKit
+    /// resolves the asset's current version by identifier.
+    private func saveCrop(asset: PHAsset, rect: CGRect) {
+        let id = asset.localIdentifier
+        presentation = nil
+        pendingEditIDs.insert(id)
+        Task {
+            defer { pendingEditIDs.remove(id) }
+            do {
+                try await MediaCropper.crop(asset: asset, to: rect)
+            } catch let error as PHPhotosError where error.code == .userCancelled {
+                // Declining iOS's modify prompt is a choice, not an error.
+                return
+            } catch {
+                cropError = error.localizedDescription
+                return
+            }
+            // The warm-up cache would otherwise keep serving the uncropped
+            // placeholder for this photo until its 24h purge.
+            WarmThumbCache.purge(assetIDs: [id])
+            if viewModel.currentItem?.id == id { videoRetryNonce += 1 }
+        }
     }
 
     private func presentLivePhotoIfNeeded(_ item: DeckItem) {
@@ -832,13 +894,19 @@ struct DeckView: View {
             }
             .accessibilityIdentifier("deck.share")
             if viewModel.currentItem?.phAsset?.mediaType == .video {
-                let trimPending = viewModel.currentItem.map { pendingTrimIDs.contains($0.id) } ?? false
+                let trimPending = viewModel.currentItem.map { pendingEditIDs.contains($0.id) } ?? false
                 Button { isTrimming = true } label: {
                     Image(systemName: "scissors").foregroundStyle(.white.opacity(trimPending ? 0.35 : 1))
                 }
                 .disabled(trimPending)
                 .accessibilityIdentifier("deck.trim")
             }
+            let editPending = viewModel.currentItem.map { pendingEditIDs.contains($0.id) } ?? false
+            Button { openCrop() } label: {
+                Image(systemName: "crop").foregroundStyle(.white.opacity(editPending || currentImage == nil ? 0.35 : 1))
+            }
+            .disabled(editPending || currentImage == nil)
+            .accessibilityIdentifier("deck.crop")
         }
         .font(.system(size: 22))
         .padding(.vertical, 16)
