@@ -234,6 +234,14 @@ struct DeckView: View {
         // Always mounted (invisible) so a UI test can read the numbers without
         // needing the HUD itself shown.
         .overlay(alignment: .topLeading) { PerfStatsProbe() }
+        // Pixel size of the image the card holds, invisible, so test54/55 can
+        // check the card really switched to the cropped picture after a save.
+        .overlay(alignment: .topLeading) {
+            Text(currentImage.map { "\(Int($0.size.width * $0.scale))x\(Int($0.size.height * $0.scale))" } ?? "none")
+                .font(.system(size: 1))
+                .opacity(0.001)
+                .accessibilityIdentifier("deck.imageSize")
+        }
         .overlay(alignment: .top) { toastView }
         // Warm the whole month's thumbnails in the background, starting at
         // the card the user is on and wrapping around, once per deck open.
@@ -814,6 +822,9 @@ struct DeckView: View {
             // The warm-up cache would otherwise keep serving the uncropped
             // placeholder for this photo until its 24h purge.
             WarmThumbCache.purge(assetIDs: [id])
+            if let edited = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject {
+                viewModel.replaceAsset(edited)
+            }
             if viewModel.currentItem?.id == id { videoRetryNonce += 1 }
         }
     }

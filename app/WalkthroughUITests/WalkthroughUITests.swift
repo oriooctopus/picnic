@@ -3057,7 +3057,24 @@ final class WalkthroughUITests: XCTestCase {
         // Re-enabled once the background save finished (a video re-encode can take a while).
         expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: cropButton)
         waitForExpectations(timeout: 90)
-        capture("\(prefix)-crop-saved", delay: 3)
+
+        // The card itself must switch to the cropped picture (the asset
+        // size check below alone passed while the card kept showing the
+        // uncropped photo). Compared by aspect ratio: the card image is a
+        // screen-size rendition, not the full-size pixels.
+        let imageSize = app.staticTexts["deck.imageSize"]
+        let wantAspect = Double(cropped.w) / Double(cropped.h)
+        func cardAspect() -> Double {
+            let parts = imageSize.label.split(separator: "x").compactMap { Double($0) }
+            return parts.count == 2 && parts[1] > 0 ? parts[0] / parts[1] : -1
+        }
+        let cardDeadline = Date().addingTimeInterval(15)
+        while Date() < cardDeadline && abs(cardAspect() - wantAspect) > wantAspect * 0.03 {
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        capture("\(prefix)-crop-saved")
+        XCTAssertEqual(cardAspect(), wantAspect, accuracy: wantAspect * 0.03,
+                       "The deck card should show the cropped image; card image is \(imageSize.label), crop was \(cropped)")
 
         cropButton.tap()
         XCTAssertTrue(sizeLabel.waitForExistence(timeout: 10))

@@ -404,6 +404,16 @@ final class DeckViewModel: ObservableObject {
         if let current = currentItem { lastAnchorID = current.id }
     }
 
+    /// Swaps in a freshly fetched PHAsset after an edit saved from the deck
+    /// (crop). A PHAsset object is a snapshot: image requests made with the
+    /// pre-edit object kept returning the pre-edit picture (test54 caught the
+    /// card still showing the uncropped photo). Same position, same id, so
+    /// currentIndex and every SortStore mark are untouched.
+    func replaceAsset(_ asset: PHAsset) {
+        guard let index = orderedItems.firstIndex(where: { $0.id == asset.localIdentifier }) else { return }
+        orderedItems[index] = .local(asset)
+    }
+
     var currentItem: DeckItem? {
         guard visibleItems.indices.contains(currentIndex) else { return nil }
         return visibleItems[currentIndex]
