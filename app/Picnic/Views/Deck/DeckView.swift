@@ -825,7 +825,7 @@ struct DeckView: View {
             // placeholder for this photo until its 24h purge.
             WarmThumbCache.purge(assetIDs: [id])
             if let edited = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject {
-                viewModel.replaceAsset(edited)
+                // MUTATION: viewModel.replaceAsset(edited)
             }
             if viewModel.currentItem?.id == id { videoRetryNonce += 1 }
         }
