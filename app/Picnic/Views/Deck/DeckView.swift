@@ -237,7 +237,9 @@ struct DeckView: View {
         // Pixel size of the image the card holds, invisible, so test54/55 can
         // check the card really switched to the cropped picture after a save.
         .overlay(alignment: .topLeading) {
-            Text(currentImage.map { "\(Int($0.size.width * $0.scale))x\(Int($0.size.height * $0.scale))" } ?? "none")
+            // String(Int) not "\(Int)" interpolation: Text interpolation applies
+            // locale grouping ("1,170x660"), which broke the test's parser.
+            Text(currentImage.map { String(Int($0.size.width * $0.scale)) + "x" + String(Int($0.size.height * $0.scale)) } ?? "none")
                 .font(.system(size: 1))
                 .opacity(0.001)
                 .accessibilityIdentifier("deck.imageSize")
