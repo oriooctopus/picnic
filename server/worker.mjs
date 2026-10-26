@@ -2017,7 +2017,76 @@ async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun, 
 }
 
 
-export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun, walk = 'direct', visitedPhotoIds = new Set() }) {
+/**
+ * Thrown when a date search came back empty AND a query that must have
+ * results (the canary) came back empty too: Google Photos search is down, so
+ * the empty day says nothing about the photo. Live 2026-10-25: after one good
+ * search every later query answered "No results" while plain /photo/<id> URLs
+ * still opened, and each job was written off as needs_review. This error ends
+ * the run WITHOUT marking any job (they stay 'queued', autoDrainRetried
+ * untouched) so a later run tries again.
+ */
+export class SearchOutageError extends Error {}
+
+/** How many consecutive empty days one healthy canary check vouches for. */
+export const CANARY_RECHECK_EVERY = 3;
+const CANARY_MAX_CANDIDATES = 3;
+
+/**
+ * Per-run search-health state. The canary is a month-wide query ("September
+ * 2026") for the months of the most recent TRASHED jobs: those photos were
+ * matched in Google Photos by an earlier run, so their month had photos then
+ * (several candidate months, because one photo alone being trashed could
+ * empty a sparse month; any one non-empty result proves search works). The
+ * check is cached across consecutive empty days (one healthy check covers
+ * the next CANARY_RECHECK_EVERY - 1 of them; a search outage can start
+ * mid-run, which is exactly the live case, so the cache is not kept
+ * forever) and dropped as soon as a date returns tiles.
+ */
+export function createSearchHealth(queue) {
+  return { queue, healthy: false, emptiesSinceCheck: 0 };
+}
+
+async function assertSearchWorks(page, health, dateStr) {
+  if (health.healthy && health.emptiesSinceCheck < CANARY_RECHECK_EVERY - 1) {
+    health.emptiesSinceCheck += 1;
+    return;
+  }
+  const months = [];
+  const trashed = health.queue
+    .loadAll()
+    .filter((j) => j.status === 'trashed')
+    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  for (const j of trashed) {
+    const m = utcDateOf(j.creationDate).slice(0, 7);
+    if (!months.includes(m)) months.push(m);
+    if (months.length >= CANARY_MAX_CANDIDATES) break;
+  }
+  if (months.length === 0) {
+    // Nothing known to have results (fresh queue): cannot tell outage from an
+    // empty day, so the day is judged as before.
+    console.log(`[canary] no trashed job to derive a canary query from — judging ${dateStr} as an empty day`);
+    return;
+  }
+  for (const m of months) {
+    const q = monthSearchQuery(m);
+    await searchByQuery(page, q);
+    if ((await collectResultTiles(page)).length > 0) {
+      console.log(`[canary] "${q}" has results — ${dateStr} is a genuinely empty day`);
+      health.healthy = true;
+      health.emptiesSinceCheck = 0;
+      return;
+    }
+    console.log(`[canary] "${q}" returned no results`);
+  }
+  health.healthy = false;
+  throw new SearchOutageError(
+    `Google Photos search returned nothing for ${dateStr} and for known-good canary queries ` +
+      `(${months.map(monthSearchQuery).join(', ')}) — search is down, not an empty day; run aborted, jobs left queued`
+  );
+}
+
+export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun, walk = 'direct', visitedPhotoIds = new Set(), searchHealth = createSearchHealth(queue) }) {
   let remaining = [...unmatchedJobs];
   if (remaining.length === 0) return { stillUnmatched: remaining };
 
@@ -2035,9 +2104,11 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
   }
   if (VERBOSE) console.log(`[search ${query}] ${tiles.length} visible photo tile(s), exhaustive-fallback strategy: ${walk}`);
   if (tiles.length === 0) {
+    await assertSearchWorks(page, searchHealth, dateStr);
     console.log(`[search ${query}] no results after ${EMPTY_SEARCH_RETRIES + 1} attempt(s)`);
     return { stillUnmatched: remaining };
   }
+  searchHealth.healthy = false; // search answered this time, but may fail on the next day: re-prove before trusting a later empty day
 
   // Captured BEFORE the aria pre-scroll below runs, so the exhaustive
   // fallback always has a genuine "date's first tile" to start from even if
@@ -2217,6 +2288,7 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
  * unmatched after all three attempts becomes needs_review.
  */
 export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = 'direct' }) {
+  const searchHealth = createSearchHealth(queue);
   for (const [dateStr, jobs] of groupedJobs) {
     let unmatched = [...jobs];
     const visitedPhotoIds = new Set(); // direct walk: one photo is visited once across this group's +/-1 day searches
@@ -2225,11 +2297,12 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = '
     try {
       for (const attemptDate of attemptDates) {
         if (unmatched.length === 0) break;
-        const { stillUnmatched } = await processDateGroup(page, attemptDate, unmatched, queue, { dryRun, walk, visitedPhotoIds });
+        const { stillUnmatched } = await processDateGroup(page, attemptDate, unmatched, queue, { dryRun, walk, visitedPhotoIds, searchHealth });
         unmatched = stillUnmatched;
         if (unmatched.length > 0) await stealthDelay(PACE_MS_MIN, PACE_MS_MAX); // pure mimicry, off unless --slow
       }
     } catch (err) {
+      if (err instanceof SearchOutageError) throw err; // marks nothing: every unresolved job stays 'queued'
       if (isPageClosedError(page, err)) {
         // The tab this worker was driving is gone -- nothing was learned
         // about any in-flight job, so nothing gets marked failed/needs_review;
@@ -4190,7 +4263,7 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'dir
       await runDateGroups(page, groups, queue, { dryRun, walk });
     }
   } catch (err) {
-    loud(`BLOCKER: worker error: ${err.stack || err}`);
+    loud(err instanceof SearchOutageError ? `BLOCKER: ${err.message}` : `BLOCKER: worker error: ${err.stack || err}`);
     process.exitCode = 1;
   } finally {
     // IMPORTANT: only close the page/tab this worker opened, never the

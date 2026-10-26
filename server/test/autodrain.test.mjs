@@ -330,6 +330,33 @@ test('strategy retry: needs_review jobs from the primary (direct) run get exactl
   });
 });
 
+// Search outage (worker.mjs SearchOutageError): the worker exits 1 leaving every
+// job 'queued'. That must not look like needs_review (no timeline retry), must
+// not burn the one retry marker, and must be tried again after the backoff.
+test('worker aborted by a search outage: no timeline retry, no retry marker, run is re-attempted after the backoff', async () => {
+  await withTempQueue(async (queue) => {
+    const a = addQueuedJob(queue, 'A.HEIC');
+    const clock = createFakeClock();
+    const calls = [];
+    const spawnWorker = async ({ walk }) => {
+      calls.push(walk);
+      return { code: 1 }; // jobs untouched: still 'queued'
+    };
+    const drain = createAutoDrain(baseDeps(queue, clock, { spawnWorker }));
+
+    drain.notifyEnqueued();
+    clock.advance(DEBOUNCE_MS);
+    await tick();
+    assert.deepEqual(calls, ['direct'], 'no timeline retry for an aborted run');
+    assert.equal(queue.getById(a.id).status, 'queued');
+    assert.equal(queue.getById(a.id).autoDrainRetried, undefined);
+
+    clock.advance(CDP_BACKOFF_MS + DEBOUNCE_MS);
+    await tick();
+    assert.deepEqual(calls, ['direct', 'direct'], 'next cycle tries the same job again');
+  });
+});
+
 test('a job re-queued while already carrying the retry marker is not retried a second time (marker filter, not status filter)', async () => {
   await withTempQueue(async (queue) => {
     // This must be genuinely distinguishing: a job that is simply not

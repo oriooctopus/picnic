@@ -20,6 +20,8 @@ const WORKER_MJS_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'wor
 process.env.PICNIC_WORKER_FAST_DELAYS = '1';
 const {
   processDateGroup,
+  SearchOutageError,
+  CANARY_RECHECK_EVERY,
   searchKeyOf,
   runDateGroups,
   assertNoFriction,
@@ -2189,6 +2191,65 @@ test('direct walk: a photo seen under adjacent dates\' search tokens is visited 
 
     assert.deepEqual(page.searchLog, ['August 5, 2026', 'August 4, 2026', 'August 6, 2026'], 'all three attempt dates were searched');
     assert.equal(scopedGotos(page).filter((l) => l.includes('/photo/SHARED')).length, 1, 'the shared photo id is visited once, not once per adjacent date');
+  });
+});
+
+// 2026-10-25 LIVE EVIDENCE: after one good search, every later Google Photos
+// date search answered "No results" (plain /photo/<id> URLs still opened) and
+// each job was written off as needs_review. An empty day is only believable
+// when a query that MUST have results (the canary: the month of a trashed job)
+// still has them.
+const CANARY_Q = 'September 2026';
+function seedTrashedSeptemberJob(queue) {
+  const { job } = queue.enqueue({ filename: 'IMG_0001.HEIC', creationDate: '2026-09-02T20:00:00.000Z', pixelWidth: 1, pixelHeight: 1 });
+  queue.update(job.id, { status: 'trashed' });
+}
+const emptyDays = (dates) => Object.fromEntries(dates.map((d) => [d, []]));
+
+test('search outage: empty date AND empty canary aborts the run, jobs stay queued and unretried', async () => {
+  await withTempQueue(async (queue) => {
+    seedTrashedSeptemberJob(queue);
+    const { job } = queue.enqueue(jobFor(1));
+    const page = createFakePage({ searchResults: { ...emptyDays(['August 5, 2026', 'August 4, 2026', 'August 6, 2026']), [CANARY_Q]: [] } });
+
+    await assert.rejects(runDateGroups(page, groupJobsByDate([job]), queue, { dryRun: false }), SearchOutageError);
+
+    const after = queue.getById(job.id);
+    assert.equal(after.status, 'queued');
+    assert.equal(after.attempts, 0);
+    assert.equal(after.autoDrainRetried, undefined, 'an abort never consumes the autodrain retry');
+    assert.ok(page.searchLog.includes(CANARY_Q), 'the canary was searched');
+  });
+});
+
+test('search outage: canary has results, so the empty date is a genuine empty day -> needs_review as before', async () => {
+  await withTempQueue(async (queue) => {
+    seedTrashedSeptemberJob(queue);
+    const { job } = queue.enqueue(jobFor(1));
+    const page = createFakePage({ searchResults: { ...emptyDays(['August 5, 2026', 'August 4, 2026', 'August 6, 2026']), [CANARY_Q]: [directTile(0)] } });
+
+    await runDateGroups(page, groupJobsByDate([job]), queue, { dryRun: false });
+
+    assert.equal(queue.getById(job.id).status, 'needs_review');
+  });
+});
+
+test('search outage: one healthy canary covers the next empty days, and is re-checked after CANARY_RECHECK_EVERY', async () => {
+  await withTempQueue(async (queue) => {
+    seedTrashedSeptemberJob(queue);
+    const a = queue.enqueue(jobFor(1)).job;
+    const b = queue.enqueue({ ...jobFor(2), creationDate: '2026-08-20T20:00:00.000Z' }).job;
+    const dates = ['August 5, 2026', 'August 4, 2026', 'August 6, 2026', 'August 20, 2026', 'August 19, 2026', 'August 21, 2026'];
+    const page = createFakePage({ searchResults: { ...emptyDays(dates), [CANARY_Q]: [directTile(0)] } });
+
+    await runDateGroups(page, groupJobsByDate([a]), queue, { dryRun: false });
+    assert.equal(page.searchLog.filter((q) => q === CANARY_Q).length, 1, 'three empty days, one canary search');
+
+    page.searchLog.length = 0;
+    await runDateGroups(page, groupJobsByDate([a, b]), queue, { dryRun: false });
+    // group 1 (3 empty days) + group 2's first day = CANARY_RECHECK_EVERY + 1 empty days -> exactly one re-check
+    assert.equal(CANARY_RECHECK_EVERY, 3);
+    assert.equal(page.searchLog.filter((q) => q === CANARY_Q).length, 2, 'fresh run: check, then re-check on the 4th empty day');
   });
 });
 
