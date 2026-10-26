@@ -49,12 +49,12 @@
  *      not, no spawn happens; a backoff timer re-attempts in `backoffMs`.
  *      Queued jobs are untouched — they get picked up whenever a run
  *      actually happens.
- *   5. Strategy retry: after the PRIMARY run (2026-09-22: `--walk=timeline`
- *      -- date search was measured live to be badly incomplete, see
- *      worker.mjs's walkTimeline header; was `--walk=photo` before this),
+ *   5. Strategy retry: after the PRIMARY run (2026-10-25: `--walk=direct`,
+ *      date search visiting each result tile by direct URL; was
+ *      `--walk=timeline` 2026-09-22..2026-10-25 and `--walk=photo` before),
  *      any job that was `queued` at the run's start (and hasn't already used
  *      its retry — see [amend] 5b) and is now `needs_review` gets re-queued
- *      and the worker runs exactly once more with `--walk=grid`, covering
+ *      and the worker runs exactly once more with `--walk=timeline`, covering
  *      every such job in ONE follow-up spawn, not one per job. One retry
  *      only.
  *   [amend] 5b. The retry marker (`autoDrainRetried: true`) is written onto
@@ -286,16 +286,16 @@ export function createAutoDrain({
       const queuedAtStart = queue.loadAll().filter((j) => j.status === 'queued');
       const retryEligible = new Set(queuedAtStart.filter((j) => !j.autoDrainRetried).map((j) => j.id));
 
-      // 2026-09-22: TIMELINE is now the primary walk, not the photo
-      // (date-search) walk -- date search was measured live to be badly
-      // incomplete (a day with several real photos returning 1 tile, or
-      // 0), while the timeline scroll (worker.mjs's walkTimeline) actually
-      // shows everything. The grid retry below is UNCHANGED: it's a
-      // different traversal strategy over the SAME date-search results
-      // page, which is still a reasonable second attempt for whatever the
-      // timeline walk didn't confirm (e.g. a candidate tile it never
-      // opened because the calibrated offset hadn't converged yet).
-      const primaryResult = await runOnce('timeline');
+      // 2026-10-25: DIRECT date search is the primary walk (worker.mjs's
+      // processDateGroup `direct`: search the date, then page.goto() each
+      // result tile's own URL). Live measurement on 30 stuck jobs: all 22
+      // really in Google Photos were in their date's grid, but the click and
+      // ArrowRight walks lost 8 of them; direct navigation does not. The
+      // timeline walk (walkTimeline, primary 2026-09-22 .. 2026-10-25) is now
+      // the RETRY below: a different strategy that needs no search at all,
+      // for whatever the date search did not find (a photo whose capture
+      // date is off by more than the +/-1 day searched).
+      const primaryResult = await runOnce('direct');
       let gridResult = null;
       let retried = false;
 
@@ -309,7 +309,7 @@ export function createAutoDrain({
             // the grid run finishing (module header 5b).
             queue.update(job.id, { status: 'queued', error: null, autoDrainRetried: true });
           }
-          gridResult = await runOnce('grid');
+          gridResult = await runOnce('timeline'); // `gridResult`/`gridExitCode` keep their names for API stability -- this is the timeline RETRY run now
           retried = true;
         }
       }
@@ -331,7 +331,7 @@ export function createAutoDrain({
         startedAt,
         finishedAt: now(),
         outcome: 'completed',
-        photoExitCode: primaryResult && primaryResult.code, // field name kept for API stability -- now the PRIMARY (timeline) walk's exit code, not necessarily a photo-strategy run
+        photoExitCode: primaryResult && primaryResult.code, // field name kept for API stability -- now the PRIMARY (direct) walk's exit code
         gridExitCode: gridResult && gridResult.code,
         retried,
       };

@@ -132,7 +132,7 @@ test('N jobs on the same date produce exactly ONE search, not N', async () => {
       },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0, 'both jobs should be matched');
     assert.equal(page.searchLog.length, 1, 'exactly one search must be submitted for N jobs on one date');
@@ -173,7 +173,7 @@ test('every visible tile is walked: a job whose photo is at the LAST tile is sti
       panelTextByLabel,
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0, 'job at the last tile must still be matched');
     assert.equal(queue.getById(job.id).status, 'trashed');
@@ -221,7 +221,7 @@ test('once matched, the walk keeps going to the end of the day looking for dupli
       },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0);
     const tileClicks = page.log.filter((l) => l.startsWith('tile-click:'));
@@ -271,7 +271,7 @@ test('two copies of the same job on one date (identical filename+dims, different
       },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0, 'the job is done once every copy on the date is accounted for');
     const record = queue.getById(job.id);
@@ -307,7 +307,7 @@ test('same filename, different dimensions on the same date: now trashed as a dup
       },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0);
     const record = queue.getById(job.id);
@@ -346,7 +346,7 @@ test('duplicate via the aria pre-match path: an identical-second collision defer
       },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job, calibrationJob], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job, calibrationJob], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0);
     assert.equal(queue.getById(calibrationJob.id).status, 'trashed', 'the unambiguous calibration job resolves via the aria fast path');
@@ -401,7 +401,7 @@ test('duplicate via the aria pre-match path: two tiles with an IDENTICAL aria-la
       },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job, calibrationJob], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job, calibrationJob], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0);
     assert.equal(queue.getById(calibrationJob.id).status, 'trashed', 'the unambiguous calibration job still resolves via the aria fast path');
@@ -438,7 +438,7 @@ test('tiles are not re-visited when the grid re-renders and returns them in a di
       reorderOnRecollect: { 'August 5, 2026': true },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0, 'both jobs matched despite the grid reordering between visits');
     assert.equal(queue.getById(job1.id).status, 'trashed');
@@ -459,7 +459,7 @@ test('runDateGroups: the +/-1 day fallback does NOT fire when the first date mat
       panelTextByLabel: { 'August 5, 2026': { [label]: IMG_1433_BLOCK } },
     });
 
-    await runDateGroups(page, groups, queue, { dryRun: false });
+    await runDateGroups(page, groups, queue, { dryRun: false, walk: 'photo' });
 
     assert.deepEqual(page.searchLog, ['August 5, 2026'], 'must not search Aug 4 or Aug 6 once Aug 5 resolved everything');
     assert.equal(queue.getById(job.id).status, 'trashed');
@@ -493,7 +493,7 @@ test('runDateGroups: the +/-1 day fallback fires only for jobs still unmatched, 
       },
     });
 
-    await runDateGroups(page, groups, queue, { dryRun: false });
+    await runDateGroups(page, groups, queue, { dryRun: false, walk: 'photo' });
 
     assert.deepEqual(page.searchLog, ['August 5, 2026', 'August 4, 2026']);
     assert.equal(queue.getById(job.id).status, 'trashed');
@@ -513,7 +513,7 @@ test('runDateGroups: unmatched after all three date attempts -> needs_review, ne
       },
     });
 
-    await runDateGroups(page, groups, queue, { dryRun: false });
+    await runDateGroups(page, groups, queue, { dryRun: false, walk: 'photo' });
 
     // Each empty date is re-searched before being believed (a live run got 0
     // tiles for a date a probe had just returned 5 for), so every attempted
@@ -545,7 +545,7 @@ test('filename mismatch never reaches the trash path, even with matching dimensi
       },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 1, 'filename mismatch must never match');
     assert.ok(!page.log.some((l) => l.includes('Move to trash')));
@@ -562,7 +562,7 @@ test('--dry-run: on a match, logs the verdict but never trashes and never mutate
       panelTextByLabel: { 'August 5, 2026': { [label]: IMG_1433_BLOCK } },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: true });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: true, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0, 'dry-run still determines a match');
     assert.ok(!page.log.some((l) => l.includes('Move to trash')), 'dry-run must never click trash');
@@ -577,7 +577,7 @@ test('--dry-run through runDateGroups: needs_review path also never mutates the 
     const groups = groupJobsByDate([job]);
     const page = createFakePage({ searchResults: { 'August 5, 2026': [], 'August 4, 2026': [], 'August 6, 2026': [] } });
 
-    await runDateGroups(page, groups, queue, { dryRun: true });
+    await runDateGroups(page, groups, queue, { dryRun: true, walk: 'photo' });
 
     assert.equal(queue.getById(job.id).status, 'queued');
     assert.equal(queue.loadAll().length, 1);
@@ -596,7 +596,7 @@ test('a trash action that does not take is recorded as needs_review, never trash
       swallowTrashShortcut: true,
     });
 
-    await processDateGroup(page, '2026-08-05', [queue.getById(job.id)], queue, { dryRun: false });
+    await processDateGroup(page, '2026-08-05', [queue.getById(job.id)], queue, { dryRun: false, walk: 'photo' });
 
     const after = queue.getById(job.id);
     assert.equal(after.status, 'needs_review', 'unconfirmed trash must not be recorded as trashed');
@@ -824,7 +824,7 @@ test('hitting MAX_STEPS_PER_DATE is logged as ABANDONED, distinct from a genuine
       panelTextByLabel: { 'August 5, 2026': bigPanels },
     });
 
-    const boundLogs = await captureLogs(() => processDateGroup(bigPage, '2026-08-05', [bigJob], queue, { dryRun: true }));
+    const boundLogs = await captureLogs(() => processDateGroup(bigPage, '2026-08-05', [bigJob], queue, { dryRun: true, walk: 'photo' }));
     const boundClicks = bigPage.log.filter((l) => l.startsWith('tile-click:'));
     assert.equal(boundClicks.length, 1, 'only the first tile is ever grid-clicked, even on a huge day');
     const arrowPresses = bigPage.log.filter((l) => l === 'key:ArrowRight').length;
@@ -852,7 +852,7 @@ test('hitting MAX_STEPS_PER_DATE is logged as ABANDONED, distinct from a genuine
     });
 
     const exhaustedLogs = await captureLogs(() =>
-      processDateGroup(smallPage, '2026-08-06', [smallJob], queue, { dryRun: true })
+      processDateGroup(smallPage, '2026-08-06', [smallJob], queue, { dryRun: true, walk: 'photo' })
     );
     const exhaustedClicks = smallPage.log.filter((l) => l.startsWith('tile-click:'));
     assert.equal(exhaustedClicks.length, 1, 'only the first tile is ever grid-clicked');
@@ -893,7 +893,7 @@ test('a page that reports closed mid-walk ends the run cleanly and leaves untouc
       closeAfterTiles: 2,
     });
 
-    const logs = await captureLogs(() => runDateGroups(page, groups, queue, { dryRun: false }));
+    const logs = await captureLogs(() => runDateGroups(page, groups, queue, { dryRun: false, walk: 'photo' }));
 
     assert.equal(queue.getById(job1.id).status, 'trashed', 'job1 was fully processed before the tab closed');
     assert.equal(queue.getById(job2.id).status, 'queued', 'job2 must be left untouched, not error/needs_review');
@@ -1011,7 +1011,7 @@ test('aria fast path: with many tiles on the date but few jobs, only the matched
       },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [jobPhoto, jobVideo], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [jobPhoto, jobVideo], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0);
     assert.equal(queue.getById(jobPhoto.id).status, 'trashed');
@@ -1058,7 +1058,7 @@ test('aria fast path: two tiles sharing the same predicted second fall back to t
       },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0, 'the exhaustive walk must still resolve both jobs by filename');
     assert.equal(queue.getById(job1.id).status, 'trashed');
@@ -1097,7 +1097,7 @@ test('aria fast path: a predicted tile that does not confirm by filename is neve
       },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(queue.getById(job1.id).status, 'trashed', 'job1 confirmed normally via the aria match');
     assert.equal(stillUnmatched.length, 1, 'job2 must remain unresolved, not silently dropped or trashed');
@@ -1144,7 +1144,7 @@ test('positional-drift regression: a tile addressed by grid position can land on
       staleTileClickTargets: { [label]: 'Back to search' },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0, 'the intended tile must still be opened and matched despite the positional-drift fixture');
     assert.equal(queue.getById(job.id).status, 'trashed');
@@ -1167,7 +1167,7 @@ test('lost-keystroke regression: the info panel opens even when the first "i" pr
       swallowInfoPressesCount: 1,
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0, 'must still match once the re-press opens the panel');
     assert.equal(queue.getById(job.id).status, 'trashed');
@@ -1185,7 +1185,7 @@ test('lost-keystroke regression: the info panel opens even when the first "i" pr
     });
 
     await assert.rejects(
-      () => processDateGroup(neverPage, '2026-08-05', [neverJob], queue, { dryRun: false }),
+      () => processDateGroup(neverPage, '2026-08-05', [neverJob], queue, { dryRun: false, walk: 'photo' }),
       /info panel never produced filename text/,
       'must throw rather than hang when the panel genuinely never opens'
     );
@@ -1255,7 +1255,7 @@ test('pre-scroll accumulates across windows, so planAriaMatches sees the full cu
       windowSize: 2, // by the time all 4 reveals have loaded, only the last 2 (decoyC, label2) are mounted -- label1 fell out 2 scrolls ago
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0, 'both jobs must still resolve');
     assert.equal(queue.getById(job1.id).status, 'trashed');
@@ -1326,7 +1326,7 @@ test('ambiguity safety: a duplicate tile visible only in an early window still m
       windowSize: 3, // dupLabel has fallen out of the mounted window by the time all 3 reveals have loaded
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job1, job2], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0, 'the exhaustive walk must still resolve both jobs by filename');
     assert.equal(queue.getById(job1.id).status, 'trashed');
@@ -1379,7 +1379,7 @@ test('after a successful trash, traversal does not skip the following photo (the
       },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [jobA, jobB], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [jobA, jobB], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0, 'job B must not be skipped by a blind ArrowRight after job A auto-advances onto it');
     assert.equal(queue.getById(jobA.id).status, 'trashed');
@@ -1417,7 +1417,7 @@ test('the info panel is opened ONCE per date, not once per photo', async () => {
       panelTextByLabel,
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0);
     const iPresses = page.log.filter((l) => l === 'key:i').length;
@@ -1435,7 +1435,7 @@ test('the info panel is opened ONCE per date, not once per photo', async () => {
 // gets opened and read. These tests prove that sameness holds, and that the
 // `walk` option genuinely selects between the two rather than being ignored.
 
-test('both --walk strategies reach a job whose photo is LAST on the date; the default (no walk option) behaves as --walk=photo', async () => {
+test('both --walk strategies reach a job whose photo is LAST on the date', async () => {
   const TILE_COUNT = 12;
   const buildFixture = () => {
     const labels = Array.from({ length: TILE_COUNT }, (_, i) => `Photo - Portrait - tile-${i}`);
@@ -1474,22 +1474,9 @@ test('both --walk strategies reach a job whose photo is LAST on the date; the de
     assert.equal(page.log.filter((l) => l === 'key:ArrowRight').length, 0, '--walk=grid never presses ArrowRight');
   });
 
-  // No `walk` option at all: must behave exactly like --walk=photo (the
-  // documented default), never like --walk=grid.
-  await withTempQueue(async (queue) => {
-    const { job } = queue.enqueue(IMG_1433_JOB);
-    const { labels, panelTextByLabel } = buildFixture();
-    const page = createFakePage({ searchResults: { 'August 5, 2026': labels.map((ariaLabel) => ({ ariaLabel })) }, panelTextByLabel });
-
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
-
-    assert.equal(stillUnmatched.length, 0, 'default (no walk option) must still reach the last tile');
-    assert.equal(queue.getById(job.id).status, 'trashed');
-    assert.equal(page.log.filter((l) => l.startsWith('tile-click:')).length, 1, 'default must grid-click only the first tile, i.e. behave as --walk=photo');
-  });
-
-  // parseArgs itself: no --walk flag defaults to 'photo'.
-  assert.equal(parseArgs([]).walk, 'photo', 'parseArgs must default walk to "photo" when --walk is omitted');
+  // parseArgs itself: no --walk flag defaults to 'direct' (2026-10-25; was 'photo').
+  assert.equal(parseArgs([]).walk, 'direct', 'parseArgs must default walk to "direct" when --walk is omitted');
+  assert.equal(parseArgs(['--walk=direct']).walk, 'direct');
   assert.equal(parseArgs(['--walk=grid']).walk, 'grid');
   assert.equal(parseArgs(['--walk=photo']).walk, 'photo');
 });
@@ -2042,7 +2029,7 @@ test('date search ignores lingering tiles of the PREVIOUS search (old token in h
       panelTextByLabel: { 'August 5, 2026': { [labelA]: IMG_1433_BLOCK, [labelCal]: IMG_1441_BLOCK } },
     });
 
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job, calibrationJob], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job, calibrationJob], queue, { dryRun: false, walk: 'photo' });
 
     assert.equal(stillUnmatched.length, 0);
     assert.equal(queue.getById(job.id).status, 'trashed');
@@ -2097,10 +2084,94 @@ test('date search matches tiles whose href token differs from the URL token only
       },
       panelTextByLabel: { [q]: { [labelA]: IMG_1433_BLOCK, [labelCal]: IMG_1441_BLOCK } },
     });
-    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job, calibrationJob], queue, { dryRun: false });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job, calibrationJob], queue, { dryRun: false, walk: 'photo' });
     assert.equal(stillUnmatched.length, 0);
     assert.equal(page.trashedIdentities.size, 2);
     assert.ok(![...page.trashedIdentities].some((i) => i.includes('STALE')));
+  });
+});
+
+// ============================================================================
+// --walk=direct (2026-10-25): date search visits each result tile by page.goto()
+// to its own URL. LIVE MEASUREMENT on 30 stuck jobs: the click path lost tiles
+// the virtualized grid had unmounted ("tile gone from the grid") and the
+// ArrowRight walk quit after 1-5 photos ("advance did not register").
+// ============================================================================
+const DIRECT_Q = 'August 5, 2026';
+const directTile = (i, tok = 'TOK') => ({ ariaLabel: `Photo - Portrait - Aug 5, 2026, 1:${String(i).padStart(2, '0')}:00 PM`, href: `./search/${tok}/photo/ID${i}` });
+const jobFor = (n) => ({ filename: `IMG_77${String(n).padStart(2, '0')}.HEIC`, creationDate: '2026-08-05T20:00:00.000Z', pixelWidth: 1000 + n, pixelHeight: 2000 + n });
+const blockFor = (n) => panelBlock(jobFor(n).filename, 1000 + n, 2000 + n);
+const scopedGotos = (page) => page.log.filter((l) => l.startsWith('goto:https://photos.google.com/search/'));
+
+test('direct walk: a tile the virtualized grid has unmounted still opens by its URL, with no tile click and no ArrowRight', async () => {
+  await withTempQueue(async (queue) => {
+    const N = 12;
+    const tiles = Array.from({ length: N }, (_, i) => directTile(i));
+    const { job } = queue.enqueue(jobFor(2));
+    const panelTextByLabel = { [DIRECT_Q]: Object.fromEntries(tiles.map((t, i) => [t.ariaLabel, blockFor(i)])) };
+    // windowSize 3: the pre-scroll ends with only tiles 9-11 mounted, so tile 2 (seen earlier, matched below) is unmounted by the time it is opened -- openTile would throw StaleTileError.
+    const page = createFakePage({ searchResults: { [DIRECT_Q]: tiles }, panelTextByLabel, windowSize: 3 });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0);
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.equal(page.log.filter((l) => l.startsWith('tile-click:')).length, 0, 'never clicks a tile');
+    assert.equal(page.log.filter((l) => l === 'key:ArrowRight').length, 0, 'never presses ArrowRight');
+    assert.ok(scopedGotos(page).includes('goto:https://photos.google.com/search/TOK/photo/ID2'));
+    assert.equal(scopedGotos(page).length, 3, 'visits ID0, ID1, ID2 then stops: no job remains unmatched');
+  });
+});
+
+test('direct walk: every job on a 40-tile day is matched, however far down the day its photo is', async () => {
+  await withTempQueue(async (queue) => {
+    const N = 40;
+    const tiles = Array.from({ length: N }, (_, i) => directTile(i));
+    const wanted = [3, 21, 39];
+    const jobs = wanted.map((n) => queue.enqueue(jobFor(n)).job);
+    const panelTextByLabel = { [DIRECT_Q]: Object.fromEntries(tiles.map((t, i) => [t.ariaLabel, blockFor(i)])) };
+    const page = createFakePage({ searchResults: { [DIRECT_Q]: tiles }, panelTextByLabel });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', jobs, queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0);
+    for (const j of jobs) assert.equal(queue.getById(j.id).status, 'trashed', j.filename);
+    assert.equal(page.log.filter((l) => l === 'key:ArrowRight').length, 0);
+  });
+});
+
+test('direct walk: a tile whose panel never reads is logged and skipped, the walk goes on to the next URL', async () => {
+  await withTempQueue(async (queue) => {
+    const tiles = Array.from({ length: 4 }, (_, i) => directTile(i));
+    const { job } = queue.enqueue(jobFor(3));
+    const text = { [DIRECT_Q]: { [tiles[0].ariaLabel]: blockFor(0), [tiles[2].ariaLabel]: blockFor(2), [tiles[3].ariaLabel]: blockFor(3) } }; // tile 1: no panel text at all
+    const page = createFakePage({ searchResults: { [DIRECT_Q]: tiles }, panelTextByLabel: text });
+
+    const logs = await captureLogs(async () => {
+      const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+      assert.equal(stillUnmatched.length, 0);
+    });
+
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.match(logs.join('\n'), /\[direct\] \d+\/4 \S+\/photo\/ID1 → still unreadable/);
+  });
+});
+
+test('direct walk: a photo seen under adjacent dates\' search tokens is visited only once per group', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(jobFor(9)); // present on no date
+    const mk = (tok) => [{ ariaLabel: 'Photo - Portrait - Aug 5, 2026, 1:00:00 PM', href: `./search/${tok}/photo/SHARED` }];
+    const queries = { 'August 5, 2026': 'T5', 'August 4, 2026': 'T4', 'August 6, 2026': 'T6' };
+    const page = createFakePage({
+      searchUrlToken: queries,
+      searchResults: Object.fromEntries(Object.entries(queries).map(([q, tok]) => [q, mk(tok)])),
+      panelTextByLabel: Object.fromEntries(Object.keys(queries).map((q) => [q, { 'Photo - Portrait - Aug 5, 2026, 1:00:00 PM': blockFor(0) }])),
+    });
+
+    await runDateGroups(page, new Map([['2026-08-05', [job]]]), queue, { dryRun: false });
+
+    assert.deepEqual(page.searchLog, ['August 5, 2026', 'August 4, 2026', 'August 6, 2026'], 'all three attempt dates were searched');
+    assert.equal(scopedGotos(page).filter((l) => l.includes('/photo/SHARED')).length, 1, 'the shared photo id is visited once, not once per adjacent date');
   });
 });
 

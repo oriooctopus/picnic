@@ -427,8 +427,10 @@ function photoOpen(page) {
  * click has the same effect regardless of which selector shape found the
  * tile, same as it would on the real DOM (it's the same element either way).
  */
-function openTileInFake(page, ariaLabel, href) {
-  page.log.push(`tile-click:${ariaLabel}`);
+function openTileInFake(page, ariaLabel, href, { viaGoto = false } = {}) {
+  // A direct goto() to the tile's URL (--walk=direct) is not a click -- the log
+  // keeps the two apart so tests can assert a walk never clicks.
+  page.log.push(viaGoto ? `goto-open:${ariaLabel}` : `tile-click:${ariaLabel}`);
   page.openedAriaLabel = ariaLabel;
   // Separate from openedAriaLabel (used for panel-text lookups, which are
   // legitimately keyed by aria-label since duplicate copies share identical
@@ -910,6 +912,9 @@ export function createFakePage(config = {}) {
         }
         if (key === 'Escape') {
           page.escapePresses += 1;
+          // Escape from a search-scoped viewer URL returns to /search/<token>
+          // (2026-10-25: a --walk=direct goto leaves the URL on the photo).
+          page._url = page._url?.replace(/^(https:\/\/photos\.google\.com\/search\/[^/]+)\/(?:top\/)?photo\/.*$/, '$1');
           page.openedAriaLabel = null;
           page.openedIdentity = null;
         }
@@ -1147,6 +1152,7 @@ export function createFakePage(config = {}) {
       // too (its own reopen of the SAME still-failing tile would then
       // spuriously succeed), caught by running the full suite after an
       // earlier draft did exactly that, not by inspection.
+      page._gotoGridTile(url);
       const m = /^https:\/\/photos\.google\.com\/photo\/(.+)$/.exec(url);
       if (m && page.config.timelineTiles != null) {
         const identity = decodeURIComponent(m[1]);
@@ -1180,6 +1186,34 @@ export function createFakePage(config = {}) {
             }
           }
         }
+      }
+    },
+    // (goto, continued) 2026-10-25, date search `--walk=direct`: a goto() to a
+    // grid-mode tile's own URL -- search-scoped (/search/<token>/photo/<id>,
+    // opens the viewer on that tile) or plain (/photo/<id>, the trash-state
+    // banner check). Resolved against EVERY tile of the active query, mounted
+    // or not (windowSize unmounts tiles from the DOM, never from the library),
+    // which is exactly why direct navigation beats clicking a grid tile.
+    _gotoGridTile(url) {
+      if (page.config.timelineTiles != null) return;
+      const query = page.activeQuery;
+      const pool = [
+        ...(page.config.searchResults[query] ?? []),
+        ...(page.config.scrollReveals[query] ?? []).flat(),
+        ...(page.config.lingeringTiles?.[query] ?? []),
+      ].filter((t) => typeof t !== 'string' && t.href);
+      const scoped = /^https:\/\/photos\.google\.com\/(search\/.+)$/.exec(url);
+      const plain = /^https:\/\/photos\.google\.com\/photo\/([^/?#]+)/.exec(url);
+      const tile = scoped
+        ? pool.find((t) => t.href === `./${scoped[1]}`)
+        : plain
+          ? pool.find((t) => t.href.endsWith(`/photo/${decodeURIComponent(plain[1])}`))
+          : null;
+      if (!tile) return;
+      if (page.trashedIdentities.has(identityOf(tile))) {
+        page._onTrashedPhotoPage = true;
+      } else if (scoped) {
+        openTileInFake(page, tile.ariaLabel, tile.href, { viaGoto: true });
       }
     },
     async bringToFront() {

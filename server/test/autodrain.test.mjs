@@ -109,7 +109,7 @@ test('debounce coalesces a burst of enqueues into exactly one run', async () => 
     clock.advance(90_000);
     await tick();
     assert.equal(calls.length, 1, 'the whole burst collapses into one run');
-    assert.equal(calls[0].walk, 'timeline');
+    assert.equal(calls[0].walk, 'direct');
   });
 });
 
@@ -290,7 +290,7 @@ test('CDP unreachable: does not spawn, backs off, and re-probes after the backof
   });
 });
 
-test('strategy retry: needs_review jobs from the photo run get exactly one grid retry', async () => {
+test('strategy retry: needs_review jobs from the primary (direct) run get exactly one timeline retry', async () => {
   await withTempQueue(async (queue) => {
     const a = addQueuedJob(queue, 'A.HEIC');
     const b = addQueuedJob(queue, 'B.HEIC', '2026-06-16T14:30:00.000Z');
@@ -298,23 +298,23 @@ test('strategy retry: needs_review jobs from the photo run get exactly one grid 
     const calls = [];
     const spawnWorker = async ({ walk }) => {
       calls.push(walk);
-      if (walk === 'timeline') {
+      if (walk === 'direct') {
         queue.update(a.id, { status: 'needs_review', comparison: { reason: 'no match' } });
         queue.update(b.id, { status: 'trashed' });
-      } else if (walk === 'grid') {
+      } else if (walk === 'timeline') {
         queue.update(a.id, { status: 'trashed' });
       }
       // distinct exit codes per walk so a getStatus() assertion below can
       // prove gridExitCode is genuinely read from the grid run, not just a
       // copy of photoExitCode
-      return { code: walk === 'grid' ? 3 : 0 };
+      return { code: walk === 'timeline' ? 3 : 0 };
     };
     const drain = createAutoDrain(baseDeps(queue, clock, { spawnWorker }));
 
     drain.notifyEnqueued();
     clock.advance(DEBOUNCE_MS);
     await tick();
-    assert.deepEqual(calls, ['timeline', 'grid']);
+    assert.deepEqual(calls, ['direct', 'timeline']);
     assert.equal(queue.getById(a.id).status, 'trashed');
     assert.equal(queue.getById(a.id).autoDrainRetried, true);
 
@@ -326,7 +326,7 @@ test('strategy retry: needs_review jobs from the photo run get exactly one grid 
     // no THIRD run just because a retried job exists on the queue
     clock.advance(MAX_DELAY_MS);
     await tick();
-    assert.deepEqual(calls, ['timeline', 'grid'], 'no further automatic run without a new enqueue');
+    assert.deepEqual(calls, ['direct', 'timeline'], 'no further automatic run without a new enqueue');
   });
 });
 
@@ -353,7 +353,7 @@ test('a job re-queued while already carrying the retry marker is not retried a s
     drain.notifyEnqueued();
     clock.advance(DEBOUNCE_MS);
     await tick();
-    assert.deepEqual(calls, ['timeline'], 'already-retried job must not get a second grid retry even though it was queued at run start');
+    assert.deepEqual(calls, ['direct'], 'already-retried job must not get a second grid retry even though it was queued at run start');
   });
 });
 
@@ -373,7 +373,7 @@ test('a job that is still needs_review after its one retry is never auto-retried
     drain.notifyEnqueued();
     clock.advance(DEBOUNCE_MS);
     await tick();
-    assert.deepEqual(calls, ['timeline', 'grid']);
+    assert.deepEqual(calls, ['direct', 'timeline']);
     assert.equal(queue.getById(a.id).autoDrainRetried, true);
 
     // a later run (new enqueue) must not retry it a second time
@@ -381,7 +381,7 @@ test('a job that is still needs_review after its one retry is never auto-retried
     drain.notifyEnqueued();
     clock.advance(DEBOUNCE_MS);
     await tick();
-    assert.deepEqual(calls, ['timeline', 'grid', 'timeline'], 'job A must not trigger a second grid retry');
+    assert.deepEqual(calls, ['direct', 'timeline', 'direct'], 'job A must not trigger a second grid retry');
   });
 });
 
@@ -400,7 +400,7 @@ test('a pre-existing unmarked needs_review job is left untouched by a normal cyc
     const calls = [];
     const spawnWorker = async ({ walk }) => {
       calls.push(walk);
-      if (walk === 'timeline') queue.update(a.id, { status: 'trashed' });
+      if (walk === 'direct') queue.update(a.id, { status: 'trashed' });
       return { code: 0 };
     };
     const drain = createAutoDrain(baseDeps(queue, clock, { spawnWorker }));
@@ -409,7 +409,7 @@ test('a pre-existing unmarked needs_review job is left untouched by a normal cyc
     clock.advance(DEBOUNCE_MS);
     await tick();
 
-    assert.deepEqual(calls, ['timeline'], 'no grid retry -- the pre-existing needs_review job was never queued at this run\'s start');
+    assert.deepEqual(calls, ['direct'], 'no grid retry -- the pre-existing needs_review job was never queued at this run\'s start');
     const staleAfter = queue.getById(stale.id);
     assert.equal(staleAfter.status, 'needs_review', 'pre-existing needs_review job must be left untouched');
     assert.notEqual(staleAfter.autoDrainRetried, true, 'must not gain the retry marker');
@@ -425,7 +425,7 @@ test('the retry marker survives a restart between the photo run and the grid ret
     // retry marker (already durably written via queue.update) but before
     // the grid spawnWorker call itself resolves.
     const spawnWorker1 = async ({ walk }) => {
-      if (walk === 'timeline') {
+      if (walk === 'direct') {
         queue.update(a.id, { status: 'needs_review' });
         return { code: 0 };
       }
@@ -454,7 +454,7 @@ test('the retry marker survives a restart between the photo run and the grid ret
     // No notifyEnqueued() call at all -- startup recovery must arm it.
     clock2.advance(DEBOUNCE_MS);
     await tick();
-    assert.deepEqual(calls2, ['timeline'], 'must NOT retry with grid again -- the marker survived the crash/restart');
+    assert.deepEqual(calls2, ['direct'], 'must NOT retry with grid again -- the marker survived the crash/restart');
   });
 });
 
@@ -472,14 +472,14 @@ test('a human retry (marker cleared) gets the full two-strategy treatment again'
     drain.notifyEnqueued();
     clock.advance(DEBOUNCE_MS);
     await tick();
-    assert.deepEqual(calls, ['timeline', 'grid']);
+    assert.deepEqual(calls, ['direct', 'timeline']);
 
     // mirrors what queue-server.mjs's POST /retry/:id does: reset status AND clear the marker
     queue.update(a.id, { status: 'queued', error: null, autoDrainRetried: false });
     drain.notifyEnqueued();
     clock.advance(DEBOUNCE_MS);
     await tick();
-    assert.deepEqual(calls, ['timeline', 'grid', 'timeline', 'grid'], 'a cleared marker means a fresh retry allowance');
+    assert.deepEqual(calls, ['direct', 'timeline', 'direct', 'timeline'], 'a cleared marker means a fresh retry allowance');
   });
 });
 
@@ -620,11 +620,11 @@ test('[amend] a run that DOES make progress (some job left the queued state) but
     drain.notifyEnqueued();
     clock.advance(DEBOUNCE_MS);
     await tick();
-    assert.deepEqual(calls, ['timeline']);
+    assert.deepEqual(calls, ['direct']);
 
     clock.advance(DEBOUNCE_MS);
     await tick();
-    assert.deepEqual(calls, ['timeline', 'timeline'], 'progress made -> re-arms on the normal debounce, not the slow backoff');
+    assert.deepEqual(calls, ['direct', 'direct'], 'progress made -> re-arms on the normal debounce, not the slow backoff');
   });
 });
 

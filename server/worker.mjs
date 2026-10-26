@@ -261,9 +261,9 @@ let SLOW = false;
 // results) was found and fixed AFTER the grid walk was already deleted, so
 // the fix was never tested against it. Rather than assume either strategy
 // is now reliable, both are kept selectable so they can be A/B'd live --
-// `photo` (walkPhotoView) stays the default so nothing changes unless asked.
+// `photo` (walkPhotoView) was the default until 2026-10-25, when `direct` (goto per tile URL, see processDateGroup) replaced it.
 export function parseArgs(argv) {
-  const args = { cap: DEFAULT_CAP, dryRun: false, slow: false, walk: 'photo', revisitFile: null, reconcileScan: null, reconcileTrash: null };
+  const args = { cap: DEFAULT_CAP, dryRun: false, slow: false, walk: 'direct', revisitFile: null, reconcileScan: null, reconcileTrash: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--cap') args.cap = Number(argv[++i]);
     if (argv[i] === '--dry-run') args.dryRun = true;
@@ -281,20 +281,21 @@ export function parseArgs(argv) {
     if (argv[i].startsWith('--reconcile-trash=')) args.reconcileTrash = argv[i].slice('--reconcile-trash='.length);
     if (argv[i].startsWith('--walk=')) {
       const value = argv[i].slice('--walk='.length);
-      if (value !== 'photo' && value !== 'grid' && value !== 'timeline') {
-        throw new Error(`--walk must be "photo", "grid", or "timeline", got "${value}"`);
+      if (value !== 'direct' && value !== 'photo' && value !== 'grid' && value !== 'timeline') {
+        throw new Error(`--walk must be "direct", "photo", "grid", or "timeline", got "${value}"`);
       }
       args.walk = value;
     }
     if (argv[i] === '--help' || argv[i] === '-h') {
       console.log(
-        'Usage: node worker.mjs [--dry-run] [--cap N] [--slow] [--walk=photo|grid|timeline] [--revisit-file PATH]\n' +
+        'Usage: node worker.mjs [--dry-run] [--cap N] [--slow] [--walk=direct|photo|grid|timeline] [--revisit-file PATH]\n' +
           '       node worker.mjs --reconcile-scan=<YYYY-MM>\n' +
           '       node worker.mjs --reconcile-trash=<YYYY-MM>\n' +
           '  --dry-run    Search + read candidate info + decide, but never trash. Safe default for a first run.\n' +
           '  --cap N      Max queued jobs to process this run (default 50).\n' +
           '  --slow       Restore human-scale pacing (inter-click jitter, dwell, per-character typing). Off by default.\n' +
-          '  --walk=MODE  "photo" (default, date-search + ArrowRight through the photo view), "grid" (date-search,\n' +
+          '  --walk=MODE  "direct" (default, date-search then page.goto() to each result tile\'s own URL, never clicking or\n' +
+          '               ArrowRight), "photo" (date-search + ArrowRight through the photo view), "grid" (date-search,\n' +
           '               opens each tile from the results grid directly), or "timeline" (no search at all -- date\n' +
           '               search was measured badly incomplete live -- opens the main library\'s newest photo and\n' +
           '               walks the photo viewer with ArrowRight, checking every photo\'s filename; see walkTimeline).\n' +
@@ -1451,12 +1452,12 @@ async function verifyTrashByUrl(page, matchedUrl, reloadUrl = matchedUrl) {
  * -- caught by running the full suite after the rewrite, not by inspection.
  */
 async function confirmAndTrash(page, job, parsed, text, query, queue, dryRun, isDuplicateCopy = false, matchOptions = {}) {
-  const { matchedUrl = null, verifyByUrl = false } = matchOptions;
+  const { matchedUrl = null, verifyByUrl = false, verifyUrl = matchedUrl } = matchOptions;
   if (dryRun) {
     console.log(`[dry-run WOULD TRASH${isDuplicateCopy ? ' duplicate copy of' : ''}] ${job.filename} (search ${query})`);
     return { confirmed: false, guardFailed: false };
   }
-  const { confirmed, guardFailed } = await moveToTrash(page, text, { matchedUrl, expectedFilename: parsed.filename, verifyByUrl });
+  const { confirmed, guardFailed } = await moveToTrash(page, text, { matchedUrl, expectedFilename: parsed.filename, verifyByUrl, verifyUrl });
   if (guardFailed) {
     // The safety guard refused to even attempt this -- see moveToTrash's
     // own loud log for why. Nothing was learned about `job` one way or the
@@ -2016,7 +2017,7 @@ async function walkGrid(page, seen, tiles, unmatchedJobs, query, queue, dryRun, 
 }
 
 
-export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun, walk = 'photo' }) {
+export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun, walk = 'direct', visitedPhotoIds = new Set() }) {
   let remaining = [...unmatchedJobs];
   if (remaining.length === 0) return { stillUnmatched: remaining };
 
@@ -2097,6 +2098,43 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
   }
 
   const ariaPlan = planAriaMatches(remaining, [...seen.values()]);
+
+  if (walk === 'direct') {
+    // --walk=direct (2026-10-25): never click a tile or ArrowRight. LIVE
+    // MEASUREMENT on 30 stuck jobs: all 22 that are really in Google Photos
+    // were in that date's grid, matched by exact capture second, yet the
+    // click path lost 8 to (1) aria-planned tiles "gone from the grid" (the
+    // virtualized grid unmounts them after the pre-scroll; openTile needs a
+    // mounted :visible element) and (2) the ArrowRight walk stopping after 1-5
+    // photos ("advance did not register"). A goto() to the tile's own URL needs
+    // neither. The aria plan only ORDERS the visits (planned tiles first);
+    // every other seen tile follows, and the filename read decides each match.
+    const ordered = [...(ariaPlan ? ariaPlan.values() : []), ...seen.values()];
+    const urls = [];
+    const queuedIdentities = new Set();
+    for (const tile of ordered) {
+      const identity = tileIdentity(tile);
+      if (queuedIdentities.has(identity)) continue;
+      queuedIdentities.add(identity);
+      if (!tile.href) {
+        console.log(`[search ${query}] tile "${tile.ariaLabel}" has no readable href — cannot visit it directly`);
+        continue;
+      }
+      const url = `https://photos.google.com/${tile.href.replace(/^\.\//, '')}`;
+      // Dedupe by photo id across the +/-1 day attempts of one group: an
+      // adjacent date's search shows the same photo under another search token.
+      const photoId = photoIdFromUrl(url);
+      if (photoId != null) {
+        if (visitedPhotoIds.has(photoId)) continue;
+        visitedPhotoIds.add(photoId);
+      }
+      urls.push(url);
+    }
+    if (VERBOSE) console.log(`[search ${query}] direct walk: ${urls.length} tile URL(s) to visit, ${remaining.length} job(s) to find`);
+    const result = await visitPhotoUrls(page, urls, remaining, queue, { dryRun, tag: 'direct', confirmLabel: query, huntDuplicates: false, searchScoped: true });
+    return { stillUnmatched: result.remaining };
+  }
+
   if (ariaPlan) {
     if (VERBOSE) {
       console.log(`[search ${query}] aria fast path: ${ariaPlan.size}/${remaining.length} job(s) matched to a tile, opening only those`);
@@ -2178,15 +2216,16 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
  * only for jobs still unmatched after the prior attempt. Anything left
  * unmatched after all three attempts becomes needs_review.
  */
-export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = 'photo' }) {
+export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = 'direct' }) {
   for (const [dateStr, jobs] of groupedJobs) {
     let unmatched = [...jobs];
+    const visitedPhotoIds = new Set(); // direct walk: one photo is visited once across this group's +/-1 day searches
     const attemptDates = [dateStr, shiftDateDays(dateStr, -1), shiftDateDays(dateStr, 1)];
 
     try {
       for (const attemptDate of attemptDates) {
         if (unmatched.length === 0) break;
-        const { stillUnmatched } = await processDateGroup(page, attemptDate, unmatched, queue, { dryRun, walk });
+        const { stillUnmatched } = await processDateGroup(page, attemptDate, unmatched, queue, { dryRun, walk, visitedPhotoIds });
         unmatched = stillUnmatched;
         if (unmatched.length > 0) await stealthDelay(PACE_MS_MIN, PACE_MS_MAX); // pure mimicry, off unless --slow
       }
@@ -3266,6 +3305,36 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
  * needs for its summary line.
  */
 export async function revisitUnreadable(page, urls, pendingJobs, queue, { dryRun }) {
+  // huntDuplicates: the revisit pass keeps going after every job is matched, so
+  // a duplicate copy of an already-trashed job sitting later in the list is
+  // still found (same convention walkTimeline's main loop uses).
+  const { remaining, revisitedCount, readCount, matchedCount } = await visitPhotoUrls(page, urls, pendingJobs, queue, {
+    dryRun,
+    tag: 'revisit',
+    confirmLabel: 'revisit',
+    huntDuplicates: true,
+  });
+  console.log(
+    `[revisit] summary: ${revisitedCount} revisited, ${readCount} read, ${matchedCount} matched, ${revisitedCount - readCount} still unreadable`
+  );
+  return { stillUnmatched: remaining };
+}
+
+/**
+ * Per-URL body shared by revisitUnreadable and the date search's `direct` walk:
+ * page.goto(url) -> openInfoPanelOnce -> readPanelText -> findMatchingJob ->
+ * confirmAndTrash. The code's own revisit notes found direct navigation reads
+ * reliably where clicking a (virtualized, possibly unmounted) tile or stepping
+ * ArrowRight does not. A per-URL failure (goto error, panel never readable) is
+ * logged and skipped, never run-fatal; page-closed errors propagate.
+ *
+ * `searchScoped`: the URLs are search-scoped viewer URLs
+ * (/search/<token>/photo/<id>). Those answer "Photo not found" once the item is
+ * trashed (measured live 2026-10-16), so the trash is verified against the
+ * plain /photo/<id> form, and matchedUrl is page.url() as the browser settled
+ * on it (the safety guard compares against that), not the requested string.
+ */
+async function visitPhotoUrls(page, urls, pendingJobs, queue, { dryRun, tag, confirmLabel, huntDuplicates, searchScoped = false }) {
   let remaining = [...pendingJobs];
   const matchedJobs = new Set();
   let revisitedCount = 0;
@@ -3273,11 +3342,10 @@ export async function revisitUnreadable(page, urls, pendingJobs, queue, { dryRun
   let matchedCount = 0;
 
   for (let i = 0; i < urls.length; i++) {
-    // Once nothing is left to find (no remaining jobs, and no duplicate
-    // copies of an already-trashed job worth still hunting for -- same
-    // convention walkTimeline's own main loop uses), stop early rather than
-    // burning the rest of the URL list for nothing.
-    if (remaining.length === 0 && matchedJobs.size === 0) break;
+    // Once nothing is left to find, stop early rather than burning the rest of
+    // the URL list for nothing. With huntDuplicates, also wait out the
+    // duplicate-copy hunt (matchedJobs non-empty = keep going).
+    if (remaining.length === 0 && (!huntDuplicates || matchedJobs.size === 0)) break;
     const url = urls[i];
     revisitedCount += 1;
 
@@ -3285,7 +3353,7 @@ export async function revisitUnreadable(page, urls, pendingJobs, queue, { dryRun
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     } catch (err) {
       if (isPageClosedError(page, err)) throw err; // genuine infra failure -- must propagate, never swallowed as "just this URL"
-      console.log(`[revisit] ${i + 1}/${urls.length} ${url} → goto failed (${err.message || err})`);
+      console.log(`[${tag}] ${i + 1}/${urls.length} ${url} → goto failed (${err.message || err})`);
       continue;
     }
 
@@ -3297,12 +3365,12 @@ export async function revisitUnreadable(page, urls, pendingJobs, queue, { dryRun
       // openInfoPanelOnce's own 15s-bounded throw ("info panel never
       // produced filename text") means this URL is STILL unreadable even
       // via direct navigation -- log and move on to the next one.
-      console.log(`[revisit] ${i + 1}/${urls.length} ${url} → still unreadable (${err.message || err})`);
+      console.log(`[${tag}] ${i + 1}/${urls.length} ${url} → still unreadable (${err.message || err})`);
       continue;
     }
     readCount += 1;
     const parsed = parsePanelText(text);
-    console.log(`[revisit] ${i + 1}/${urls.length} ${url} → ${parsed.filename ?? '(no filename)'}`);
+    console.log(`[${tag}] ${i + 1}/${urls.length} ${url} → ${parsed.filename ?? '(no filename)'}`);
     if (!parsed.filename) continue;
 
     const candidateJobs = matchedJobs.size > 0 ? [...remaining, ...matchedJobs] : remaining;
@@ -3311,12 +3379,14 @@ export async function revisitUnreadable(page, urls, pendingJobs, queue, { dryRun
 
     matchedCount += 1;
     const isDuplicateCopy = matchedJobs.has(job);
-    // round 10 SAFETY: `url` IS the matchedUrl here (we just goto()'d
-    // straight to it and read this exact filename) -- verifyByUrl fits
-    // revisit's own model naturally, it already navigates freely by URL.
-    const { guardFailed } = await confirmAndTrash(page, job, parsed, text, 'revisit', queue, dryRun, isDuplicateCopy, {
-      matchedUrl: url,
+    // round 10 SAFETY: we just goto()'d straight to this URL and read this
+    // exact filename -- verifyByUrl fits since we already navigate freely by URL.
+    const matchedUrl = searchScoped ? page.url() : url;
+    const photoId = photoIdFromUrl(matchedUrl);
+    const { guardFailed } = await confirmAndTrash(page, job, parsed, text, confirmLabel, queue, dryRun, isDuplicateCopy, {
+      matchedUrl,
       verifyByUrl: true,
+      ...(searchScoped && photoId ? { verifyUrl: `https://photos.google.com/photo/${encodeURIComponent(photoId)}` } : {}),
     });
     if (guardFailed) continue; // job untouched -- next URL in the list, unaffected
     if (!isDuplicateCopy) {
@@ -3324,11 +3394,7 @@ export async function revisitUnreadable(page, urls, pendingJobs, queue, { dryRun
       matchedJobs.add(job);
     }
   }
-
-  console.log(
-    `[revisit] summary: ${revisitedCount} revisited, ${readCount} read, ${matchedCount} matched, ${revisitedCount - readCount} still unreadable`
-  );
-  return { stillUnmatched: remaining };
+  return { remaining, revisitedCount, readCount, matchedCount };
 }
 
 /**
@@ -4049,7 +4115,7 @@ export async function runReplaceJobs(page, jobs, queue, { dryRun = false, ops = 
   }
 }
 
-export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'photo', revisitFile = null } = {}) {
+export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'direct', revisitFile = null } = {}) {
   const queue = new JobQueue(QUEUE_PATH);
   const queued = queue.loadAll().filter((j) => j.status === 'queued');
   // Trim-replace jobs are a different flow (upload, then trash) with their own
