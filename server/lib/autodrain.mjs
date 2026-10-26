@@ -143,6 +143,23 @@ export const DEBOUNCE_MS = 90_000;
 // long time to sit undrained.
 export const MAX_DELAY_MS = 10 * 60 * 1000;
 export const CDP_BACKOFF_MS = 10 * 60 * 1000;
+/**
+ * Exit code worker.mjs ends with when Google Photos search is throttled/down
+ * (its SearchOutageError: an empty date search AND an empty canary query). The
+ * worker imports this constant, so both ends share one definition. 75 is
+ * EX_TEMPFAIL from sysexits.h ("temporary failure, retry later"), which is
+ * exactly the meaning; the worker's generic failure exit stays 1.
+ */
+export const SEARCH_OUTAGE_EXIT_CODE = 75;
+/**
+ * How long autodrain stays away after a search-outage exit. MEASURED
+ * 2026-10-25/26: a throttle began after a ~20-search dry-run ending ~03:50Z, a
+ * probe every 5 min got "No results" from 03:54 to 04:30 and search recovered
+ * at 04:35, i.e. ~45 min. The 10 min CDP_BACKOFF_MS would have retried (and
+ * spent canary searches) ~4 times inside one throttle, likely extending it.
+ * 60 min clears the one measured outage with margin (n=1).
+ */
+export const SEARCH_OUTAGE_BACKOFF_MS = 60 * 60 * 1000;
 export const CDP_PORT = 9251;
 export const DEFAULT_LOG_DIR = join(homedir(), '.local/share/picnic/worker-runs');
 
@@ -172,6 +189,7 @@ export function createAutoDrain({
   debounceMs = DEBOUNCE_MS,
   maxDelayMs = MAX_DELAY_MS,
   backoffMs = CDP_BACKOFF_MS,
+  searchOutageBackoffMs = SEARCH_OUTAGE_BACKOFF_MS,
   logDir = DEFAULT_LOG_DIR,
 } = {}) {
   if (!enabled) {
@@ -199,6 +217,7 @@ export function createAutoDrain({
   let running = false;
   let pendingFollowUp = false;
   let lastRun = null;
+  let searchOutageUntil = 0; // epoch ms; see attemptRun
 
   /** Starts (or extends) a scheduling burst: called by notifyEnqueued() and, on run finish, for a flagged follow-up. */
   function armScheduling() {
@@ -227,9 +246,9 @@ export function createAutoDrain({
     attemptRun();
   }
 
-  function scheduleBackoff() {
+  function scheduleBackoff(ms = backoffMs) {
     if (backoffTimer !== null) clearTimer(backoffTimer);
-    backoffTimer = setTimer(onBackoffFire, backoffMs);
+    backoffTimer = setTimer(onBackoffFire, ms);
   }
 
   function onBackoffFire() {
@@ -239,6 +258,10 @@ export function createAutoDrain({
 
   function attemptRun() {
     clearScheduling();
+    // A search-outage backoff is a hard quiet period: a job enqueued during it
+    // must not start a run (its debounce would fire in ~90s and spend searches
+    // inside the throttle). The backoff timer itself fires at searchOutageUntil.
+    if (now() < searchOutageUntil) return;
     if (running) {
       pendingFollowUp = true;
       return;
@@ -266,6 +289,7 @@ export function createAutoDrain({
     // whether it made any forward progress -- see the finally block.
     let ranWorker = false;
     let progressMade = false;
+    let outageBackoff = false; // set on a search-outage exit: the finally must not re-arm sooner
     try {
       const reachable = await probeCdp();
       if (!reachable) {
@@ -296,6 +320,17 @@ export function createAutoDrain({
       // for whatever the date search did not find (a photo whose capture
       // date is off by more than the +/-1 day searched).
       const primaryResult = await runOnce('direct');
+      if (primaryResult && primaryResult.code === SEARCH_OUTAGE_EXIT_CODE) {
+        // Google Photos search is throttled: the worker marked nothing and left
+        // every job queued. No timeline retry (nothing was marked needs_review,
+        // so none is eligible anyway), no retry marker, and a long quiet period.
+        log(`[autodrain] worker reported a search outage (exit ${SEARCH_OUTAGE_EXIT_CODE}), backing off ${searchOutageBackoffMs / 60000} min`);
+        searchOutageUntil = now() + searchOutageBackoffMs;
+        scheduleBackoff(searchOutageBackoffMs);
+        outageBackoff = true;
+        lastRun = { startedAt, finishedAt: now(), outcome: 'search_outage', photoExitCode: primaryResult.code };
+        return;
+      }
       let gridResult = null;
       let retried = false;
 
@@ -347,7 +382,9 @@ export function createAutoDrain({
       // so a spawn that fails instantly on every attempt still waits out a
       // full debounce/ceiling window between attempts instead of hot-looping.
       running = false;
-      if (pendingFollowUp) {
+      if (outageBackoff) {
+        pendingFollowUp = false; // the long backoff timer is the only re-arm
+      } else if (pendingFollowUp) {
         pendingFollowUp = false;
         armScheduling();
       } else if (ranWorker && queue.loadAll().some((j) => j.status === 'queued')) {

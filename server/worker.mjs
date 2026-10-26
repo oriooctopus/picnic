@@ -88,6 +88,7 @@ import { readFileSync, mkdirSync, rmSync, existsSync, copyFileSync } from 'node:
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { JobQueue, isReplaceJob } from './lib/queue.mjs';
+import { SEARCH_OUTAGE_EXIT_CODE } from './lib/autodrain.mjs'; // exit code autodrain reads as "search throttled, back off 60 min"
 import { processReplaceJob, replaceUploadName, buildStageArgs, offsetFits, parseClock, durationMatches, classifyReplaceCandidate } from './lib/replace.mjs';
 import { probeDurationSec } from './lib/video-trim.mjs';
 import {
@@ -4333,7 +4334,9 @@ export async function runWorker({ cap = DEFAULT_CAP, dryRun = false, walk = 'dir
     }
   } catch (err) {
     loud(err instanceof SearchOutageError ? `BLOCKER: ${err.message}` : `BLOCKER: worker error: ${err.stack || err}`);
-    process.exitCode = 1;
+    // A search outage gets its own exit code so autodrain backs off long (see
+    // SEARCH_OUTAGE_BACKOFF_MS); every other failure stays 1.
+    process.exitCode = err instanceof SearchOutageError ? SEARCH_OUTAGE_EXIT_CODE : 1;
   } finally {
     // IMPORTANT: only close the page/tab this worker opened, never the
     // browser. `browser` here came from chromium.connectOverCDP() against

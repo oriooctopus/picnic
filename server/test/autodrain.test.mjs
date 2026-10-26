@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JobQueue } from '../lib/queue.mjs';
-import { createAutoDrain, isAutoDrainEnabled, DEBOUNCE_MS, MAX_DELAY_MS, CDP_BACKOFF_MS } from '../lib/autodrain.mjs';
+import { createAutoDrain, isAutoDrainEnabled, DEBOUNCE_MS, MAX_DELAY_MS, CDP_BACKOFF_MS, SEARCH_OUTAGE_EXIT_CODE, SEARCH_OUTAGE_BACKOFF_MS } from '../lib/autodrain.mjs';
 import { createFakeClock } from './helpers/fakeClock.mjs';
 
 /**
@@ -333,7 +333,7 @@ test('strategy retry: needs_review jobs from the primary (direct) run get exactl
 // Search outage (worker.mjs SearchOutageError): the worker exits 1 leaving every
 // job 'queued'. That must not look like needs_review (no timeline retry), must
 // not burn the one retry marker, and must be tried again after the backoff.
-test('worker aborted by a search outage: no timeline retry, no retry marker, run is re-attempted after the backoff', async () => {
+test('worker failed generically (exit 1, jobs untouched): no timeline retry, no retry marker, re-attempted after the 10 min backoff', async () => {
   await withTempQueue(async (queue) => {
     const a = addQueuedJob(queue, 'A.HEIC');
     const clock = createFakeClock();
@@ -354,6 +354,41 @@ test('worker aborted by a search outage: no timeline retry, no retry marker, run
     clock.advance(CDP_BACKOFF_MS + DEBOUNCE_MS);
     await tick();
     assert.deepEqual(calls, ['direct', 'direct'], 'next cycle tries the same job again');
+  });
+});
+
+test('search-outage exit code: next run waits 60 min (not 10), an enqueue meanwhile does not start one, no retry/marker/marks', async () => {
+  await withTempQueue(async (queue) => {
+    const a = addQueuedJob(queue, 'A.HEIC');
+    const clock = createFakeClock();
+    const calls = [];
+    const spawnWorker = async ({ walk }) => {
+      calls.push(walk);
+      return { code: SEARCH_OUTAGE_EXIT_CODE };
+    };
+    const drain = createAutoDrain(baseDeps(queue, clock, { spawnWorker }));
+
+    drain.notifyEnqueued();
+    clock.advance(DEBOUNCE_MS);
+    await tick();
+    assert.deepEqual(calls, ['direct']);
+    assert.equal(drain.getStatus().lastRun.outcome, 'search_outage');
+    assert.equal(queue.getById(a.id).status, 'queued');
+    assert.equal(queue.getById(a.id).autoDrainRetried, undefined);
+
+    clock.advance(CDP_BACKOFF_MS + DEBOUNCE_MS); // the generic backoff window: must stay quiet
+    await tick();
+    assert.equal(calls.length, 1, 'no run inside the 60 min quiet period');
+
+    addQueuedJob(queue, 'B.HEIC');
+    drain.notifyEnqueued(); // a new enqueue mid-throttle
+    clock.advance(MAX_DELAY_MS);
+    await tick();
+    assert.equal(calls.length, 1, 'an enqueue during the outage backoff does not start a run either');
+
+    clock.advance(SEARCH_OUTAGE_BACKOFF_MS); // now past 60 min in total
+    await tick();
+    assert.equal(calls.length, 2, 'retried once the outage backoff has elapsed');
   });
 });
 
