@@ -2131,7 +2131,7 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
       urls.push(url);
     }
     if (VERBOSE) console.log(`[search ${query}] direct walk: ${urls.length} tile URL(s) to visit, ${remaining.length} job(s) to find`);
-    const result = await visitPhotoUrls(page, urls, remaining, queue, { dryRun, tag: 'direct', confirmLabel: query, huntDuplicates: false, searchScoped: true });
+    const result = await visitPhotoUrls(page, urls, remaining, queue, { dryRun, tag: 'direct', confirmLabel: query, huntDuplicates: true, searchScoped: true }); // Oliver's library holds real duplicate copies (IMG_2162 x2, 2026-10-25) -- visit the whole day so the second copy is trashed too
     return { stillUnmatched: result.remaining };
   }
 

@@ -2119,7 +2119,24 @@ test('direct walk: a tile the virtualized grid has unmounted still opens by its 
     assert.equal(page.log.filter((l) => l.startsWith('tile-click:')).length, 0, 'never clicks a tile');
     assert.equal(page.log.filter((l) => l === 'key:ArrowRight').length, 0, 'never presses ArrowRight');
     assert.ok(scopedGotos(page).includes('goto:https://photos.google.com/search/TOK/photo/ID2'));
-    assert.equal(scopedGotos(page).length, 3, 'visits ID0, ID1, ID2 then stops: no job remains unmatched');
+    // Keeps visiting past the match (duplicate hunt), but never the same URL twice.
+    assert.equal(new Set(scopedGotos(page)).size, scopedGotos(page).length, 'no URL visited twice');
+  });
+});
+
+test('direct walk: a second copy of an already-trashed photo later in the day is trashed too', async () => {
+  await withTempQueue(async (queue) => {
+    const tiles = Array.from({ length: 6 }, (_, i) => directTile(i));
+    const { job } = queue.enqueue(jobFor(1));
+    // Tiles 1 and 4 are two library copies of the same file (live: IMG_2162 x2 on 2026-09-05).
+    const panelTextByLabel = { [DIRECT_Q]: Object.fromEntries(tiles.map((t, i) => [t.ariaLabel, blockFor(i === 4 ? 1 : i)])) };
+    const page = createFakePage({ searchResults: { [DIRECT_Q]: tiles }, panelTextByLabel });
+
+    await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+
+    const visited = scopedGotos(page);
+    assert.ok(visited.includes('goto:https://photos.google.com/search/TOK/photo/ID4'), 'walks on past the first match to reach the duplicate');
+    assert.equal(queue.getById(job.id).status, 'trashed');
   });
 });
 
