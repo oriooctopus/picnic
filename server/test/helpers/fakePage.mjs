@@ -1110,6 +1110,11 @@ export function createFakePage(config = {}) {
       // array/Set of URLs; any other URL navigates normally.
       const fails = page.config.gotoFailsForUrls;
       const shouldFail = fails instanceof Set ? fails.has(url) : Array.isArray(fails) && fails.includes(url);
+      // config.gotoFailsOnceForUrls (Set): fails the FIRST goto to a URL only, then navigates normally (a transient failure a retry survives).
+      const once = page.config.gotoFailsOnceForUrls;
+      if (once instanceof Set && once.delete(url)) {
+        throw new Error(`FIXTURE: simulated one-off goto failure for ${url}`);
+      }
       if (shouldFail) {
         throw new Error(`ROUND 9 FIXTURE: simulated goto failure (e.g. timeout) for ${url}`);
       }

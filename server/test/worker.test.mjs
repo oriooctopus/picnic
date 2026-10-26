@@ -2306,6 +2306,49 @@ test('run summary prints the number of real search submissions (searches=N)', as
   });
 });
 
+// dry5 (2026-10-25): 6 of 107 direct visits read "(no filename)" and a job whose
+// tile had read fine earlier was recorded needs_review ("not here") because one
+// visit failed. A URL gets one retry; a verdict needs every URL read.
+const URL2 = 'https://photos.google.com/search/TOK/photo/ID2';
+function unreadFixture(extra = {}) {
+  const tiles = Array.from({ length: 4 }, (_, i) => directTile(i));
+  const panelTextByLabel = { [DIRECT_Q]: Object.fromEntries(tiles.map((t, i) => [t.ariaLabel, blockFor(i)])) };
+  return { searchResults: { [DIRECT_Q]: tiles }, panelTextByLabel, ...extra };
+}
+
+test('direct walk: a URL that fails once is retried with a fresh goto and then matched', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(jobFor(2));
+    const page = createFakePage(unreadFixture({ gotoFailsOnceForUrls: new Set([URL2]) }));
+    await processDateGroup(page, '2026-08-05', [job], queue, { dryRun: false });
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.equal(page.log.filter((l) => l === `goto:${URL2}`).length, 2, 'one failed goto + one retry');
+  });
+});
+
+test('direct walk: a permanently unreadable URL blocks needs_review -- jobs stay queued, nothing burned', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(jobFor(50)); // not in the day's panels: unmatched
+    const page = createFakePage(unreadFixture({ gotoFailsForUrls: [URL2] }));
+    const lines = await captureLogs(() => runDateGroups(page, groupJobsByDate([job]), queue, { dryRun: false }));
+    const after = queue.getById(job.id);
+    assert.equal(after.status, 'queued');
+    assert.equal(after.attempts, 0);
+    assert.equal(after.autoDrainRetried, undefined);
+    assert.equal(page.log.filter((l) => l === `goto:${URL2}`).length, 2, 'tried, then retried once, then given up');
+    assert.ok(lines.some((l) => l.startsWith('[blocked] 1 unread tile URL(s)')), lines.filter((l) => l.includes('blocked')).join('|'));
+  });
+});
+
+test('direct walk: every URL read and still no match -> needs_review as before', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(jobFor(50));
+    const page = createFakePage(unreadFixture());
+    await runDateGroups(page, groupJobsByDate([job]), queue, { dryRun: false });
+    assert.equal(queue.getById(job.id).status, 'needs_review');
+  });
+});
+
 // 2026-10-25 LIVE EVIDENCE (run 2026-10-10T05-51-20): zero openable timeline
 // tiles used to log EXHAUSTED and mark 50 jobs needs_review ("walked past this
 // job's date") that ARE in Google Photos. A library with photos never has zero

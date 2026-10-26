@@ -2115,7 +2115,7 @@ async function assertSearchWorks(page, health, dateStr) {
   );
 }
 
-export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun, walk = 'direct', visitedPhotoIds = new Set(), searchHealth = createSearchHealth(queue) }) {
+export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dryRun, walk = 'direct', visitedPhotoIds = new Set(), searchHealth = createSearchHealth(queue), readStats = { unreadable: 0 } }) {
   let remaining = [...unmatchedJobs];
   if (remaining.length === 0) return { stillUnmatched: remaining };
 
@@ -2249,6 +2249,7 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
       queuedIdentities.add(identity);
       if (!tile.href) {
         console.log(`[search ${query}] tile "${tile.ariaLabel}" has no readable href — cannot visit it directly`);
+        readStats.unreadable += 1; // an unvisited tile is an unread tile: it blocks a "not here" verdict like any other
         continue;
       }
       const url = `https://photos.google.com/${tile.href.replace(/^\.\//, '')}`;
@@ -2263,6 +2264,7 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
     }
     if (VERBOSE) console.log(`[search ${query}] direct walk: ${urls.length} tile URL(s) to visit, ${remaining.length} job(s) to find`);
     const result = await visitPhotoUrls(page, urls, remaining, queue, { dryRun, tag: 'direct', confirmLabel: query, huntDuplicates: true, searchScoped: true }); // Oliver's library holds real duplicate copies (IMG_2162 x2, 2026-10-25) -- visit the whole day so the second copy is trashed too
+    readStats.unreadable += result.unreadableUrls.length;
     return { stillUnmatched: result.remaining };
   }
 
@@ -2361,13 +2363,14 @@ export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = '
 async function runDateGroupsLoop(page, groupedJobs, queue, { dryRun, walk, searchHealth }) {
   for (const [dateStr, jobs] of groupedJobs) {
     let unmatched = [...jobs];
+    const readStats = { unreadable: 0 }; // direct walk: tile URLs of this group's dates that stayed unreadable after their retry
     const visitedPhotoIds = new Set(); // direct walk: one photo is visited once across this group's +/-1 day searches
     const attemptDates = [dateStr, shiftDateDays(dateStr, -1), shiftDateDays(dateStr, 1)];
 
     try {
       for (const attemptDate of attemptDates) {
         if (unmatched.length === 0) break;
-        const { stillUnmatched } = await processDateGroup(page, attemptDate, unmatched, queue, { dryRun, walk, visitedPhotoIds, searchHealth });
+        const { stillUnmatched } = await processDateGroup(page, attemptDate, unmatched, queue, { dryRun, walk, visitedPhotoIds, searchHealth, readStats });
         unmatched = stillUnmatched;
         if (unmatched.length > 0) await stealthDelay(PACE_MS_MIN, PACE_MS_MAX); // pure mimicry, off unless --slow
       }
@@ -2408,6 +2411,20 @@ async function runDateGroupsLoop(page, groupedJobs, queue, { dryRun, walk, searc
       throw err; // stop the whole run, no silent retry loop
     }
 
+    if (unmatched.length > 0 && readStats.unreadable > 0) {
+      // "No filename match" is only a verdict when EVERY tile of the group's dates
+      // was read. dry5 wrote a false needs_review for a photo whose tile had read
+      // fine earlier but failed once. Mark nothing: no status change, no
+      // attempts burned; the next run reads again. Exit stays 0 and the jobs stay
+      // queued, which autodrain already treats as "no progress" (10 min backoff,
+      // no retry marker, no hot loop) unless some other job did progress.
+      console.log(
+        `[blocked] ${readStats.unreadable} unread tile URL(s) blocked a verdict for ${unmatched.length} job(s) on ${dateStr}; ` +
+          `left queued: ${unmatched.map((j) => j.filename).join(', ')}`
+      );
+      await stealthDelay(PACE_MS_MIN, PACE_MS_MAX);
+      continue;
+    }
     for (const job of unmatched) {
       if (dryRun) {
         console.log(`[dry-run needs_review] ${job.filename}: no filename match for ${dateStr} (+/-1 day)`);
@@ -3477,12 +3494,37 @@ export async function revisitUnreadable(page, urls, pendingJobs, queue, { dryRun
  * plain /photo/<id> form, and matchedUrl is page.url() as the browser settled
  * on it (the safety guard compares against that), not the requested string.
  */
+/**
+ * One goto + panel read of a single URL. Returns the panel text (guaranteed to
+ * hold a filename) or null after logging why it failed. Page-closed errors
+ * propagate. Uses openInfoPanelOnce's OWN returned text rather than a second
+ * readPanelText -- see the comment in visitPhotoUrls for the race that fixes.
+ */
+async function readUrlOnce(page, url, label) {
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  } catch (err) {
+    if (isPageClosedError(page, err)) throw err; // genuine infra failure -- must propagate, never swallowed as "just this URL"
+    console.log(`${label} → goto failed (${err.message || err})`);
+    return null;
+  }
+  try {
+    return await openInfoPanelOnce(page);
+  } catch (err) {
+    // openInfoPanelOnce's own 15s-bounded throw ("info panel never produced
+    // filename text") means this URL is unreadable this time.
+    console.log(`${label} → still unreadable (${err.message || err})`);
+    return null;
+  }
+}
+
 async function visitPhotoUrls(page, urls, pendingJobs, queue, { dryRun, tag, confirmLabel, huntDuplicates, searchScoped = false }) {
   let remaining = [...pendingJobs];
   const matchedJobs = new Set();
   let revisitedCount = 0;
   let readCount = 0;
   let matchedCount = 0;
+  const unreadableUrls = []; // still unreadable after the retry: the caller must not record "absent" while any exist
 
   for (let i = 0; i < urls.length; i++) {
     // Once nothing is left to find, stop early rather than burning the rest of
@@ -3492,29 +3534,26 @@ async function visitPhotoUrls(page, urls, pendingJobs, queue, { dryRun, tag, con
     const url = urls[i];
     revisitedCount += 1;
 
-    try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    } catch (err) {
-      if (isPageClosedError(page, err)) throw err; // genuine infra failure -- must propagate, never swallowed as "just this URL"
-      console.log(`[${tag}] ${i + 1}/${urls.length} ${url} → goto failed (${err.message || err})`);
-      continue;
+    // One retry (a fresh goto) before a URL is given up on. dry5 (2026-10-25):
+    // 6 of 107 direct visits came back "(no filename)". CAUSE: openInfoPanelOnce
+    // returns only once it has SEEN a filename, but this code then threw that
+    // text away and called readPanelText a second, independent time; the panel
+    // can re-render or close between the two reads, so the second one came back
+    // empty on a photo whose panel had just been read fine (the log had 0
+    // goto/throw failures, only "(no filename)"). Fixed by using the text
+    // openInfoPanelOnce returns (readUrlOnce). The retry covers the remaining
+    // genuine failures (goto error, panel never filled in within 15s).
+    let text = null;
+    for (let attempt = 1; attempt <= 2 && text == null; attempt++) {
+      text = await readUrlOnce(page, url, `[${tag}] ${i + 1}/${urls.length} ${url}${attempt > 1 ? ' (retry)' : ''}`);
     }
-
-    let text;
-    try {
-      await openInfoPanelOnce(page);
-      text = await readPanelText(page);
-    } catch (err) {
-      // openInfoPanelOnce's own 15s-bounded throw ("info panel never
-      // produced filename text") means this URL is STILL unreadable even
-      // via direct navigation -- log and move on to the next one.
-      console.log(`[${tag}] ${i + 1}/${urls.length} ${url} → still unreadable (${err.message || err})`);
+    if (text == null) {
+      unreadableUrls.push(url);
       continue;
     }
     readCount += 1;
     const parsed = parsePanelText(text);
-    console.log(`[${tag}] ${i + 1}/${urls.length} ${url} → ${parsed.filename ?? '(no filename)'}`);
-    if (!parsed.filename) continue;
+    console.log(`[${tag}] ${i + 1}/${urls.length} ${url} → ${parsed.filename}`);
 
     const candidateJobs = matchedJobs.size > 0 ? [...remaining, ...matchedJobs] : remaining;
     const job = findMatchingJob(candidateJobs, parsed);
@@ -3537,7 +3576,7 @@ async function visitPhotoUrls(page, urls, pendingJobs, queue, { dryRun, tag, con
       matchedJobs.add(job);
     }
   }
-  return { remaining, revisitedCount, readCount, matchedCount };
+  return { remaining, revisitedCount, readCount, matchedCount, unreadableUrls };
 }
 
 /**
