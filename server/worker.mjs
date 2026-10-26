@@ -544,7 +544,7 @@ async function searchByQuery(page, query) {
   // to have CHANGED and a tile carrying the new token; collectResultTiles
   // drops tiles of any other token. A non-search URL (token null) keeps the
   // identity-only rule, which is all the fake page can offer.
-  const priorToken = searchTokenOf(page.url());
+  const priorKey = searchKeyOf(page.url());
   const priorIdentities = new Set((await collectResultTiles(page)).map(tileIdentity));
   await page.keyboard.press('Enter');
   // 20s matches the old waitFor's timeout. Shortened under FAST_DELAYS (tests)
@@ -554,9 +554,11 @@ async function searchByQuery(page, query) {
   let sawNewTiles = false;
   while (Date.now() < searchDeadline) {
     const tiles = await collectResultTiles(page);
-    const urlToken = searchTokenOf(page.url());
-    const tokenMoved = urlToken == null || urlToken !== priorToken;
-    if (tokenMoved && tiles.some((tile) => !priorIdentities.has(tileIdentity(tile)) && (urlToken == null || searchTokenOf(tile.href) === urlToken))) {
+    const urlKey = searchKeyOf(page.url());
+    // New query: any tile carrying it will do. SAME query as before (a
+    // re-issued identical search, the EMPTY_SEARCH_RETRIES path): only a tile
+    // identity the pre-Enter snapshot lacked proves the grid re-rendered.
+    if (tiles.some((tile) => (urlKey == null ? !priorIdentities.has(tileIdentity(tile)) : searchKeyOf(tile.href) === urlKey && (urlKey !== priorKey || !priorIdentities.has(tileIdentity(tile)))))) {
       sawNewTiles = true;
       break;
     }
@@ -624,14 +626,31 @@ async function collectTilesBySelector(page, selector, keepTile = () => true) {
 }
 
 /**
- * The search token in a Google Photos URL or tile href: the segment after
- * `/search/` (page `https://photos.google.com/search/<TOKEN>[/top]/photo/<id>`,
- * tile `./search/<TOKEN>/[top/]photo/<id>`). Decoded, because the same token
- * shows up as `=` in one place and `%3D` in the other. null when there is none.
+ * Identity of the search a Google Photos URL or tile href belongs to: the
+ * segment after `/search/` (page `https://photos.google.com/search/<TOKEN>[/top]/photo/<id>`,
+ * tile `./search/<TOKEN>/[top/]photo/<id>`), reduced to its QUERY TEXT.
+ *
+ * LIVE EVIDENCE 2026-10-25: after page.goto('.../search/September%205%2C%202026')
+ * the URL token was ChFTZXB0...MjAyNiibhNuwlzQ= while that grid's tile hrefs
+ * carried ChFTZXB0...MjAyNiiWlcKwlzQ4Aw== -- the same query with different
+ * trailing protobuf fields, so raw-token equality is not safe. Each token is
+ * base64(-url) of a protobuf whose first field is `0x0A <len> <query text>`;
+ * we compare that text. Anything that doesn't parse that way falls back to the
+ * raw (URI-decoded) token, so equal raw tokens still compare equal. null when
+ * there is no /search/ segment at all.
  */
-function searchTokenOf(urlOrHref) {
+export function searchKeyOf(urlOrHref) {
   const m = /\/search\/([^/?#]+)/.exec(urlOrHref || '');
-  return m ? decodeURIComponent(m[1]) : null;
+  if (!m) return null;
+  const raw = decodeURIComponent(m[1]); // `=` vs `%3D`
+  const bytes = Buffer.from(raw.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  // len is a protobuf varint; query texts are far under 128 bytes so one byte
+  // covers it -- a longer one is simply treated as unparseable (raw fallback).
+  if (bytes.length > 2 && bytes[0] === 0x0a && bytes[1] < 0x80 && 2 + bytes[1] <= bytes.length) {
+    const text = bytes.subarray(2, 2 + bytes[1]).toString('utf8');
+    if (text.length > 0 && !text.includes('\ufffd')) return `q:${text}`;
+  }
+  return `raw:${raw}`;
 }
 
 /**
@@ -641,10 +660,10 @@ function searchTokenOf(urlOrHref) {
  * search URL. Tiles with no readable token cannot be judged and are kept.
  */
 async function collectResultTiles(page) {
-  const urlToken = searchTokenOf(page.url());
+  const urlKey = searchKeyOf(page.url());
   return collectTilesBySelector(page, RESULT_LINK_SELECTOR, (href) => {
-    const tileToken = searchTokenOf(href);
-    return urlToken == null || tileToken == null || tileToken === urlToken;
+    const tileKey = searchKeyOf(href);
+    return urlKey == null || tileKey == null || tileKey === urlKey;
   });
 }
 

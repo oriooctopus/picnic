@@ -20,6 +20,7 @@ const WORKER_MJS_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'wor
 process.env.PICNIC_WORKER_FAST_DELAYS = '1';
 const {
   processDateGroup,
+  searchKeyOf,
   runDateGroups,
   assertNoFriction,
   isPageClosedError,
@@ -2048,6 +2049,58 @@ test('date search ignores lingering tiles of the PREVIOUS search (old token in h
     assert.equal(queue.getById(calibrationJob.id).status, 'trashed');
     assert.ok(!page.trashedIdentities.has('./search/OLDTOK=/photo/STALE'), 'the previous search\'s tile must never be opened/trashed');
     assert.equal(page.trashedIdentities.size, 2, 'exactly the two new-token tiles were trashed');
+  });
+});
+
+// 2026-10-25 LIVE EVIDENCE: after goto('.../search/September%205%2C%202026') the
+// URL token and that grid's tile-href token were the same query text with
+// different trailing protobuf fields. Compare the decoded query text.
+test('searchKeyOf: the two real live tokens for "September 5, 2026" compare equal; other queries and non-protobuf tokens do not', () => {
+  const urlTok = 'ChFTZXB0ZW1iZXIgNSwgMjAyNiITChFTZXB0ZW1iZXIgNSwgMjAyNiibhNuwlzQ=';
+  const hrefTok = 'ChFTZXB0ZW1iZXIgNSwgMjAyNiITChFTZXB0ZW1iZXIgNSwgMjAyNiiWlcKwlzQ4Aw==';
+  const urlKey = searchKeyOf(`https://photos.google.com/search/${encodeURIComponent(urlTok)}/photo/X`);
+  assert.equal(urlKey, 'q:September 5, 2026');
+  assert.equal(searchKeyOf(`./search/${hrefTok}/top/photo/Y`), urlKey);
+  assert.equal(searchKeyOf(`./search/${encodeURIComponent(hrefTok)}/photo/Y`), urlKey);
+  // base64url variant of a token (-_ in place of +/) decodes the same
+  const b64 = Buffer.from([0x0a, 0x03, 0xfb, 0xff, 0xfe]).toString('base64'); // not valid utf8 -> raw fallback, but exercises +/ vs -_
+  assert.equal(searchKeyOf(`./search/${b64.replace(/\+/g, '-').replace(/\//g, '_')}/photo/Z`), `raw:${b64.replace(/\+/g, '-').replace(/\//g, '_')}`);
+  const urlSafe = Buffer.from([0x0a, 0x03, ...Buffer.from('>>>')]).toString('base64'); // contains +
+  assert.equal(searchKeyOf(`./search/${urlSafe}/photo/Z`), 'q:>>>');
+  assert.equal(searchKeyOf(`./search/${urlSafe.replace(/\+/g, '-').replace(/\//g, '_')}/photo/Z`), 'q:>>>');
+  // different query text differs; unparseable tokens fall back to raw equality
+  assert.notEqual(searchKeyOf('./search/ChFTZXB0ZW1iZXIgNCwgMjAyNiI=/photo/Y'), urlKey);
+  assert.equal(searchKeyOf('./search/NOTPROTO/photo/1'), searchKeyOf('https://photos.google.com/search/NOTPROTO'));
+  assert.notEqual(searchKeyOf('./search/NOTPROTO/photo/1'), searchKeyOf('./search/OTHER/photo/1'));
+  assert.equal(searchKeyOf('https://photos.google.com/'), null);
+});
+
+// Same live shape through the whole date search: URL token and tile-href token
+// differ in their trailing fields, the stale tile carries another query's token.
+test('date search matches tiles whose href token differs from the URL token only in trailing protobuf fields', async () => {
+  const tok = (query, trailer) => Buffer.concat([Buffer.from([0x0a, query.length]), Buffer.from(query), Buffer.from(trailer)]).toString('base64');
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const { job: calibrationJob } = queue.enqueue(IMG_1441_JOB);
+    const labelA = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
+    const labelCal = 'Photo - Portrait - Aug 5, 2026, 7:31:07 PM';
+    const q = 'August 5, 2026';
+    const page = createFakePage({
+      searchUrlToken: { [q]: tok(q, [0x22, 0x01, 0x41]) },
+      searchRevealDelay: { [q]: 2 },
+      lingeringTiles: { [q]: [{ ariaLabel: 'Photo - Portrait - Aug 4, 2026, 6:54:07 PM', href: `./search/${tok('August 4, 2026', [0x22, 0x01, 0x41])}/photo/STALE` }] },
+      searchResults: {
+        [q]: [
+          { ariaLabel: labelA, href: `./search/${tok(q, [0x22, 0x02, 0x42, 0x43])}/photo/AAA` },
+          { ariaLabel: labelCal, href: `./search/${tok(q, [0x22, 0x02, 0x42, 0x43])}/photo/CAL` },
+        ],
+      },
+      panelTextByLabel: { [q]: { [labelA]: IMG_1433_BLOCK, [labelCal]: IMG_1441_BLOCK } },
+    });
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job, calibrationJob], queue, { dryRun: false });
+    assert.equal(stillUnmatched.length, 0);
+    assert.equal(page.trashedIdentities.size, 2);
+    assert.ok(![...page.trashedIdentities].some((i) => i.includes('STALE')));
   });
 });
 
