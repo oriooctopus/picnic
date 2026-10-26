@@ -2253,6 +2253,59 @@ test('search outage: one healthy canary covers the next empty days, and is re-ch
   });
 });
 
+// 2026-10-25 LIVE (outage #2): Google throttled search after ~20 queries. The
+// +/-1 day attempts made adjacent groups search the same date again and every
+// empty search was re-issued back-to-back. Each date is searched once per run.
+const adjacentGroupsFixture = () => {
+  const dates = ['August 4, 2026', 'August 5, 2026', 'August 6, 2026', 'August 7, 2026'];
+  const searchResults = Object.fromEntries(dates.map((d) => [d, [directTile(0)]]));
+  const panelTextByLabel = Object.fromEntries(dates.map((d) => [d, { [directTile(0).ariaLabel]: blockFor(99) }])); // never matches: every group runs all 3 attempts
+  return { searchResults, panelTextByLabel };
+};
+
+test('search cache: a date shared by adjacent groups (+/-1 day) is searched once per run', async () => {
+  await withTempQueue(async (queue) => {
+    const a = queue.enqueue(jobFor(1)).job; // Aug 5 -> attempts 5, 4, 6
+    const b = queue.enqueue({ ...jobFor(2), creationDate: '2026-08-06T20:00:00.000Z' }).job; // Aug 6 -> attempts 6, 5, 7
+    const page = createFakePage(adjacentGroupsFixture());
+
+    await runDateGroups(page, groupJobsByDate([a, b]), queue, { dryRun: false });
+
+    for (const q of ['August 4, 2026', 'August 5, 2026', 'August 6, 2026', 'August 7, 2026']) {
+      assert.equal(page.searchLog.filter((x) => x === q).length, 1, `${q} searched exactly once`);
+    }
+  });
+});
+
+test('search cache: an empty day is cached only when the canary confirmed search is healthy', async () => {
+  const dates = ['August 4, 2026', 'August 5, 2026', 'August 6, 2026', 'August 7, 2026'];
+  const run = async (seedCanary) => {
+    let page;
+    await withTempQueue(async (queue) => {
+      if (seedCanary) seedTrashedSeptemberJob(queue);
+      const a = queue.enqueue(jobFor(1)).job;
+      const b = queue.enqueue({ ...jobFor(2), creationDate: '2026-08-06T20:00:00.000Z' }).job;
+      page = createFakePage({ searchResults: { ...emptyDays(dates), [CANARY_Q]: [directTile(0)] } });
+      await runDateGroups(page, groupJobsByDate([a, b]), queue, { dryRun: false });
+    });
+    return page.searchLog.filter((q) => q === 'August 5, 2026').length;
+  };
+  // No trashed job -> no canary -> the empty is unproven -> searched again by the Aug 6 group (attempt 5).
+  assert.equal(await run(false), 2 * (EMPTY_SEARCH_RETRIES + 1));
+  // Canary confirmed -> the empty is cached -> searched once (with its retries).
+  assert.equal(await run(true), EMPTY_SEARCH_RETRIES + 1);
+});
+
+test('run summary prints the number of real search submissions (searches=N)', async () => {
+  await withTempQueue(async (queue) => {
+    const job = queue.enqueue(jobFor(1)).job;
+    const page = createFakePage(adjacentGroupsFixture());
+    const lines = await captureLogs(() => runDateGroups(page, groupJobsByDate([job]), queue, { dryRun: false }));
+    assert.equal(page.searchLog.length, 3);
+    assert.ok(lines.some((l) => l.includes('searches=3')), lines.filter((l) => l.includes('summary')).join('|'));
+  });
+});
+
 // 2026-10-25 LIVE EVIDENCE (run 2026-10-10T05-51-20): zero openable timeline
 // tiles used to log EXHAUSTED and mark 50 jobs needs_review ("walked past this
 // job's date") that ARE in Google Photos. A library with photos never has zero

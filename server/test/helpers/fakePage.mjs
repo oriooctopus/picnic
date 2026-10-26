@@ -1197,10 +1197,17 @@ export function createFakePage(config = {}) {
     _gotoGridTile(url) {
       if (page.config.timelineTiles != null) return;
       const query = page.activeQuery;
+      const poolFor = (q) => [
+        ...(page.config.searchResults[q] ?? []),
+        ...(page.config.scrollReveals[q] ?? []).flat(),
+        ...(page.config.lingeringTiles?.[q] ?? []),
+      ];
+      // A search-scoped URL is global, not tied to the page's current query
+      // (the worker's per-run search cache navigates to tiles of EARLIER
+      // searches): the active query's tiles win, every other query's follow.
       const pool = [
-        ...(page.config.searchResults[query] ?? []),
-        ...(page.config.scrollReveals[query] ?? []).flat(),
-        ...(page.config.lingeringTiles?.[query] ?? []),
+        ...poolFor(query),
+        ...Object.keys(page.config.searchResults).filter((q) => q !== query).flatMap(poolFor),
       ].filter((t) => typeof t !== 'string' && t.href);
       const scoped = /^https:\/\/photos\.google\.com\/(search\/.+)$/.exec(url);
       const plain = /^https:\/\/photos\.google\.com\/photo\/([^/?#]+)/.exec(url);

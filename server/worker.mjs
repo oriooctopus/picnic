@@ -508,6 +508,7 @@ async function searchByDate(page, dateStr) {
 }
 
 async function searchByQuery(page, query) {
+  searchesSubmitted += 1;
   await closeAnyOpenPhoto(page);
   const searchBox = page.locator(SEARCH_BOX_SELECTOR).first();
   await searchBox.click();
@@ -2044,13 +2045,40 @@ const CANARY_MAX_CANDIDATES = 3;
  * forever) and dropped as soon as a date returns tiles.
  */
 export function createSearchHealth(queue) {
-  return { queue, healthy: false, emptiesSinceCheck: 0 };
+  // searchCache (direct walk only): date query text -> the tiles that search +
+  // pre-scroll produced ([] for a CONFIRMED-empty day). See processDateGroup.
+  return { queue, healthy: false, emptiesSinceCheck: 0, searchCache: new Map() };
 }
 
+/**
+ * Real search submissions this process has made (every searchByQuery call:
+ * date searches, their empty-result re-issues, canaries, reconcile scans).
+ * Google Photos throttles search after roughly 20 queries (live 2026-10-25,
+ * outage #2), so the run summary prints this to let volume be measured.
+ */
+let searchesSubmitted = 0;
+export const getSearchCount = () => searchesSubmitted;
+
+/**
+ * Seconds-scale waits before the 1st and 2nd re-issue of an empty date search
+ * (FAST_DELAYS: none). Measured basis: the flake these retries exist for (a
+ * date answering 0 tiles minutes after a probe returned 5) is a render race
+ * that clears within seconds, while a throttle lasts minutes and only the
+ * canary can tell the two apart. Back-to-back re-issues (the old behaviour)
+ * gave the race no time to clear and, under a throttle, tripled the query
+ * volume in a burst. 10s then 30s lets a slow render finish yet keeps one
+ * empty day under ~1 minute of extra wall clock. Guessed, not measured.
+ */
+const EMPTY_RETRY_SPACING_MS = [10_000, 30_000];
+
+// Returns true when search is PROVEN healthy (canary had results, or a recent
+// healthy check still covers this day), false when it could not be checked at
+// all (no trashed job to build a canary from); throws SearchOutageError when
+// the canary is empty too.
 async function assertSearchWorks(page, health, dateStr) {
   if (health.healthy && health.emptiesSinceCheck < CANARY_RECHECK_EVERY - 1) {
     health.emptiesSinceCheck += 1;
-    return;
+    return true;
   }
   const months = [];
   const trashed = health.queue
@@ -2066,7 +2094,7 @@ async function assertSearchWorks(page, health, dateStr) {
     // Nothing known to have results (fresh queue): cannot tell outage from an
     // empty day, so the day is judged as before.
     console.log(`[canary] no trashed job to derive a canary query from — judging ${dateStr} as an empty day`);
-    return;
+    return false; // judged, NOT proven: the caller must not cache this empty
   }
   for (const m of months) {
     const q = monthSearchQuery(m);
@@ -2075,7 +2103,7 @@ async function assertSearchWorks(page, health, dateStr) {
       console.log(`[canary] "${q}" has results — ${dateStr} is a genuinely empty day`);
       health.healthy = true;
       health.emptiesSinceCheck = 0;
-      return;
+      return true;
     }
     console.log(`[canary] "${q}" returned no results`);
   }
@@ -2095,20 +2123,46 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
   // exact same query minutes earlier returned 5. Treating that as "no results"
   // wrote three jobs off to needs_review for a date that demonstrably has
   // photos. Re-issue the search before believing an empty day.
-  let query = await searchByDate(page, dateStr);
-  let tiles = await collectResultTiles(page);
-  for (let attempt = 1; attempt <= EMPTY_SEARCH_RETRIES && tiles.length === 0; attempt++) {
-    if (VERBOSE) console.log(`[search ${query}] 0 tiles — re-issuing the search (${attempt}/${EMPTY_SEARCH_RETRIES})`);
-    query = await searchByDate(page, dateStr);
-    tiles = await collectResultTiles(page);
-  }
-  if (VERBOSE) console.log(`[search ${query}] ${tiles.length} visible photo tile(s), exhaustive-fallback strategy: ${walk}`);
-  if (tiles.length === 0) {
-    await assertSearchWorks(page, searchHealth, dateStr);
-    console.log(`[search ${query}] no results after ${EMPTY_SEARCH_RETRIES + 1} attempt(s)`);
+  // Per-run search cache (direct walk only; the click/ArrowRight walks need the
+  // live search page, a cached list gives them nothing to walk). The +/-1 day
+  // attempts make adjacent date groups ask for the same date ("September 2" is
+  // searched by the Sep 1, 2 and 3 groups); live 2026-10-25 a ~20-search run
+  // was throttled into "No results" for every query, so a date is searched ONCE
+  // per run and later groups reuse its tile list. Tiles hold their absolute
+  // search-scoped hrefs, which stay valid after the page moves on.
+  const queryText = formatSearchDate(dateStr);
+  const cacheable = walk === 'direct';
+  const cached = cacheable ? searchHealth.searchCache.get(queryText) : undefined;
+  if (cached !== undefined && cached.length === 0) {
+    // Only ever stored once the canary proved search healthy (below).
+    console.log(`[search ${queryText}] cached confirmed-empty day — not searching again`);
     return { stillUnmatched: remaining };
   }
-  searchHealth.healthy = false; // search answered this time, but may fail on the next day: re-prove before trusting a later empty day
+
+  let query = queryText;
+  let tiles = [];
+  if (cached === undefined) {
+    query = await searchByDate(page, dateStr);
+    tiles = await collectResultTiles(page);
+    for (let attempt = 1; attempt <= EMPTY_SEARCH_RETRIES && tiles.length === 0; attempt++) {
+      if (VERBOSE) console.log(`[search ${query}] 0 tiles — re-issuing the search (${attempt}/${EMPTY_SEARCH_RETRIES})`);
+      await sleep(FAST_DELAYS ? 0 : EMPTY_RETRY_SPACING_MS[attempt - 1] ?? 30_000); // spaced, see EMPTY_RETRY_SPACING_MS
+      query = await searchByDate(page, dateStr);
+      tiles = await collectResultTiles(page);
+    }
+    if (VERBOSE) console.log(`[search ${query}] ${tiles.length} visible photo tile(s), exhaustive-fallback strategy: ${walk}`);
+    if (tiles.length === 0) {
+      const confirmed = await assertSearchWorks(page, searchHealth, dateStr);
+      // An UNPROVEN empty (no canary available) is never cached as "empty": a
+      // later group may legitimately search this date again.
+      if (cacheable && confirmed) searchHealth.searchCache.set(queryText, []);
+      console.log(`[search ${query}] no results after ${EMPTY_SEARCH_RETRIES + 1} attempt(s)`);
+      return { stillUnmatched: remaining };
+    }
+    searchHealth.healthy = false; // search answered this time, but may fail on the next day: re-prove before trusting a later empty day
+  } else {
+    console.log(`[search ${queryText}] cached ${cached.length} tile(s) — not searching again`);
+  }
 
   // Captured BEFORE the aria pre-scroll below runs, so the exhaustive
   // fallback always has a genuine "date's first tile" to start from even if
@@ -2160,12 +2214,17 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
   // and 2/2 on real dates, filename-confirmed) -----------------------------
   // Predict which tiles are worth opening from the grid's own aria-labels
   // (capture time to the SECOND) before falling back to the exhaustive walk.
-  mergeSeen(tiles); // seed `seen` with whatever was on-screen before any pre-scroll happened
-  while (scrollAttempts < MAX_SCROLL_ATTEMPTS_PER_DATE) {
-    await scrollResults(page);
-    scrollAttempts += 1;
-    tiles = await collectResultTiles(page);
-    if (!mergeSeen(tiles)) break; // scroll revealed no label we hadn't already seen -- fully loaded
+  if (cached !== undefined) {
+    mergeSeen(cached); // the earlier search + pre-scroll already produced the full set
+  } else {
+    mergeSeen(tiles); // seed `seen` with whatever was on-screen before any pre-scroll happened
+    while (scrollAttempts < MAX_SCROLL_ATTEMPTS_PER_DATE) {
+      await scrollResults(page);
+      scrollAttempts += 1;
+      tiles = await collectResultTiles(page);
+      if (!mergeSeen(tiles)) break; // scroll revealed no label we hadn't already seen -- fully loaded
+    }
+    if (cacheable) searchHealth.searchCache.set(queryText, [...seen.values()]);
   }
 
   const ariaPlan = planAriaMatches(remaining, [...seen.values()]);
@@ -2289,6 +2348,16 @@ export async function processDateGroup(page, dateStr, unmatchedJobs, queue, { dr
  */
 export async function runDateGroups(page, groupedJobs, queue, { dryRun, walk = 'direct' }) {
   const searchHealth = createSearchHealth(queue);
+  const searchesAtStart = getSearchCount();
+  try {
+    await runDateGroupsLoop(page, groupedJobs, queue, { dryRun, walk, searchHealth });
+  } finally {
+    // Always printed (also on an abort): the search volume is what Google throttles on.
+    console.log(`[run] summary: ${groupedJobs.size} date group(s), searches=${getSearchCount() - searchesAtStart}`);
+  }
+}
+
+async function runDateGroupsLoop(page, groupedJobs, queue, { dryRun, walk, searchHealth }) {
   for (const [dateStr, jobs] of groupedJobs) {
     let unmatched = [...jobs];
     const visitedPhotoIds = new Set(); // direct walk: one photo is visited once across this group's +/-1 day searches
