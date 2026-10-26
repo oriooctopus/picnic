@@ -2013,6 +2013,64 @@ test('runTimelineWalk: a job never matched by the timeline walk becomes needs_re
   });
 });
 
+// 2026-10-25 LIVE EVIDENCE (dry-run log): on "September 4, 2026" the aria fast
+// path planned tiles whose hrefs were the PREVIOUS search's token -- the old
+// virtualized grid re-mounts tiles after the photo-close, producing "new"
+// identities that satisfied searchByQuery's wait. Result tiles must carry the
+// current URL's search token (token raw in the href, %3D-encoded in the URL).
+test('date search ignores lingering tiles of the PREVIOUS search (old token in href) and waits for the new token\'s tiles', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue(IMG_1433_JOB);
+    const { job: calibrationJob } = queue.enqueue(IMG_1441_JOB);
+    const labelA = 'Photo - Portrait - Aug 5, 2026, 6:54:07 PM';
+    const labelCal = 'Photo - Portrait - Aug 5, 2026, 7:31:07 PM';
+    const staleLabel = 'Photo - Portrait - Aug 4, 2026, 6:54:07 PM';
+    const page = createFakePage({
+      searchUrlToken: { 'August 5, 2026': 'NEWTOK=' },
+      // The stale tile is visible from the very first poll after Enter, with an
+      // identity the (empty) pre-Enter snapshot never saw; the real tiles only
+      // show up after 3 grid reads.
+      searchRevealDelay: { 'August 5, 2026': 3 },
+      lingeringTiles: { 'August 5, 2026': [{ ariaLabel: staleLabel, href: './search/OLDTOK=/photo/STALE' }] },
+      searchResults: {
+        'August 5, 2026': [
+          { ariaLabel: labelA, href: './search/NEWTOK=/photo/AAA' },
+          { ariaLabel: labelCal, href: './search/NEWTOK=/photo/CAL' },
+        ],
+      },
+      panelTextByLabel: { 'August 5, 2026': { [labelA]: IMG_1433_BLOCK, [labelCal]: IMG_1441_BLOCK } },
+    });
+
+    const { stillUnmatched } = await processDateGroup(page, '2026-08-05', [job, calibrationJob], queue, { dryRun: false });
+
+    assert.equal(stillUnmatched.length, 0);
+    assert.equal(queue.getById(job.id).status, 'trashed');
+    assert.equal(queue.getById(calibrationJob.id).status, 'trashed');
+    assert.ok(!page.trashedIdentities.has('./search/OLDTOK=/photo/STALE'), 'the previous search\'s tile must never be opened/trashed');
+    assert.equal(page.trashedIdentities.size, 2, 'exactly the two new-token tiles were trashed');
+  });
+});
+
+// 2026-10-25 LIVE EVIDENCE (run 2026-10-10T05-51-20): zero openable timeline
+// tiles used to log EXHAUSTED and mark 50 jobs needs_review ("walked past this
+// job's date") that ARE in Google Photos. A library with photos never has zero
+// tiles -- the page did not load; the jobs must end `error` (retryable).
+test('runTimelineWalk: a timeline with NO openable tile is an error, never a needs_review verdict', async () => {
+  await withTempQueue(async (queue) => {
+    const { job } = queue.enqueue({ filename: 'IMG_LOST3.HEIC', creationDate: '2026-08-20T12:00:00.000Z', pixelWidth: 100, pixelHeight: 100 });
+    const page = createFakePage({ timelineTiles: [], timelinePanelTextByLabel: {} });
+
+    await assert.rejects(
+      runTimelineWalk(page, [queue.getById(job.id)], queue, { dryRun: false }),
+      /timeline never opened a tile/
+    );
+
+    const after = queue.getById(job.id);
+    assert.equal(after.status, 'error');
+    assert.match(after.error, /page did not load/);
+  });
+});
+
 // ============================================================================
 // URL-based advance confirmation (2026-09-23) -- a real run of 7565a5d
 // (106 pending jobs) showed photo 1 and photo 2 both reading back

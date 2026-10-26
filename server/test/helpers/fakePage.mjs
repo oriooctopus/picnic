@@ -152,11 +152,16 @@ function tilesInGrid(page) {
   // new query's tiles, and ticks the countdown down by one -- decoupled from
   // wall-clock time so tests stay fast under FAST_DELAYS, exactly like every
   // other poll-count-based fixture in this file.
+  const query = page.activeQuery;
+  // 2026-10-25 (lingeringTiles): the PREVIOUS search's virtualized tiles stay
+  // mounted / re-mount after Enter, carrying the OLD search token in their href
+  // -- identities the pre-Enter snapshot never saw, served in addition to the
+  // real grid on every read. See config.lingeringTiles in the header.
+  const lingering = page.config.lingeringTiles?.[query] ?? [];
   if (page._staleGridCountdown > 0) {
     page._staleGridCountdown -= 1;
-    return page._staleGridTiles.filter((tile) => !page.trashedIdentities.has(identityOf(tile)));
+    return [...page._staleGridTiles, ...lingering].filter((tile) => !page.trashedIdentities.has(identityOf(tile)));
   }
-  const query = page.activeQuery;
   const base = page.config.searchResults[query] ?? [];
   const reveals = page.config.scrollReveals[query] ?? [];
   const revealedBatches = reveals.slice(0, page.revealedCount).flat();
@@ -164,7 +169,7 @@ function tilesInGrid(page) {
   // alone -- 2026-09-12: two of Oliver's real duplicate library items can
   // share an aria-label (identical EXIF capture second) but have distinct
   // hrefs; trashing one must not make BOTH disappear from the grid.
-  return [...base, ...revealedBatches].filter((tile) => !page.trashedIdentities.has(identityOf(tile)));
+  return [...base, ...revealedBatches, ...lingering].filter((tile) => !page.trashedIdentities.has(identityOf(tile)));
 }
 
 /**
@@ -829,6 +834,8 @@ function advanceToNextTile(page) {
  *   throwOnKeyForLabel?: {label: string, key: string, message?: string}, // 2026-09-25 (round 5): the NEXT press of `key` while `label`'s photo is open throws a generic Error -- models an arbitrary unexpected failure walkTimeline's own per-photo try/catch must recover from, distinct from the confirm-dialog-specific detach above
  *   gotoFailsForUrls?: string[]|Set<string>, // 2026-09-25 (round 9): page.goto() throws (timeout-shaped) for these exact URLs -- see revisitUnreadable's own try/catch in worker.mjs
  *   revisitPanelTextByLabel?: Record<string, string>, // 2026-09-25 (round 9): panel text seen ONLY via a direct page.goto(url) open (the timeline photo URL shape), distinct from timelinePanelTextByLabel -- models a photo reading reliably via direct navigation where the in-viewer walk never resolved it
+ *   searchUrlToken?: Record<string, string>, // 2026-10-25: query -> search token; Enter sets page.url() to https://photos.google.com/search/<encodeURIComponent(token)> (tile hrefs in fixtures carry the RAW token: ./search/<token>/photo/<id>)
+ *   lingeringTiles?: Record<string, Array<{ariaLabel, href}>>, // 2026-10-25: query -> previous search's tiles (old-token hrefs) that stay in the grid / re-mount after Enter, on top of searchResults
  *   searchRevealDelay?: Record<string, number>, // 2026-09-29 (round 13, searchByDate's poll-for-new-identity fix): query -> number of grid reads (tilesInGrid calls, i.e. collectResultTiles polls) after Enter for which the grid keeps showing the PREVIOUS query's tiles rather than this query's -- models the live gap where Google swaps the DOM a beat after Enter (see searchByDate's own header comment for the 1s-sampled probe evidence). Absent/0 means the grid switches instantly, the pre-existing default every other fixture relies on.
  * }}
  */
@@ -962,6 +969,10 @@ export function createFakePage(config = {}) {
           page._staleGridTiles = delay > 0 ? tilesInGrid(page) : [];
           page._staleGridCountdown = delay;
           page.activeQuery = newQuery;
+          // 2026-10-25: a real search navigates to /search/<TOKEN> (token
+          // URL-encoded in the page URL, raw in tile hrefs).
+          const urlToken = page.config.searchUrlToken?.[newQuery];
+          if (urlToken != null) page._url = `https://photos.google.com/search/${encodeURIComponent(urlToken)}`;
           page.openedAriaLabel = null;
           page.openedIdentity = null;
           page.revealedCount = 0;

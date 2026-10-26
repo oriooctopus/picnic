@@ -533,6 +533,18 @@ async function searchByQuery(page, query) {
   // poll after Enter until collectResultTiles reports an identity NOT in
   // that snapshot — a decoy chip or the stale grid can't produce a new
   // identity, only the actual new day's render can.
+  //
+  // LIVE EVIDENCE 2026-10-25 (dry-run log): "new identity" is STILL not
+  // enough. On "September 4, 2026" the aria fast path planned 4 tiles whose
+  // hrefs were ./search/ChFTZXB0ZW1iZXIgNSwg.../photo/... (base64 of
+  // "September 5,"), i.e. the PREVIOUS search's virtualized grid, which
+  // re-mounts tiles around the photo-close and so yields identities absent
+  // from the snapshot. Every result href and the page URL carry the search
+  // token (/search/<TOKEN>), so the wait now also requires the URL's token
+  // to have CHANGED and a tile carrying the new token; collectResultTiles
+  // drops tiles of any other token. A non-search URL (token null) keeps the
+  // identity-only rule, which is all the fake page can offer.
+  const priorToken = searchTokenOf(page.url());
   const priorIdentities = new Set((await collectResultTiles(page)).map(tileIdentity));
   await page.keyboard.press('Enter');
   // 20s matches the old waitFor's timeout. Shortened under FAST_DELAYS (tests)
@@ -542,7 +554,9 @@ async function searchByQuery(page, query) {
   let sawNewTiles = false;
   while (Date.now() < searchDeadline) {
     const tiles = await collectResultTiles(page);
-    if (tiles.some((tile) => !priorIdentities.has(tileIdentity(tile)))) {
+    const urlToken = searchTokenOf(page.url());
+    const tokenMoved = urlToken == null || urlToken !== priorToken;
+    if (tokenMoved && tiles.some((tile) => !priorIdentities.has(tileIdentity(tile)) && (urlToken == null || searchTokenOf(tile.href) === urlToken))) {
       sawNewTiles = true;
       break;
     }
@@ -584,7 +598,7 @@ async function searchByQuery(page, query) {
  * two views is which selector addresses a "tile" at all; filtering (real
  * photo/video tiles only, visible only) and dedup are identical.
  */
-async function collectTilesBySelector(page, selector) {
+async function collectTilesBySelector(page, selector, keepTile = () => true) {
   // ONE round trip for every match: Playwright's locator.all() plus per-link
   // getAttribute/isVisible measured ~5.8s per call live on a 55-link grid vs
   // ~38ms for this evaluate, and this runs many times per day. Visibility
@@ -603,13 +617,35 @@ async function collectTilesBySelector(page, selector) {
   for (const [ariaLabel, href, visible] of raw) {
     if (!isRealPhotoTile(ariaLabel)) continue;
     if (!visible) continue;
+    if (!keepTile(href)) continue;
     withLabels.push({ ariaLabel, href });
   }
   return dedupeTilesByIdentity(withLabels);
 }
 
+/**
+ * The search token in a Google Photos URL or tile href: the segment after
+ * `/search/` (page `https://photos.google.com/search/<TOKEN>[/top]/photo/<id>`,
+ * tile `./search/<TOKEN>/[top/]photo/<id>`). Decoded, because the same token
+ * shows up as `=` in one place and `%3D` in the other. null when there is none.
+ */
+function searchTokenOf(urlOrHref) {
+  const m = /\/search\/([^/?#]+)/.exec(urlOrHref || '');
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+/**
+ * Result tiles of the CURRENT search only. A previous search's virtualized grid
+ * can linger and re-mount (see searchByQuery's 2026-10-25 note); its tiles
+ * carry the old token in their href and are dropped when the page URL is a
+ * search URL. Tiles with no readable token cannot be judged and are kept.
+ */
 async function collectResultTiles(page) {
-  return collectTilesBySelector(page, RESULT_LINK_SELECTOR);
+  const urlToken = searchTokenOf(page.url());
+  return collectTilesBySelector(page, RESULT_LINK_SELECTOR, (href) => {
+    const tileToken = searchTokenOf(href);
+    return urlToken == null || tileToken == null || tileToken === urlToken;
+  });
 }
 
 /**
@@ -2772,9 +2808,13 @@ export async function walkTimeline(page, pendingJobs, queue, { dryRun }) {
     resultSelector: TIMELINE_TILE_SELECTOR,
   });
   if (!tile) {
-    // Nothing on the timeline at all to open -- not a bug, just nothing to walk.
-    console.log(`[timeline] EXHAUSTED: 0 photo(s) visited (nothing on the timeline to open), ${remaining.length} job(s) still unmatched`);
-    return { stillUnmatched: remaining, unreadableUrls: [...unreadableUrls] };
+    // LIVE EVIDENCE 2026-10-25 (run 2026-10-10T05-51-20): this used to log
+    // EXHAUSTED and return every job unmatched, so runTimelineWalk marked 50
+    // jobs needs_review ("walked past this job's date") that ARE in Google
+    // Photos. A library with photos never has zero tiles; this is the page
+    // not loading. Throw so runTimelineWalk's catch marks still-queued jobs
+    // `error` (retryable) instead of writing a false verdict.
+    throw new Error('timeline never opened a tile — page did not load');
   }
 
   // Opened ONCE for the whole walk -- the panel is sticky and stays open as
