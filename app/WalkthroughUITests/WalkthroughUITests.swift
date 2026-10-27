@@ -3101,7 +3101,14 @@ final class WalkthroughUITests: XCTestCase {
 
         // Back to the cropped card. hideSorted is reset off above, so the
         // kept card is still in the filmstrip at its old index.
-        app.descendants(matching: .any)["filmstrip.thumb.\(startPosition - 1)"].firstMatch.tap()
+        // The tap can land while the post-keep advance is still animating, so
+        // retry until the position label shows the cropped card.
+        let cardThumb = app.descendants(matching: .any)["filmstrip.thumb.\(startPosition - 1)"].firstMatch
+        let selectDeadline = Date().addingTimeInterval(15)
+        while Date() < selectDeadline && numerator(fromPosition: position.label) != startPosition {
+            cardThumb.tap()
+            Thread.sleep(forTimeInterval: 1.5)
+        }
         XCTAssertEqual(numerator(fromPosition: position.label), startPosition, "Filmstrip tap should select the cropped card")
         // Re-enabled once the background save finished (a video re-encode can take a while).
         expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: cropButton)
