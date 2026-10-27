@@ -3105,10 +3105,16 @@ final class WalkthroughUITests: XCTestCase {
         // retry until the position label shows the cropped card.
         let cardThumb = app.descendants(matching: .any)["filmstrip.thumb.\(startPosition - 1)"].firstMatch
         let selectDeadline = Date().addingTimeInterval(15)
+        var tapCount = 0
         while Date() < selectDeadline && numerator(fromPosition: position.label) != startPosition {
             cardThumb.tap()
             Thread.sleep(forTimeInterval: 1.5)
+            tapCount += 1
+            if tapCount == 1 { capture("\(prefix)-diag-after-thumb-tap") }
         }
+        let diag = XCTAttachment(string: "thumb \(startPosition - 1) value=\(cardThumb.value ?? "nil") hittable=\(cardThumb.isHittable) position=\(position.label) taps=\(tapCount)\n\(app.debugDescription)")
+        diag.lifetime = .keepAlways
+        add(diag)
         XCTAssertEqual(numerator(fromPosition: position.label), startPosition, "Filmstrip tap should select the cropped card")
         // Re-enabled once the background save finished (a video re-encode can take a while).
         expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: cropButton)
