@@ -3004,6 +3004,9 @@ final class WalkthroughUITests: XCTestCase {
     /// fresh PHAsset fetch, so it only shows the cropped size if the edit
     /// really reached the Photos library (not merely the UI).
     private func runDeckCrop(video: Bool, prefix: String) {
+        // Known hideSorted state (off): the kept card stays in the filmstrip,
+        // so the test can navigate back to it.
+        relaunch(withExtraArguments: ["--reset-hide-sorted"])
         openMyLifeGrid()
         let marchMonth = app.descendants(matching: .any)["monthCard.2026-03"].firstMatch
         XCTAssertTrue(waitForElementByScrolling(marchMonth, initialTimeout: 30),
@@ -3025,13 +3028,18 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(found, "March should have a \(video ? "video" : "photo") card with the crop button")
         expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: cropButton)
         waitForExpectations(timeout: 20)
+        let position = app.descendants(matching: .any)["deck.position"].firstMatch
+        XCTAssertTrue(position.waitForExistence(timeout: 10))
+        let startPosition = numerator(fromPosition: position.label)
+        let total = totalCount(fromPosition: position.label)
+        XCTAssertGreaterThan(startPosition, 0)
 
         cropButton.tap()
         let sizeLabel = app.staticTexts["crop.size"]
         XCTAssertTrue(sizeLabel.waitForExistence(timeout: 10), "Crop editor should open")
         let full = cropSize(sizeLabel.label)
         XCTAssertGreaterThan(full.w, 0, "Size readout should parse, got \(sizeLabel.label)")
-        XCTAssertFalse(app.buttons["crop.save"].isEnabled, "Save must be disabled before any crop")
+        XCTAssertFalse(app.buttons["crop.preview"].isEnabled, "Preview must be disabled before any crop")
         capture("\(prefix)-crop-open")
 
         let handle = app.descendants(matching: .any)["crop.handle.bottomRight"].firstMatch
@@ -3045,33 +3053,75 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertGreaterThan(cropped.w, full.w / 4)
         capture("\(prefix)-crop-dragged")
 
-        app.buttons["crop.save"].tap()
-        // Optimistic: the editor closes before the Photos edit commits.
-        XCTAssertTrue(cropButton.waitForExistence(timeout: 3), "Save must close the crop editor immediately")
+        // Preview shows the cropped result alone; Back returns to the editor
+        // with the box untouched.
+        let croppedLabel = sizeLabel.label
+        let previewButton = app.buttons["crop.preview"]
+        XCTAssertTrue(previewButton.isEnabled, "Preview must be enabled once cropped")
+        previewButton.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["crop.previewImage"].firstMatch.waitForExistence(timeout: 5),
+                      "Preview should show the cropped image")
+        XCTAssertEqual(sizeLabel.label, croppedLabel, "Preview must keep the crop size readout")
+        XCTAssertFalse(handle.exists, "The editor handles must be gone while previewing")
+        capture("\(prefix)-crop-preview")
+        app.buttons["crop.back"].tap()
+        XCTAssertTrue(handle.waitForExistence(timeout: 5), "Back must return to the editor")
+        XCTAssertEqual(sizeLabel.label, croppedLabel, "Back must leave the crop box unchanged")
+        XCTAssertTrue(previewButton.isEnabled)
+        previewButton.tap()
+        XCTAssertTrue(app.buttons["crop.save"].waitForExistence(timeout: 5))
 
-        if let alert = firstSystemAlert(timeout: 30) {
-            let names = alert.buttons.allElementsBoundByIndex.map { $0.label }
-            let modify = alert.buttons["Modify"]
-            if modify.exists { modify.tap() } else { XCTFail("No Modify button in system alert; buttons: \(names)") }
+        app.buttons["crop.save"].tap()
+        // Optimistic: the editor closes before the Photos edit commits, and
+        // the card is kept (swiped right) so the deck moves on.
+        XCTAssertTrue(cropButton.waitForExistence(timeout: 3), "Save must close the crop editor immediately")
+        XCTAssertFalse(sizeLabel.exists, "Save must close the crop editor")
+        let advanceDeadline = Date().addingTimeInterval(5)
+        while Date() < advanceDeadline && numerator(fromPosition: position.label) == startPosition {
+            Thread.sleep(forTimeInterval: 0.25)
         }
+        let expectedAfterKeep = startPosition < total ? startPosition + 1 : startPosition
+        XCTAssertEqual(numerator(fromPosition: position.label), expectedAfterKeep,
+                       "Save must auto-keep the card and advance the deck (was \(startPosition) of \(total))")
+        capture("\(prefix)-crop-kept")
+
+        func tapModifyAlert(_ what: String) {
+            guard let alert = firstSystemAlert(timeout: 30) else { return }
+            let names = alert.buttons.allElementsBoundByIndex.map { $0.label }
+            let note = XCTAttachment(string: "\(what) alert buttons: \(names)")
+            note.lifetime = .keepAlways
+            add(note)
+            if let yes = ["Modify", "Revert", "Allow", "OK"].map({ alert.buttons[$0] }).first(where: { $0.exists }) {
+                yes.tap()
+            } else {
+                XCTFail("No affirmative button in \(what) system alert; buttons: \(names)")
+            }
+        }
+        tapModifyAlert("crop")
+
+        // Back to the cropped card. hideSorted is reset off above, so the
+        // kept card is still in the filmstrip at its old index.
+        app.descendants(matching: .any)["filmstrip.thumb.\(startPosition - 1)"].firstMatch.tap()
+        XCTAssertEqual(numerator(fromPosition: position.label), startPosition, "Filmstrip tap should select the cropped card")
         // Re-enabled once the background save finished (a video re-encode can take a while).
         expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: cropButton)
         waitForExpectations(timeout: 90)
 
-        // The card itself must switch to the cropped picture (the asset
-        // size check below alone passed while the card kept showing the
-        // uncropped photo). Compared by aspect ratio: the card image is a
-        // screen-size rendition, not the full-size pixels.
+        // The card itself must switch to the cropped picture. Compared by
+        // aspect ratio: the card image is a screen-size rendition.
         let imageSize = app.staticTexts["deck.imageSize"]
-        let wantAspect = Double(cropped.w) / Double(cropped.h)
         func cardAspect() -> Double {
             let parts = imageSize.label.split(separator: "x").compactMap { Double($0) }
             return parts.count == 2 && parts[1] > 0 ? parts[0] / parts[1] : -1
         }
-        let cardDeadline = Date().addingTimeInterval(15)
-        while Date() < cardDeadline && abs(cardAspect() - wantAspect) > wantAspect * 0.03 {
-            Thread.sleep(forTimeInterval: 0.5)
+        func waitForCardAspect(_ want: Double) {
+            let deadline = Date().addingTimeInterval(15)
+            while Date() < deadline && abs(cardAspect() - want) > want * 0.03 {
+                Thread.sleep(forTimeInterval: 0.5)
+            }
         }
+        let wantAspect = Double(cropped.w) / Double(cropped.h)
+        waitForCardAspect(wantAspect)
         capture("\(prefix)-crop-saved")
         XCTAssertEqual(cardAspect(), wantAspect, accuracy: wantAspect * 0.03,
                        "The deck card should show the cropped image; card image is \(imageSize.label), crop was \(cropped)")
@@ -3080,11 +3130,32 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(sizeLabel.waitForExistence(timeout: 10))
         let reopened = cropSize(sizeLabel.label)
         capture("\(prefix)-crop-reopened")
-        // ±2px: the readout rounds, the encoder floors (and evens, for video).
+        // The readout comes from a fresh PHAsset fetch: the Photos library
+        // really holds the cropped asset. +-2px: the readout rounds, the
+        // encoder floors (and evens, for video).
         XCTAssertEqual(Double(reopened.w), Double(cropped.w), accuracy: 2,
                        "After saving, the cropped size should be the asset's new full size; got \(sizeLabel.label), expected ~\(cropped)")
         XCTAssertEqual(Double(reopened.h), Double(cropped.h), accuracy: 2,
                        "After saving, the cropped size should be the asset's new full size; got \(sizeLabel.label), expected ~\(cropped)")
+        app.buttons["crop.cancel"].tap()
+
+        // Undo: the keep is reversed AND the crop is reverted in Photos.
+        app.buttons["deck.undo"].tap()
+        tapModifyAlert("undo")
+        expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: cropButton)
+        waitForExpectations(timeout: 90)
+        XCTAssertEqual(numerator(fromPosition: position.label), startPosition, "Undo must bring the card back")
+        waitForCardAspect(Double(full.w) / Double(full.h))
+        capture("\(prefix)-crop-undone")
+        XCTAssertEqual(cardAspect(), Double(full.w) / Double(full.h), accuracy: Double(full.w) / Double(full.h) * 0.03,
+                       "Undo must restore the uncropped picture on the card; card image is \(imageSize.label), original was \(full)")
+        cropButton.tap()
+        XCTAssertTrue(sizeLabel.waitForExistence(timeout: 10))
+        let restored = cropSize(sizeLabel.label)
+        XCTAssertEqual(Double(restored.w), Double(full.w), accuracy: 2,
+                       "Undo must revert the crop in Photos; got \(sizeLabel.label), original was \(full)")
+        XCTAssertEqual(Double(restored.h), Double(full.h), accuracy: 2,
+                       "Undo must revert the crop in Photos; got \(sizeLabel.label), original was \(full)")
         app.buttons["crop.cancel"].tap()
     }
 

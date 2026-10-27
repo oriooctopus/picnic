@@ -66,4 +66,61 @@ final class CropGeometryTests: XCTestCase {
                                        in: CGSize(width: 100, height: 100), even: true)
         XCTAssertEqual(r, CGRect(x: 98, y: 98, width: 2, height: 2))
     }
+
+    // MARK: - CropView.cropped
+
+    /// 40x20 points at scale 1: red | green on top, blue | yellow below
+    /// (each quadrant 20x10).
+    private func quadrantImage() -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: 40, height: 20), format: format).image { ctx in
+            let quads: [(CGRect, UIColor)] = [
+                (CGRect(x: 0, y: 0, width: 20, height: 10), .red),
+                (CGRect(x: 20, y: 0, width: 20, height: 10), .green),
+                (CGRect(x: 0, y: 10, width: 20, height: 10), .blue),
+                (CGRect(x: 20, y: 10, width: 20, height: 10), .yellow),
+            ]
+            for (rect, color) in quads { color.setFill(); ctx.fill(rect) }
+        }
+    }
+
+    /// RGB of the pixel at the image's center.
+    private func centerRGB(_ image: UIImage) -> [Int] {
+        let cg = image.cgImage!
+        var px = [UInt8](repeating: 0, count: 4)
+        let ctx = CGContext(data: &px, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                            space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.draw(cg, in: CGRect(x: -CGFloat(cg.width) / 2, y: -CGFloat(cg.height) / 2,
+                                width: CGFloat(cg.width), height: CGFloat(cg.height)))
+        return px.prefix(3).map(Int.init)
+    }
+
+    func testCroppedPicksTheRequestedQuadrant() {
+        let image = quadrantImage()
+        let expected: [(CGRect, [Int])] = [
+            (CGRect(x: 0, y: 0, width: 0.5, height: 0.5), [255, 0, 0]),
+            (CGRect(x: 0.5, y: 0, width: 0.5, height: 0.5), [0, 255, 0]),
+            (CGRect(x: 0, y: 0.5, width: 0.5, height: 0.5), [0, 0, 255]),
+            (CGRect(x: 0.5, y: 0.5, width: 0.5, height: 0.5), [255, 255, 0]),
+        ]
+        for (rect, rgb) in expected {
+            let out = CropView.cropped(image, to: rect)
+            XCTAssertEqual(out.size, CGSize(width: 20, height: 10))
+            let got = centerRGB(out)
+            for (g, w) in zip(got, rgb) { XCTAssertEqual(g, w, accuracy: 2, "rect \(rect): got \(got), want \(rgb)") }
+        }
+    }
+
+    func testCroppedAppliesImageOrientation() {
+        // The same picture with .right orientation displays rotated 90
+        // degrees clockwise: 20x40, and the old bottom-left (blue) is now
+        // top-left.
+        let rotated = UIImage(cgImage: quadrantImage().cgImage!, scale: 1, orientation: .right)
+        XCTAssertEqual(rotated.size, CGSize(width: 20, height: 40))
+        let out = CropView.cropped(rotated, to: CGRect(x: 0, y: 0, width: 0.5, height: 0.25))
+        XCTAssertEqual(out.size, CGSize(width: 10, height: 10))
+        XCTAssertEqual(centerRGB(out), [0, 0, 255])
+    }
 }

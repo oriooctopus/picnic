@@ -69,6 +69,10 @@ struct DeckView: View {
     @State private var cardResetNonce = 0
     /// Bumped by the hanger button to throw the current card right (keep).
     @State private var cardKeepNonce = 0
+    /// The crop Save whose auto-keep is in flight: set right before
+    /// cardKeepNonce is bumped, consumed by the card's onKeep, so the keep's
+    /// undo entry knows to revert the crop too.
+    @State private var cropForNextKeep: CropUndo?
     @State private var toastDismissTask: Task<Void, Never>?
 
     enum DeckToast: Equatable {
@@ -160,7 +164,10 @@ struct DeckView: View {
                         deleteBlocked: !viewModel.isRemote && imageState.deleteBlocked,
                         onBlockedDelete: { showToast(.deleteBlocked, seconds: 3) },
                         onDelete: { viewModel.markForDelete() },
-                        onKeep: { viewModel.markKept() },
+                        onKeep: {
+                            viewModel.markKept(cropUndo: cropForNextKeep)
+                            cropForNextKeep = nil
+                        },
                         onDismiss: { Task { await exitDeck() } },
                         dragState: dragState,
                         cardAspectRatio: cardAspectRatio,
@@ -800,35 +807,70 @@ struct DeckView: View {
         presentation = .crop(asset, image)
     }
 
-    /// Optimistic like saveTrim: close the editor at once and let the slow
-    /// part (iCloud original download, video re-encode, iOS's "Allow Picnic
-    /// to modify" prompt) run in the background. On success, if the card is
-    /// still on screen, re-run its load (videoRetryNonce is part of the load
-    /// task's id) so the cropped version replaces the old one; PhotoKit
-    /// resolves the asset's current version by identifier.
+    /// Optimistic like saveTrim: close the editor and swipe the card right
+    /// (a photo worth cropping is a keeper, same as the hanger's log-and-keep)
+    /// at once, and let the slow part (iCloud original download, video
+    /// re-encode, iOS's "Allow Picnic to modify" prompt) run in the
+    /// background. The keep's undo entry carries the save, so the deck's undo
+    /// button brings the card back AND reverts the crop.
     private func saveCrop(asset: PHAsset, rect: CGRect) {
         let id = asset.localIdentifier
         presentation = nil
         pendingEditIDs.insert(id)
-        Task {
+        let save = Task { () -> MediaCropper.Restore? in
             defer { pendingEditIDs.remove(id) }
+            let restore: MediaCropper.Restore
             do {
-                try await MediaCropper.crop(asset: asset, to: rect)
+                restore = try await MediaCropper.crop(asset: asset, to: rect)
             } catch let error as PHPhotosError where error.code == .userCancelled {
                 // Declining iOS's modify prompt is a choice, not an error.
-                return
+                return nil
             } catch {
                 cropError = error.localizedDescription
+                return nil
+            }
+            reloadEdited(id)
+            return restore
+        }
+        cropForNextKeep = CropUndo(assetID: id, save: save)
+        cardKeepNonce += 1
+    }
+
+    /// Undo of a crop-keep: the deck already brought the card back; this
+    /// waits for the crop save (it may still be running) and reverts it.
+    private func undoCrop(_ cropUndo: CropUndo) {
+        let id = cropUndo.assetID
+        pendingEditIDs.insert(id)
+        Task {
+            defer { pendingEditIDs.remove(id) }
+            guard let restore = await cropUndo.save.value,
+                  let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject
+            else { return }
+            do {
+                try await MediaCropper.undo(restore, asset: asset)
+            } catch let error as PHPhotosError where error.code == .userCancelled {
+                return
+            } catch {
+                cropError = "Couldn't undo the crop: \(error.localizedDescription)"
                 return
             }
-            // The warm-up cache would otherwise keep serving the uncropped
-            // placeholder for this photo until its 24h purge.
-            WarmThumbCache.purge(assetIDs: [id])
-            if let edited = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject {
-                viewModel.replaceAsset(edited)
-            }
-            if viewModel.currentItem?.id == id { videoRetryNonce += 1 }
+            reloadEdited(id)
         }
+    }
+
+    /// After a crop or its undo: PhotoKit resolves the asset's current
+    /// version by identifier, but the deck's PHAsset object is a snapshot and
+    /// the warm-up cache holds the old picture, so both are refreshed; if the
+    /// card is on screen, re-run its load (videoRetryNonce is part of the
+    /// load task's id).
+    private func reloadEdited(_ id: String) {
+        // The warm-up cache would otherwise keep serving the old placeholder
+        // for this photo until its 24h purge.
+        WarmThumbCache.purge(assetIDs: [id])
+        if let edited = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject {
+            viewModel.replaceAsset(edited)
+        }
+        if viewModel.currentItem?.id == id { videoRetryNonce += 1 }
     }
 
     private func presentLivePhotoIfNeeded(_ item: DeckItem) {
@@ -1032,7 +1074,9 @@ struct DeckView: View {
 
     private var bottomControls: some View {
         HStack {
-            Button { viewModel.undo() } label: {
+            Button {
+                if let cropUndo = viewModel.undo()?.cropUndo { undoCrop(cropUndo) }
+            } label: {
                 Image(systemName: "arrow.uturn.backward")
                     .foregroundStyle(.white)
                     .frame(width: 40, height: 40)

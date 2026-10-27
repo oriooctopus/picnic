@@ -22,6 +22,23 @@ struct UndoEntry {
     }
     let changes: [Change]
     let compareGroupID: String?
+    /// Set when this keep came from a crop Save (DeckView auto-keeps a
+    /// cropped photo), so undoing the keep also reverts the crop in Photos.
+    var cropUndo: CropUndo? = nil
+}
+
+/// A crop Save running (or finished) in the background, carried on the undo
+/// entry of the keep it triggered. `save` yields how to revert the crop, or
+/// nil when nothing was saved (failed, or iOS's modify prompt declined).
+/// Undo awaits it, so an undo tapped before the save finished still reverts.
+final class CropUndo {
+    let assetID: String
+    let save: Task<MediaCropper.Restore?, Never>
+
+    init(assetID: String, save: Task<MediaCropper.Restore?, Never>) {
+        self.assetID = assetID
+        self.save = save
+    }
 }
 
 @MainActor
@@ -552,7 +569,9 @@ final class DeckViewModel: ObservableObject {
         marks[item.id] == .kept
     }
 
-    func markKept() {
+    /// `cropUndo`: the crop Save that triggered this keep, if any; it rides
+    /// on the undo entry so `undo()`'s caller can revert the crop too.
+    func markKept(cropUndo: CropUndo? = nil) {
         guard let item = currentItem else { return }
         // Remote: right swipe is a "keep" decision POSTed to the server (the
         // server CLI downloads kept items later). Nothing local to do.
@@ -562,7 +581,8 @@ final class DeckViewModel: ObservableObject {
         }
         undoStack.append(UndoEntry(
             changes: [.init(assetID: item.id, previousState: sortStore.state(forID: item.id))],
-            compareGroupID: nil
+            compareGroupID: nil,
+            cropUndo: cropUndo
         ))
         sortStore.setState(.kept, forID: item.id, monthKey: monthKey)
         // See markForDelete()'s comment: follow: nil clamps currentIndex
@@ -694,8 +714,11 @@ final class DeckViewModel: ObservableObject {
         }
     }
 
-    func undo() {
-        guard let last = undoStack.popLast() else { return }
+    /// Returns the reversed entry so DeckView can undo side effects that live
+    /// outside SortStore (a crop saved to Photos).
+    @discardableResult
+    func undo() -> UndoEntry? {
+        guard let last = undoStack.popLast() else { return nil }
         // Write every change in the batch to SortStore, THEN refresh exactly
         // once — not once per change. This used to remove(_:) from
         // pendingDeleteIDs first (firing its own didSet recompute against a
@@ -730,6 +753,7 @@ final class DeckViewModel: ObservableObject {
         // change's identity, same idea as the hideSorted-toggle path above
         // (any member of the batch would do; the first is as good as any).
         refresh(follow: last.changes.first?.assetID)
+        return last
     }
 
     /// The single X commit: one PhotoKit batch delete (system confirm dialog

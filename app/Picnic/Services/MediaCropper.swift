@@ -30,12 +30,26 @@ enum MediaCropper {
         }
     }
 
+    /// How to put an asset back the way it was before a crop. Returned by
+    /// `crop` and handed to `undo` when the deck's undo reverses a crop-keep.
+    enum Restore {
+        /// The asset had no edits: PhotoKit's own revert brings back the
+        /// untouched original (a Live Photo gets its motion back too).
+        case revertToOriginal
+        /// The asset was already edited (an earlier crop, an Apple Photos
+        /// filter or trim). Reverting to original would throw those edits
+        /// away, so the pre-crop render is copied aside and written back as
+        /// a new edit instead.
+        case writeBack(URL, isVideo: Bool)
+    }
+
     /// `normalizedRect` is in unit coordinates (0...1) of the asset as it is
     /// DISPLAYED — orientation applied, origin top-left — which is how
     /// CropView's image shows it. It is measured against the asset's current
     /// version, so cropping an already-cropped photo crops the crop.
-    static func crop(asset: PHAsset, to normalizedRect: CGRect) async throws {
+    static func crop(asset: PHAsset, to normalizedRect: CGRect) async throws -> Restore {
         let input = try await contentEditingInput(for: asset)
+        let restore = try restorePoint(for: asset, input: input)
         let output = PHContentEditingOutput(contentEditingInput: input)
         output.adjustmentData = PHAdjustmentData(
             formatIdentifier: formatIdentifier, formatVersion: "1",
@@ -44,14 +58,74 @@ enum MediaCropper {
                 "w": normalizedRect.width, "h": normalizedRect.height,
             ])
         )
-        if asset.mediaType == .video {
-            try await renderVideo(input: input, rect: normalizedRect, to: output.renderedContentURL)
+        do {
+            if asset.mediaType == .video {
+                try await renderVideo(input: input, rect: normalizedRect, to: output.renderedContentURL)
+            } else {
+                guard let source = input.fullSizeImageURL else { throw CropError.unreadableImage }
+                try renderPhoto(source: source, rect: normalizedRect, to: output.renderedContentURL)
+            }
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest(for: asset).contentEditingOutput = output
+            }
+        } catch {
+            // No crop was saved, so the copied-aside render will never be used.
+            if case .writeBack(let url, _) = restore { try? FileManager.default.removeItem(at: url) }
+            throw error
+        }
+        return restore
+    }
+
+    /// Reverses a crop saved by `crop`. Like the crop itself this is a
+    /// PhotoKit change, so iOS may ask again to allow the modification.
+    static func undo(_ restore: Restore, asset: PHAsset) async throws {
+        switch restore {
+        case .revertToOriginal:
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest(for: asset).revertAssetContentToOriginal()
+            }
+        case .writeBack(let saved, let isVideo):
+            defer { try? FileManager.default.removeItem(at: saved) }
+            let input = try await contentEditingInput(for: asset)
+            let output = PHContentEditingOutput(contentEditingInput: input)
+            output.adjustmentData = PHAdjustmentData(
+                formatIdentifier: formatIdentifier, formatVersion: "1", data: Data("undo".utf8)
+            )
+            if isVideo {
+                try FileManager.default.copyItem(at: saved, to: output.renderedContentURL)
+            } else {
+                // Through renderPhoto rather than a plain copy: PhotoKit
+                // requires JPEG here and an earlier edit may be HEIC.
+                try renderPhoto(source: saved, rect: CGRect(x: 0, y: 0, width: 1, height: 1), to: output.renderedContentURL)
+            }
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest(for: asset).contentEditingOutput = output
+            }
+        }
+    }
+
+    /// Decides how `undo` will restore this asset, BEFORE the crop replaces
+    /// its current render. An asset with no adjustment resource is unedited.
+    /// For an edited one, `input` (requested without canHandleAdjustmentData)
+    /// hands back the current render as its base, which is exactly the
+    /// pre-crop picture; it is copied to tmp because the input's own files
+    /// are not guaranteed to outlive it.
+    private static func restorePoint(for asset: PHAsset, input: PHContentEditingInput) throws -> Restore {
+        let edited = PHAssetResource.assetResources(for: asset).contains { $0.type == .adjustmentData }
+        guard edited else { return .revertToOriginal }
+        let isVideo = asset.mediaType == .video
+        let source: URL
+        if isVideo {
+            guard let url = (input.audiovisualAsset as? AVURLAsset)?.url else { throw CropError.noEditingInput }
+            source = url
         } else {
-            try renderPhoto(input: input, rect: normalizedRect, to: output.renderedContentURL)
+            guard let url = input.fullSizeImageURL else { throw CropError.unreadableImage }
+            source = url
         }
-        try await PHPhotoLibrary.shared().performChanges {
-            PHAssetChangeRequest(for: asset).contentEditingOutput = output
-        }
+        let copy = FileManager.default.temporaryDirectory
+            .appendingPathComponent("crop-undo-\(UUID().uuidString).\(source.pathExtension)")
+        try FileManager.default.copyItem(at: source, to: copy)
+        return .writeBack(copy, isVideo: isVideo)
     }
 
     /// Unit rect → whole-pixel rect inside `size` (top-left origin). `even`
@@ -76,9 +150,8 @@ enum MediaCropper {
     ///
     /// A Live Photo saved this way becomes a still: keeping the motion would
     /// mean cropping its paired video too (PHLivePhotoEditingContext).
-    private static func renderPhoto(input: PHContentEditingInput, rect: CGRect, to url: URL) throws {
-        guard let source = input.fullSizeImageURL,
-              let image = CIImage(contentsOf: source, options: [.applyOrientationProperty: true]) else {
+    private static func renderPhoto(source: URL, rect: CGRect, to url: URL) throws {
+        guard let image = CIImage(contentsOf: source, options: [.applyOrientationProperty: true]) else {
             throw CropError.unreadableImage
         }
         let extent = image.extent

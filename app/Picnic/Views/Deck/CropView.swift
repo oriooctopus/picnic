@@ -52,6 +52,9 @@ struct CropView: View {
     let onSave: (CGRect) -> Void
 
     @State private var rect = CropGeometry.full
+    /// Non-nil while the Preview step shows the result alone; Back returns
+    /// to the editor with the box unchanged.
+    @State private var preview: UIImage?
     /// The rect when the current drag began: gestures report translation from
     /// their start, so applying it to the live rect would compound per frame.
     @State private var dragStart: CGRect?
@@ -64,31 +67,65 @@ struct CropView: View {
     var body: some View {
         VStack(spacing: 0) {
             GeometryReader { geo in
-                let fit = AVMakeRect(aspectRatio: image.size,
-                                     insideRect: CGRect(origin: .zero, size: geo.size).insetBy(dx: 24, dy: 24))
-                editor(fit: fit)
+                let area = CGRect(origin: .zero, size: geo.size).insetBy(dx: 24, dy: 24)
+                if let preview {
+                    Image(uiImage: preview)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: area.width, height: area.height)
+                        .position(x: area.midX, y: area.midY)
+                        .accessibilityIdentifier("crop.previewImage")
+                } else {
+                    editor(fit: AVMakeRect(aspectRatio: image.size, insideRect: area))
+                }
             }
             HStack {
-                Button("Cancel", action: onCancel)
-                    .foregroundStyle(.white)
-                    .accessibilityIdentifier("crop.cancel")
+                if preview == nil {
+                    Button("Cancel", action: onCancel)
+                        .foregroundStyle(.white)
+                        .accessibilityIdentifier("crop.cancel")
+                } else {
+                    Button("Back") { preview = nil }
+                        .foregroundStyle(.white)
+                        .accessibilityIdentifier("crop.back")
+                }
                 Spacer()
                 Text(sizeLabel)
                     .font(.system(size: 14, weight: .semibold).monospacedDigit())
                     .foregroundStyle(.white.opacity(0.7))
                     .accessibilityIdentifier("crop.size")
                 Spacer()
-                Button("Save") { onSave(rect) }
-                    .fontWeight(.bold)
-                    .foregroundStyle(.yellow.opacity(CropGeometry.isUncropped(rect) ? 0.35 : 1))
-                    .disabled(CropGeometry.isUncropped(rect))
-                    .accessibilityIdentifier("crop.save")
+                if preview == nil {
+                    Button("Preview") { preview = Self.cropped(image, to: rect) }
+                        .fontWeight(.bold)
+                        .foregroundStyle(.yellow.opacity(CropGeometry.isUncropped(rect) ? 0.35 : 1))
+                        .disabled(CropGeometry.isUncropped(rect))
+                        .accessibilityIdentifier("crop.preview")
+                } else {
+                    Button("Save") { onSave(rect) }
+                        .fontWeight(.bold)
+                        .foregroundStyle(.yellow)
+                        .accessibilityIdentifier("crop.save")
+                }
             }
             .font(.system(size: 17))
             .padding(.horizontal, 28)
             .padding(.vertical, 20)
         }
         .background(Color.black.ignoresSafeArea())
+    }
+
+    /// The canvas image cut to the unit rect: what Save will produce, at the
+    /// canvas's (screen-size) resolution. Drawn through UIGraphicsImageRenderer
+    /// rather than CGImage.cropping so the UIImage's orientation is applied
+    /// first, matching the display-space rect the editor measured.
+    static func cropped(_ image: UIImage, to rect: CGRect) -> UIImage {
+        let size = CGSize(width: rect.width * image.size.width, height: rect.height * image.size.height)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            image.draw(at: CGPoint(x: -rect.minX * image.size.width, y: -rect.minY * image.size.height))
+        }
     }
 
     /// "1200 × 900": what Save will produce, in pixels.
