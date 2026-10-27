@@ -3106,6 +3106,15 @@ final class WalkthroughUITests: XCTestCase {
         let cardThumb = app.descendants(matching: .any)["filmstrip.thumb.\(startPosition - 1)"].firstMatch
         let selectDeadline = Date().addingTimeInterval(15)
         var tapCount = 0
+        var probe = ""
+        for i in [0, 1, 3] {
+            app.descendants(matching: .any)["filmstrip.thumb.\(i)"].firstMatch.tap()
+            Thread.sleep(forTimeInterval: 1.5)
+            probe += "tap thumb \(i) -> \(position.label); "
+        }
+        let probeNote = XCTAttachment(string: "PROBE " + probe)
+        probeNote.lifetime = .keepAlways
+        add(probeNote)
         while Date() < selectDeadline && numerator(fromPosition: position.label) != startPosition {
             cardThumb.tap()
             Thread.sleep(forTimeInterval: 1.5)
