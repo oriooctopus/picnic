@@ -840,7 +840,6 @@ struct DeckView: View {
     /// waits for the crop save (it may still be running) and reverts it.
     private func undoCrop(_ cropUndo: CropUndo) {
         let id = cropUndo.assetID
-        return // MUTATION: undo no-op
         pendingEditIDs.insert(id)
         Task {
             defer { pendingEditIDs.remove(id) }
