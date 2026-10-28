@@ -2939,10 +2939,26 @@ final class WalkthroughUITests: XCTestCase {
                        .withOffset(CGVector(dx: -150, dy: 0)),
                    withVelocity: .slow,
                    thenHoldForDuration: 0.3)
-        let shortened = trimLengthSeconds(lengthLabel.label)
-        XCTAssertLessThan(shortened, 1.9, "Dragging the end handle left must shorten the kept length, got \(lengthLabel.label)")
-        XCTAssertGreaterThan(shortened, 0.4)
+        let swept = trimLengthSeconds(lengthLabel.label)
+        XCTAssertLessThan(swept, 1.9, "Dragging the end handle left must shorten the kept length, got \(lengthLabel.label)")
+        XCTAssertGreaterThan(swept, 0.4)
         capture("51-video-trim-dragged")
+
+        // Resting on a handle zooms the strip (2s clip -> 1s window, 2x), so
+        // the same finger travel moves the handle about half as far. 80pt on
+        // the ~320pt track is ~0.5s unzoomed, ~0.25s zoomed. The 0.8s press
+        // clears the 0.35s hold delay before the drag starts.
+        endHandle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.8,
+                   thenDragTo: endHandle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                       .withOffset(CGVector(dx: 80, dy: 0)),
+                   withVelocity: .slow,
+                   thenHoldForDuration: 0.3)
+        let shortened = trimLengthSeconds(lengthLabel.label)
+        let zoomedMove = shortened - swept
+        XCTAssertGreaterThan(zoomedMove, 0.1, "held drag right must still lengthen the clip; \(swept) -> \(shortened)")
+        XCTAssertLessThan(zoomedMove, 0.4, "held drag must move at the zoomed (finer) rate; \(swept) -> \(shortened)")
+        capture("51-video-trim-zoomed-drag")
 
         // Tapping the strip between the handles seeks; it must not move a handle.
         let strip = app.descendants(matching: .any)["trim.strip"].firstMatch
