@@ -3032,8 +3032,10 @@ final class WalkthroughUITests: XCTestCase {
         let index = try XCTUnwrap(videoIndex, "One of March's first cards is a video")
         let position = app.staticTexts["deck.position"]
         XCTAssertTrue(position.waitForExistence(timeout: 5))
-        let total = position.label.components(separatedBy: " OF ").last ?? ""
-        XCTAssertEqual(position.label, "\(index + 1) OF \(total)")
+        // Filmstrip thumb order is not deck position order, so read it.
+        let parts = position.label.components(separatedBy: " OF ")
+        let current = try XCTUnwrap(Int(parts.first ?? ""), "Unparseable position \(position.label)")
+        let total = parts.last ?? ""
 
         trimButton.tap()
         let lengthLabel = app.staticTexts["trim.length"]
@@ -3061,7 +3063,7 @@ final class WalkthroughUITests: XCTestCase {
         skip.tap()
 
         // Moved on without sorting: same deck size, next position, no saving row.
-        expectation(for: NSPredicate(format: "label == %@", "\(index + 2) OF \(total)"), evaluatedWith: position)
+        expectation(for: NSPredicate(format: "label == %@", "\(current + 1) OF \(total)"), evaluatedWith: position)
         waitForExpectations(timeout: 5)
         XCTAssertFalse(pendingRow.exists, "The next card has no save running")
         XCTAssertTrue(app.buttons["deck.undo"].exists && !app.buttons["deck.undo"].isEnabled,
