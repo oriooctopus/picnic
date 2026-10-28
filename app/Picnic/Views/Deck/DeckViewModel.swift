@@ -650,6 +650,12 @@ final class DeckViewModel: ObservableObject {
         return toMark.count
     }
 
+    /// Moves to the next card without sorting this one, so it stays
+    /// unsorted and comes back the next time the deck opens.
+    func skip() {
+        advance()
+    }
+
     /// Shared tail of a local swipe: advance explicitly when the swiped card
     /// is still in the deck; otherwise hideSorted already slid the next card
     /// into `currentIndex` without `advance()` running, so the offline video

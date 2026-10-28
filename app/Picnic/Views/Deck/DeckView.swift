@@ -59,6 +59,9 @@ struct DeckView: View {
     /// rect against the OLD version and then apply it to the freshly edited
     /// asset (a trim timeline that got shorter, a frame that got smaller).
     @State private var pendingEditIDs: Set<String> = []
+    /// The subset of pendingEditIDs that are trims: while the current card is
+    /// one, the action row gives way to a "Saving trim" row with Skip.
+    @State private var pendingTrimIDs: Set<String> = []
     @State private var cropError: String?
     /// Transient note at the top of the deck: "Logged to Outfits | Review now",
     /// or the short failure note when Overland won't open.
@@ -227,7 +230,11 @@ struct DeckView: View {
                         .padding(.top, 10)
                 }
 
-                bottomActionsRow
+                if let item = viewModel.currentItem, pendingTrimIDs.contains(item.id) {
+                    trimPendingRow
+                } else {
+                    bottomActionsRow
+                }
             }
             positionAndFilmstrip
             bottomControls
@@ -732,10 +739,14 @@ struct DeckView: View {
         videoController.setLoopWindow(window)
         isTrimming = false
         pendingEditIDs.insert(id)
+        pendingTrimIDs.insert(id)
         Task {
             // Removed only after the reload below, so the scissors never
             // re-enable on the stale untrimmed player.
-            defer { pendingEditIDs.remove(id) }
+            defer {
+                pendingEditIDs.remove(id)
+                pendingTrimIDs.remove(id)
+            }
             #if DEBUG
             // `--slow-trim-save` (test51): on the simulator the whole commit
             // finishes in under a second, so without this a blocking save
@@ -928,6 +939,30 @@ struct DeckView: View {
         } else {
             localActionsRow
         }
+    }
+
+    /// Replaces the action row while the current video's trim is saving.
+    /// Skip moves on without sorting it; the save keeps running, and the
+    /// card comes back trimmed the next time the deck opens.
+    private var trimPendingRow: some View {
+        HStack(spacing: 10) {
+            ProgressView().tint(.white)
+            Text("Saving trim…")
+                .foregroundStyle(.white.opacity(0.8))
+            Spacer()
+            Button("Skip") { viewModel.skip() }
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(Color(white: 0.2)))
+                .accessibilityIdentifier("deck.trimSkip")
+        }
+        .frame(height: 22)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 16)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("deck.trimPending")
     }
 
     private var localActionsRow: some View {

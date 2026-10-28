@@ -2970,12 +2970,14 @@ final class WalkthroughUITests: XCTestCase {
 
         app.buttons["trim.save"].tap()
 
-        // Optimistic save: the bar closes (action row with the scissors back)
-        // at once, BEFORE iOS's modify prompt is even answered. The old
+        // Optimistic save: the bar closes at once, BEFORE iOS's modify
+        // prompt is even answered, onto the "Saving trim" row. The old
         // blocking save kept the bar open on a spinner until the edit
         // committed, so this fails against it.
-        XCTAssertTrue(trimButton.waitForExistence(timeout: 2),
-                      "Save must close the trim bar immediately, before the Photos edit commits")
+        let pendingRow = app.descendants(matching: .any)["deck.trimPending"].firstMatch
+        XCTAssertTrue(pendingRow.waitForExistence(timeout: 2),
+                      "Save must close the trim bar immediately onto the saving row, before the Photos edit commits")
+        XCTAssertFalse(lengthLabel.exists, "Trim bar must be closed while the save runs")
         capture("51-video-trim-closed-optimistically")
 
         // iOS asks "Allow Picnic to modify this video?"
@@ -2990,10 +2992,11 @@ final class WalkthroughUITests: XCTestCase {
             }
         }
 
-        // The scissors stay disabled while the save runs in the background
-        // and re-enable once the edited asset is reloaded into the player.
-        expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: trimButton)
+        // The saving row holds until the edited asset is reloaded into the
+        // player, then the action row (scissors) comes back.
+        expectation(for: NSPredicate(format: "exists == true AND isEnabled == true"), evaluatedWith: trimButton)
         waitForExpectations(timeout: 60)
+        XCTAssertFalse(pendingRow.exists, "Saving row must go once the save finishes")
 
         trimButton.tap()
         XCTAssertTrue(lengthLabel.waitForExistence(timeout: 10))
@@ -3007,6 +3010,86 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(reopened, shortened, accuracy: 0.1,
                        "After saving, the edited (shorter) clip should be the new full length; got \(lengthLabel.label)")
     }
+    /// Skip on the "Saving trim" row moves to the next card while the save
+    /// keeps running; going back to the skipped video later shows it trimmed.
+    func test56DeckTrimSkipMovesOnAndSaveFinishes() throws {
+        relaunch(withExtraArguments: ["--slow-trim-save", "--reset-hide-sorted"])
+        openMyLifeGrid()
+        let marchMonth = app.descendants(matching: .any)["monthCard.2026-03"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(marchMonth, initialTimeout: 30),
+                      "Seeded month 2026-03 (photo + two videos) should appear in the grid")
+        marchMonth.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["deck.card"].firstMatch.waitForExistence(timeout: 20))
+
+        let trimButton = app.buttons["deck.trim"]
+        var videoIndex: Int?
+        for index in 0..<3 {
+            let thumb = app.descendants(matching: .any)["filmstrip.thumb.\(index)"].firstMatch
+            guard thumb.waitForExistence(timeout: 10) else { continue }
+            thumb.tap()
+            if trimButton.waitForExistence(timeout: 4) { videoIndex = index; break }
+        }
+        let index = try XCTUnwrap(videoIndex, "One of March's first cards is a video")
+        let position = app.staticTexts["deck.position"]
+        XCTAssertTrue(position.waitForExistence(timeout: 5))
+        let total = position.label.components(separatedBy: " OF ").last ?? ""
+        XCTAssertEqual(position.label, "\(index + 1) OF \(total)")
+
+        trimButton.tap()
+        let lengthLabel = app.staticTexts["trim.length"]
+        XCTAssertTrue(lengthLabel.waitForExistence(timeout: 10), "Trim bar should open")
+        expectation(for: NSPredicate(format: "label != %@", "0:00.0"), evaluatedWith: lengthLabel)
+        waitForExpectations(timeout: 15)
+        let full = trimLengthSeconds(lengthLabel.label)
+        let endHandle = app.descendants(matching: .any)["trim.endHandle"].firstMatch
+        endHandle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.2,
+                   thenDragTo: endHandle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                       .withOffset(CGVector(dx: -150, dy: 0)),
+                   withVelocity: .slow,
+                   thenHoldForDuration: 0.3)
+        let kept = trimLengthSeconds(lengthLabel.label)
+        XCTAssertLessThan(kept, full - 0.2, "Dragging the end handle left must shorten the clip")
+        app.buttons["trim.save"].tap()
+
+        let pendingRow = app.descendants(matching: .any)["deck.trimPending"].firstMatch
+        XCTAssertTrue(pendingRow.waitForExistence(timeout: 2), "Save must show the saving row")
+        XCTAssertTrue(app.staticTexts["Saving trim…"].exists)
+        capture("56-trim-saving-row")
+        let skip = app.buttons["deck.trimSkip"]
+        XCTAssertTrue(skip.exists, "Saving row must offer Skip")
+        skip.tap()
+
+        // Moved on without sorting: same deck size, next position, no saving row.
+        expectation(for: NSPredicate(format: "label == %@", "\(index + 2) OF \(total)"), evaluatedWith: position)
+        waitForExpectations(timeout: 5)
+        XCTAssertFalse(pendingRow.exists, "The next card has no save running")
+        XCTAssertTrue(app.buttons["deck.undo"].exists && !app.buttons["deck.undo"].isEnabled,
+                      "Skip is not a decision, so there is nothing to undo")
+        capture("56-trim-skipped")
+
+        // The save keeps running after Skip: iOS still asks to modify.
+        if let alert = firstSystemAlert(timeout: 20) {
+            let modify = alert.buttons["Modify"]
+            if modify.exists { modify.tap() } else {
+                XCTFail("No Modify button in system alert; buttons: \(alert.buttons.allElementsBoundByIndex.map { $0.label })")
+            }
+        }
+
+        // Back on the skipped video, once the save is done it plays the trimmed clip.
+        app.descendants(matching: .any)["filmstrip.thumb.\(index)"].firstMatch.tap()
+        expectation(for: NSPredicate(format: "exists == true AND isEnabled == true"), evaluatedWith: trimButton)
+        waitForExpectations(timeout: 60)
+        trimButton.tap()
+        XCTAssertTrue(lengthLabel.waitForExistence(timeout: 10))
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline && abs(trimLengthSeconds(lengthLabel.label) - kept) > 0.1 {
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        XCTAssertEqual(trimLengthSeconds(lengthLabel.label), kept, accuracy: 0.1,
+                       "The skipped video must come back trimmed; got \(lengthLabel.label)")
+    }
+
     /// "600 × 800" → (600, 800).
     private func cropSize(_ label: String) -> (w: Int, h: Int) {
         let parts = label.components(separatedBy: " × ").compactMap { Int($0) }
