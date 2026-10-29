@@ -278,7 +278,7 @@ struct VideoTrimBar: View {
     /// are guesses at "comfortably finer", not measured.
     static func zoomSpan(duration: Double) -> Double? {
         let span = max(duration / 5, 1)
-        return span < duration ? nil : nil
+        return span < duration ? span : nil
     }
 
     /// The zoomed window around `anchor`, placed so `anchor` sits at the same
