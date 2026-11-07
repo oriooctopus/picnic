@@ -48,7 +48,7 @@ final class DeckPrefetcherTests: XCTestCase {
         let r = DeckPrefetcher.remoteRadius
         XCTAssertGreaterThanOrEqual(r, 100, "the point of the remote window is a large predownload")
         XCTAssertGreaterThan(RemoteDisplayCache.maxFiles, r, "cache must hold the whole window or it evicts fresh downloads")
-        let items = remoteItems(1000, noDisplay: [502], videos: [505])
+        let items = remoteItems(2000, noDisplay: [502], videos: [505])
         let wanted = keys(DeckPrefetcher.remoteWanted(items: items, currentIndex: 500))
         XCTAssertEqual(wanted.first, "k501", "nearest card first")
         XCTAssertFalse(wanted.contains("k502"), "no display rendition yet: nothing to fetch")

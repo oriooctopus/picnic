@@ -6,7 +6,7 @@ import UIKit
 /// served from PhotoKit's local store instead of waiting on the network.
 ///
 /// Results are discarded on purpose: holding even the 15-photo old window of
-/// screen-size bitmaps would cost hundreds of MB, and the 150-photo window
+/// screen-size bitmaps would cost hundreds of MB, and the 750-photo window
 /// (`forwardRadius`) would be far worse. The download into PhotoKit's store is
 /// the whole point, and offline-only mode relies on it staying there.
 /// Same targetSize/contentMode as `ThumbnailLoader.imageUpdates` so the cached
@@ -15,38 +15,40 @@ import UIKit
 /// Remote-album photo cards use a forward-only window (`remoteRadius`) and the same recenter /
 /// cancel-out-of-window / refill loop, but the unit of work is "download the
 /// server's card-size JPEG into RemoteDisplayCache's disk cache" (encoded
-/// bytes, no decode, so the 150-card window (`remoteRadius`) costs ~95 MB of disk, not
+/// bytes, no decode, so the 750-card window (`remoteRadius`) costs ~475 MB of disk, not
 /// hundreds of MB of RAM). Remote videos are deliberately not prefetched:
 /// one shared player streams the current video only.
 @MainActor
 final class DeckPrefetcher {
     /// How many UNSORTED cards ahead of the current one are downloaded from
-    /// iCloud. 150 is the user's ask ("always 150 available swipes", for
-    /// offline-only mode). Affordable because the results are discarded: it is
-    /// PhotoKit's on-disk store that grows, not RAM. Counts unsorted items, not
-    /// raw deck slots, so sorted photos never eat into the 150.
-    static let forwardRadius = 150
+    /// iCloud. 750 (5x the original 150) so a whole month (the prefetch list
+    /// is one month's unsorted items, ~200-300 for a busy month) is swipeable
+    /// offline. Affordable because the results are discarded: it is PhotoKit's
+    /// on-disk store that grows, not RAM. Counts unsorted items, not raw deck
+    /// slots, so sorted photos never eat into the window.
+    static let forwardRadius = 750
     /// Cards behind the current one. Swiping back is rare and the user already
     /// saw those, so this stays small. Was the symmetric radius 15 before.
     static let behindRadius = 15
-    /// Raised 2 -> 4 to get through a 150-photo window in reasonable time.
-    /// A guess, not a measured iCloud throughput; lower it if the on-card load
-    /// of the CURRENT photo starts to stall behind the prefetch queue.
-    static let maxInFlight = 4
+    /// Raised 2 -> 4 -> 6 to get through the 750-photo window in reasonable
+    /// time. A guess, not a measured iCloud throughput; lower it if the on-card
+    /// load of the CURRENT photo starts to stall behind the prefetch queue.
+    static let maxInFlight = 6
     /// Remote downloads are small HTTP GETs from the tailnet box, not iCloud
-    /// pulls, so a few in parallel is fine. A guess, not a measurement.
-    static let remoteMaxInFlight = 4
+    /// pulls, so several in parallel is fine. Raised 4 -> 8 with the 750
+    /// window. A guess, not a measurement.
+    static let remoteMaxInFlight = 8
     /// How many cards AHEAD of the current one remote display images are
     /// predownloaded. Forward only: the user sorts through the album in order,
     /// and cards already passed stay in RemoteDisplayCache (LRU) until evicted,
     /// so swiping back needs no prefetch. Wide because the unit is ~0.6 MB of
     /// encoded JPEG on disk (measured avg 633 KB over the 1604-image album,
-    /// never decoded, see RemoteDisplayCache), so 150 is ~95 MB. It must be wide
+    /// never decoded, see RemoteDisplayCache), so 750 is ~475 MB. It must be wide
     /// enough that a quick swipe never outruns it and shows the soft 512px
     /// thumb. A judgement call, not a measurement. RemoteDisplayCache.maxFiles
     /// must stay above remoteRadius with room for history or it evicts what it
     /// just downloaded.
-    static let remoteRadius = 150
+    static let remoteRadius = 750
 
     /// Downloads one display image into the disk cache. Injectable so a unit
     /// test can observe requests and cancellation without a network.

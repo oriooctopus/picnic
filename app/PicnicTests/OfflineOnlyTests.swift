@@ -142,27 +142,27 @@ final class OfflineOnlyTests: XCTestCase {
         XCTAssertEqual(source.anchor, 2, "anchor is the current card's index in the unsorted list")
     }
 
-    func testPrefetchWindowIsNext150UnsortedSkippingSorted() async throws {
-        // 400 items, every 10th already sorted.
-        let sorted = Set(stride(from: 0, to: 400, by: 10))
-        let vm = try await makeDeck(count: 400, decided: sorted)
+    func testPrefetchWindowIsNext750UnsortedSkippingSorted() async throws {
+        // 1000 items, every 10th already sorted.
+        let sorted = Set(stride(from: 0, to: 1000, by: 10))
+        let vm = try await makeDeck(count: 1000, decided: sorted)
         let source = vm.prefetchSource
-        XCTAssertEqual(source.items.count, 400 - sorted.count)
+        XCTAssertEqual(source.items.count, 1000 - sorted.count)
 
         let wanted = DeckPrefetcher.remoteWanted(items: source.items, currentIndex: source.anchor)
             .compactMap { $0.host }
-        XCTAssertEqual(wanted.count, 150, "the user's ask: always 150 swipes")
+        XCTAssertEqual(wanted.count, 750, "the user's ask: a whole month of swipes")
         XCTAssertEqual(wanted.first, "k2", "nearest unsorted card after the current k1")
         XCTAssertFalse(wanted.contains("k10"), "sorted items don't take window slots")
         XCTAssertTrue(wanted.compactMap { Int($0.dropFirst()) }.allSatisfy { !sorted.contains($0) })
     }
 
     func testWindowConstantsAndSortedCurrentCard() {
-        XCTAssertEqual(DeckPrefetcher.forwardRadius, 150)
+        XCTAssertEqual(DeckPrefetcher.forwardRadius, 750)
         XCTAssertEqual(DeckPrefetcher.behindRadius, 15)
-        let w = DeckPrefetcher.window(count: 1000, current: 500, behind: DeckPrefetcher.behindRadius)
-        XCTAssertEqual(w.count, 165)
-        XCTAssertEqual(w[149], 650)
+        let w = DeckPrefetcher.window(count: 2000, current: 500, behind: DeckPrefetcher.behindRadius)
+        XCTAssertEqual(w.count, 765)
+        XCTAssertEqual(w[749], 1250)
         XCTAssertEqual(w.last, 485)
         // -1: "before the first unsorted item" (current card sorted, nothing unsorted behind it).
         XCTAssertEqual(DeckPrefetcher.window(count: 5, current: -1, radius: 2, behind: 2), [0, 1])
