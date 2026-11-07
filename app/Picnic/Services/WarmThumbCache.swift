@@ -24,9 +24,15 @@ enum WarmThumbCache {
     /// How long a sorted photo's thumbnail is kept, so undo and re-visits stay instant.
     static let retention: TimeInterval = 24 * 60 * 60
 
+    /// "WarmThumbs-v2": placeholders saved before the switch to screen-width
+    /// were 800x1066 and `warmCache` skips any photo that already has a file,
+    /// so they would never be replaced. A new directory makes every photo
+    /// re-warm at the new size; the old "WarmThumbs" directory is deleted here
+    /// so its files don't linger (Caches, nothing else reads it).
     private static let directory: URL = {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("WarmThumbs", isDirectory: true)
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.removeItem(at: caches.appendingPathComponent("WarmThumbs", isDirectory: true))
+        let dir = caches.appendingPathComponent("WarmThumbs-v2", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
