@@ -22,6 +22,12 @@ struct DeckView: View {
     /// markKept skip whenever hideSorted has already removed the swiped
     /// asset — see DeckViewModel.markForDelete's guard comment).
     @State private var nextImageAssetID: String?
+    /// Which card `currentImage` was set for by THIS card's load (promoted
+    /// prefetch, warm cache, or a PhotoKit result). After a filmstrip jump
+    /// `currentImage` can still hold the previous card's photo, which must not
+    /// count as "the stand-in a degraded result has to beat"
+    /// (see DeckCardImagePolicy.replacesShown).
+    @State private var currentImageAssetID: String?
     /// What the current photo card shows (see DeckCardImagePolicy). Drives the
     /// "in iCloud" badge and whether a delete swipe is allowed.
     @State private var imageState = DeckCardImageState()
@@ -343,6 +349,7 @@ struct DeckView: View {
                 // card background (a wrong-photo flash is the bug above).
                 let promotable = nextImage != nil && nextImageAssetID == viewModel.currentItem?.id
                 currentImage = promotable ? nextImage : nil
+                currentImageAssetID = promotable ? nextImageAssetID : nil
                 imageState.begin(prefetched: promotable)
                 nextImage = nil
                 nextImageAssetID = nil
@@ -454,6 +461,10 @@ struct DeckView: View {
     /// is derived from the captured `startIndex`, not a fresh read of
     /// `viewModel.currentIndex`, so a stale invocation can't prefetch for a
     /// position that has since moved.
+    private static func pixelCount(_ image: UIImage) -> CGFloat {
+        image.size.width * image.scale * image.size.height * image.scale
+    }
+
     private func loadCurrentImage() async {
         guard let item = viewModel.currentItem else {
             currentImage = nil; nextImage = nil; nextImageAssetID = nil
@@ -467,6 +478,7 @@ struct DeckView: View {
         imageState.begin(prefetched: false)
         if nextImageAssetID == item.id, let prefetched = nextImage {
             currentImage = prefetched
+            currentImageAssetID = item.id
             imageState.begin(prefetched: true)  // the 600x800 prefetch: pixels, but not the final image
             nextImage = nil
             nextImageAssetID = nil
@@ -553,18 +565,34 @@ struct DeckView: View {
             // behind a plain photo.
             videoController.clear()
             await ThumbnailLoader.applySlowLoadDelayIfEnabled()
-            // Instant placeholder from the warm-up cache while PhotoKit loads.
-            if currentImage == nil, let cached = WarmThumbCache.image(for: loadingID) {
-                currentImage = cached
+            // Pixels of the picture this card's own load has put up so far
+            // (0 if what's on screen belongs to another card or is nothing).
+            func shownPixels() -> CGFloat {
+                guard currentImageAssetID == loadingID, let shown = currentImage else { return 0 }
+                return Self.pixelCount(shown)
             }
-            // Low-res first, then full: each update replaces currentImage. The
-            // stream ends on the final result, and cancelling this task (the
-            // card changed) cancels the PhotoKit request behind it.
+            // Instant placeholder from the warm-up cache while PhotoKit loads,
+            // when it is sharper than the promoted 600x800 peek (it is
+            // screen-width now, see WarmThumbCache.targetSize).
+            if let cached = WarmThumbCache.image(for: loadingID), Self.pixelCount(cached) > shownPixels() {
+                currentImage = cached
+                currentImageAssetID = loadingID
+            }
+            // Low-res first, then full. A final result always replaces
+            // currentImage; a degraded one only if it isn't a downgrade
+            // (DeckCardImagePolicy.replacesShown). The stream ends on the final
+            // result, and cancelling this task (the card changed) cancels the
+            // PhotoKit request behind it.
             for await update in ThumbnailLoader.imageUpdates(for: asset, targetSize: ThumbnailLoader.screenPixelSize) {
                 // A2 gate: only trust this fetch if it's still for the asset
                 // actually on screen — see the doc comment above.
                 guard viewModel.currentItem?.id == loadingID else { break }
-                if let image = update.image { currentImage = image }
+                if let image = update.image, DeckCardImagePolicy.replacesShown(
+                    newPixels: Self.pixelCount(image), shownPixels: shownPixels(), isDegraded: update.isDegraded
+                ) {
+                    currentImage = image
+                    currentImageAssetID = loadingID
+                }
                 imageState.apply(update)
             }
             // Cancelled mid-load: the card changed and a new load owns the state.

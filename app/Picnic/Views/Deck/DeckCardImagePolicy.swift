@@ -41,6 +41,18 @@ enum DeckCardImagePolicy {
         quality == .partial && isInCloud
     }
 
+    /// Whether a PhotoKit result should replace the stand-in already on this
+    /// card (`shownPixels` = width x height in pixels, 0 when the card has no
+    /// picture of its own yet). A final result always wins. A DEGRADED one
+    /// replaces only an equal-or-smaller picture: PhotoKit's first opportunistic
+    /// callback for an iCloud photo can be far smaller than the warm-cache or
+    /// prefetched stand-in, and before this guard it overwrote that sharper
+    /// image, leaving the card super low-res until (or, if the iCloud download
+    /// failed, forever after) the full image arrived.
+    static func replacesShown(newPixels: CGFloat, shownPixels: CGFloat, isDegraded: Bool) -> Bool {
+        !isDegraded || newPixels >= shownPixels
+    }
+
     static func deleteBlocked(quality: Quality) -> Bool {
         blockDeleteWithoutLocalImage && quality == .none
     }

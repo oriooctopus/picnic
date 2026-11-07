@@ -9,10 +9,18 @@ import UIKit
 /// Entries are deleted by `purge(assetIDs:)` once the photo has been sorted
 /// for longer than `retention`.
 enum WarmThumbCache {
-    /// Warm-up size. ~4x the pixels of the earlier 400x533, chosen as roughly
-    /// half the screen's pixels: visibly sharper as a placeholder, still a
-    /// small fraction of a 12 MP original.
-    static let targetSize = CGSize(width: 800, height: 1066)
+    /// Warm-up size: the screen's native pixel width at 3:4, so a portrait
+    /// photo's placeholder is as sharp as the card it fills (~1179x1572 on a
+    /// 6.1" iPhone). Was 800x1066, about half that, which read as visibly
+    /// low-res on every card whose full iCloud image hadn't arrived yet: the
+    /// whole month is warmed, but only the next 150 get the full image
+    /// (DeckPrefetcher), so the placeholder IS the picture for most of a busy
+    /// month. Cost estimate, not measured: ~300-500 KB JPEG each, so ~100 MB
+    /// for a 216-photo month, in Caches (OS-reclaimable).
+    static var targetSize: CGSize {
+        let width = UIScreen.main.nativeBounds.width
+        return CGSize(width: width, height: (width * 4 / 3).rounded())
+    }
     /// How long a sorted photo's thumbnail is kept, so undo and re-visits stay instant.
     static let retention: TimeInterval = 24 * 60 * 60
 

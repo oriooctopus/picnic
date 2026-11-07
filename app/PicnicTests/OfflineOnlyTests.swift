@@ -158,11 +158,11 @@ final class OfflineOnlyTests: XCTestCase {
     }
 
     func testWindowConstantsAndSortedCurrentCard() {
-        XCTAssertEqual(DeckPrefetcher.forwardRadius, 750)
+        XCTAssertEqual(DeckPrefetcher.forwardRadius, 150)
         XCTAssertEqual(DeckPrefetcher.behindRadius, 15)
         let w = DeckPrefetcher.window(count: 2000, current: 500, behind: DeckPrefetcher.behindRadius)
-        XCTAssertEqual(w.count, 765)
-        XCTAssertEqual(w[749], 1250)
+        XCTAssertEqual(w.count, 165)
+        XCTAssertEqual(w[149], 650)
         XCTAssertEqual(w.last, 485)
         // -1: "before the first unsorted item" (current card sorted, nothing unsorted behind it).
         XCTAssertEqual(DeckPrefetcher.window(count: 5, current: -1, radius: 2, behind: 2), [0, 1])

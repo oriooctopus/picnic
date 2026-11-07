@@ -89,6 +89,14 @@ final class OfflineSmallItemsTests: XCTestCase {
         XCTAssertEqual(DeckCardImagePolicy.next(after: .loading, hasImage: false, isDegraded: true), .loading, "degraded nil is not final")
     }
 
+    func testDegradedResultNeverDowngradesTheStandIn() {
+        // Tiny opportunistic preview must not replace the 1179x1572 warm placeholder.
+        XCTAssertFalse(DeckCardImagePolicy.replacesShown(newPixels: 120 * 160, shownPixels: 1179 * 1572, isDegraded: true))
+        XCTAssertTrue(DeckCardImagePolicy.replacesShown(newPixels: 120 * 160, shownPixels: 1179 * 1572, isDegraded: false), "final always wins")
+        XCTAssertTrue(DeckCardImagePolicy.replacesShown(newPixels: 120 * 160, shownPixels: 0, isDegraded: true), "nothing of this card shown yet")
+        XCTAssertTrue(DeckCardImagePolicy.replacesShown(newPixels: 1179 * 1572, shownPixels: 600 * 800, isDegraded: true), "sharper degraded upgrades")
+    }
+
     func testICloudBadgeOnlyWhileLowResOfCloudPhoto() {
         XCTAssertTrue(DeckCardImagePolicy.showsICloudBadge(quality: .partial, isInCloud: true))
         XCTAssertFalse(DeckCardImagePolicy.showsICloudBadge(quality: .full, isInCloud: true))

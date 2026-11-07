@@ -6,7 +6,7 @@ import UIKit
 /// served from PhotoKit's local store instead of waiting on the network.
 ///
 /// Results are discarded on purpose: holding even the 15-photo old window of
-/// screen-size bitmaps would cost hundreds of MB, and the 750-photo window
+/// screen-size bitmaps would cost hundreds of MB, and the 150-photo window
 /// (`forwardRadius`) would be far worse. The download into PhotoKit's store is
 /// the whole point, and offline-only mode relies on it staying there.
 /// Same targetSize/contentMode as `ThumbnailLoader.imageUpdates` so the cached
@@ -21,19 +21,20 @@ import UIKit
 @MainActor
 final class DeckPrefetcher {
     /// How many UNSORTED cards ahead of the current one are downloaded from
-    /// iCloud. 750 (5x the original 150) so a whole month (the prefetch list
-    /// is one month's unsorted items, ~200-300 for a busy month) is swipeable
-    /// offline. Affordable because the results are discarded: it is PhotoKit's
-    /// on-disk store that grows, not RAM. Counts unsorted items, not raw deck
-    /// slots, so sorted photos never eat into the window.
-    static let forwardRadius = 750
+    /// iCloud. 150 is the user's ask ("always 150 available swipes", for
+    /// offline-only mode; briefly raised to 750 and put back on request).
+    /// Affordable because the results are discarded: it is PhotoKit's on-disk
+    /// store that grows, not RAM. Counts unsorted items, not raw deck slots,
+    /// so sorted photos never eat into the 150. The whole month is also
+    /// warmed at card size by `ThumbnailLoader.warmCache` (WarmThumbCache).
+    static let forwardRadius = 150
     /// Cards behind the current one. Swiping back is rare and the user already
     /// saw those, so this stays small. Was the symmetric radius 15 before.
     static let behindRadius = 15
-    /// Raised 2 -> 4 -> 6 to get through the 750-photo window in reasonable
-    /// time. A guess, not a measured iCloud throughput; lower it if the on-card
-    /// load of the CURRENT photo starts to stall behind the prefetch queue.
-    static let maxInFlight = 6
+    /// Raised 2 -> 4 to get through a 150-photo window in reasonable time.
+    /// A guess, not a measured iCloud throughput; lower it if the on-card load
+    /// of the CURRENT photo starts to stall behind the prefetch queue.
+    static let maxInFlight = 4
     /// Remote downloads are small HTTP GETs from the tailnet box, not iCloud
     /// pulls, so several in parallel is fine. Raised 4 -> 8 with the 750
     /// window. A guess, not a measurement.
