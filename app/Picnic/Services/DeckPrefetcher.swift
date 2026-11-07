@@ -36,9 +36,9 @@ final class DeckPrefetcher {
     /// of the CURRENT photo starts to stall behind the prefetch queue.
     static let maxInFlight = 4
     /// Remote downloads are small HTTP GETs from the tailnet box, not iCloud
-    /// pulls, so several in parallel is fine. Raised 4 -> 8 with the 750
-    /// window. A guess, not a measurement.
-    static let remoteMaxInFlight = 8
+    /// pulls, so a few in parallel is fine. A guess, not a measurement.
+    /// DeckPrefetcherTests' cancel test assumes 4.
+    static let remoteMaxInFlight = 4
     /// How many cards AHEAD of the current one remote display images are
     /// predownloaded. Forward only: the user sorts through the album in order,
     /// and cards already passed stay in RemoteDisplayCache (LRU) until evicted,
