@@ -450,7 +450,7 @@ struct ReconcileReviewView: View {
 
 /// A phone-only tile's image, loaded from PhotoKit (those photos have no
 /// Google thumbnail on the server).
-private struct PhoneAssetImage: View {
+struct PhoneAssetImage: View {
     let asset: PHAsset
     let fill: Bool
     @State private var image: UIImage?

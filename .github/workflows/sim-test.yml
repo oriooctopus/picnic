@@ -8,6 +8,11 @@ name: sim-test
 # (ota.yml) auto-triggers; test suites are run deliberately, batched.
 on:
   workflow_dispatch:
+    inputs:
+      only_testing:
+        description: 'Space-separated -only-testing specs (e.g. PicnicTests/SuperappMatcherTests); blank = PicnicTests + PicnicUITests'
+        required: false
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -84,13 +89,19 @@ jobs:
       - name: Run unit + UI smoke tests
         run: |
           cd app
+          ONLY="${{ github.event.inputs.only_testing }}"
+          FLAGS=()
+          if [ -n "$ONLY" ]; then
+            for spec in $ONLY; do FLAGS+=("-only-testing:$spec"); done
+          else
+            FLAGS+=(-only-testing:PicnicTests -only-testing:PicnicUITests)
+          fi
           xcodebuild test \
             -project Picnic.xcodeproj \
             -scheme Picnic \
             -destination "id=$SIM_UDID" \
             -derivedDataPath build \
-            -only-testing:PicnicTests \
-            -only-testing:PicnicUITests \
+            "${FLAGS[@]}" \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Upload screenshots

@@ -2852,6 +2852,32 @@ final class WalkthroughUITests: XCTestCase {
                       "Confirm should count 1 phone + 3 Google deletions, got: \(confirmButton.label)")
     }
 
+    /// The "Uploaded" screen: library photos already uploaded to the desktop,
+    /// all selected for deletion. Launches with `--superapp-seed` so records
+    /// come from the seeded library (real matcher runs) with no server.
+    func testSuperappUploadedScreen() throws {
+        relaunch(withExtraArguments: ["--superapp-seed"])
+        _ = openMyLifeGrid()
+        goToUtilities()
+
+        let row = app.descendants(matching: .any)["utilities.uploaded"].firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "Utilities should list the Uploaded row")
+        capture("superapp-utilities-row")
+        row.tap()
+
+        let delete = app.buttons["superapp.deleteButton"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 20), "Uploaded screen should show the delete button")
+        XCTAssertTrue(delete.label.hasPrefix("Delete "), "Got: \(delete.label)")
+        let all = delete.label
+        capture("superapp-uploaded-all-selected")
+
+        let first = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'superapp.item.'")).firstMatch
+        XCTAssertTrue(first.exists, "at least one matched tile")
+        first.tap()
+        XCTAssertNotEqual(delete.label, all, "tapping a tile must change the delete count")
+        capture("superapp-uploaded-one-kept")
+    }
+
     /// Regression test for the March 2026 bug report: a scan still in
     /// progress (server status "scanning") must render the scanning state,
     /// never the empty/"everything matches" loaded state. Launches with

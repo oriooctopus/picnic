@@ -8,15 +8,18 @@ struct UtilitiesView: View {
     /// in SwiftUI (see DeckView.presentation), so the smart-collection decks
     /// and the remote album share this enum instead of getting a cover each.
     @State private var destination: Destination?
+    @State private var uploadedCount: Int?
 
     enum Destination: Identifiable {
         case smartCollection(SmartCollectionKind)
         case remoteAlbum
+        case superappUploads
 
         var id: String {
             switch self {
             case .smartCollection(let kind): return "smart-\(kind.rawValue)"
             case .remoteAlbum: return "remoteAlbum"
+            case .superappUploads: return "superappUploads"
             }
         }
     }
@@ -32,6 +35,7 @@ struct UtilitiesView: View {
                 // Top of the screen, not after the grids: at the bottom it sat behind
                 // the floating tab-bar pill on a 6.7" phone and read as missing.
                 remoteAlbumRow
+                uploadedRow
 
                 Text("Recents").font(.title3.bold()).foregroundStyle(.white).padding(.horizontal)
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
@@ -58,6 +62,9 @@ struct UtilitiesView: View {
         .contentMargins(.bottom, 110, for: .scrollContent)
         .background(Color.black.ignoresSafeArea())
         .task { await loadCounts() }
+        .task(id: destination?.id) {
+            if destination == nil { uploadedCount = try? await SuperappLibraryMatcher.loadMatched().matches.count }
+        }
         .fullScreenCover(item: $destination) { destination in
             switch destination {
             case .smartCollection(let kind):
@@ -69,8 +76,28 @@ struct UtilitiesView: View {
                 // PhotoKit or enqueue a mirror delete.
                 RemoteAlbumDeckCover(service: RemoteAlbumService.oliverAlbum)
                     .environmentObject(appState)
+            case .superappUploads:
+                SuperappUploadsView(photoLibrary: appState.photoLibrary).environmentObject(appState)
             }
         }
+    }
+
+    private var uploadedRow: some View {
+        Button { destination = .superappUploads } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.up.circle.fill").foregroundStyle(.green)
+                Text("Uploaded").foregroundStyle(.white)
+                Spacer()
+                if let uploadedCount {
+                    Text("\(uploadedCount)").foregroundStyle(.white.opacity(0.6))
+                }
+                Image(systemName: "chevron.right").foregroundStyle(.white.opacity(0.4))
+            }
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color(white: 0.12)))
+        }
+        .padding(.horizontal)
+        .accessibilityIdentifier("utilities.uploaded")
     }
 
     /// Entry to the remote Google Photos album deck. Styled with the same
