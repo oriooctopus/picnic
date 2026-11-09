@@ -10,6 +10,7 @@ import { loadToken, checkBearerAuth, tokensMatch } from './lib/auth.mjs';
 import { createAutoDrain, createCdpProbe, createWorkerSpawn, isAutoDrainEnabled } from './lib/autodrain.mjs';
 import { ReconcileStore, sectionForCameraModel } from './lib/reconcile.mjs';
 import { AlbumStore, ID_RE, defaultAlbumsDir } from './lib/album.mjs';
+import { SuperappUploads, RESOLVE_ACTIONS } from './lib/superapp-uploads.mjs';
 import { probeDurationSec } from './lib/video-trim.mjs';
 
 // NOTE: SPEC.md / task instructions said 8306, but ~/.claude/rules/ports.md
@@ -36,6 +37,11 @@ const RECONCILE_DIR = process.env.PICNIC_RECONCILE_DIR || join(homedir(), '.loca
 // (never inline in queue.jsonl). Resolved per request so tests can set it late.
 const replaceDir = () => process.env.PICNIC_REPLACE_DIR || join(homedir(), '.local/share/picnic/replace');
 const MAX_REPLACE_BYTES = 4 * 1024 * 1024 * 1024;
+
+// Written by the location server (same box) on every Superapp /drop of a photo/video; read-only here.
+const SUPERAPP_UPLOADS_PATH = process.env.PICNIC_SUPERAPP_UPLOADS_PATH || join(homedir(), '.config/assistant/location/superapp-uploads.jsonl');
+const SUPERAPP_RESOLUTIONS_PATH = process.env.PICNIC_SUPERAPP_RESOLUTIONS_PATH || join(homedir(), '.local/share/picnic/superapp-resolutions.jsonl');
+const superappUploads = new SuperappUploads(SUPERAPP_UPLOADS_PATH, SUPERAPP_RESOLUTIONS_PATH);
 
 const queue = new JobQueue(QUEUE_PATH);
 // Created eagerly (mirrors JobQueue's own directory bootstrap) so the first
@@ -514,6 +520,23 @@ export function createApp({
           return send(res, 400, { error: thumbnailError, job, created });
         }
         return send(res, created ? 201 : 200, { job, created });
+      }
+
+      if (req.method === 'GET' && url.pathname === '/superapp-uploads') {
+        if (!requireAuth(req, res)) return;
+        return send(res, 200, { uploads: superappUploads.listPending() });
+      }
+
+      if (req.method === 'POST' && url.pathname === '/superapp-uploads/resolve') {
+        if (!requireAuth(req, res)) return;
+        const { ids, action } = await readJsonBody(req);
+        if (!RESOLVE_ACTIONS.includes(action)) {
+          return send(res, 400, { error: `action must be one of ${RESOLVE_ACTIONS.join(', ')}` });
+        }
+        if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || !id)) {
+          return send(res, 400, { error: 'ids must be an array of non-empty strings' });
+        }
+        return send(res, 200, { resolved: superappUploads.resolve(ids, action) });
       }
 
       if (req.method === 'GET' && url.pathname === '/queue') {
