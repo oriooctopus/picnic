@@ -716,7 +716,7 @@ final class DeckViewModel: ObservableObject {
                 // The server is reachable again: send anything queued earlier.
                 if remotePendingCount > 0 { await flushRemotePending() }
             } catch where isUnreachable(error) {
-                revert("mutant")
+                queue()
             } catch {
                 revert("Couldn't save \(decision.rawValue): \(error)")
             }

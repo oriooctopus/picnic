@@ -347,7 +347,7 @@ struct RemoteAlbumService {
             }
             // Re-read rather than drop the first element: a swipe made while
             // this POST was in flight may have appended to the file.
-            try write([PendingRemoteDecision](), to: pendingFile)
+            try write(try pending().filter { $0 != entry }, to: pendingFile)
         }
         return (counts, rejected)
     }
