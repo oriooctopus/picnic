@@ -73,7 +73,7 @@ final class RemoteAlbumDeckTests: XCTestCase {
 
         /// A second deck over the same store, server and disk: what reopening
         /// the deck (or relaunching the app) sees.
-        func reopen() -> DeckViewModel {
+        @MainActor func reopen() -> DeckViewModel {
             DeckViewModel(remoteAlbum: service, title: "Oliver! album", sortStore: store)
         }
     }
