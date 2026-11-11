@@ -138,7 +138,7 @@ struct DeckView: View {
             // with the server's kept/left counter. The local deck never
             // shows it, so the two decks can't be confused.
             if viewModel.isRemote {
-                RemoteDeckBanner(counts: viewModel.remoteCounts)
+                RemoteDeckBanner(counts: viewModel.remoteCounts, pending: viewModel.remotePendingCount)
             }
 
             topBar
@@ -303,9 +303,10 @@ struct DeckView: View {
             await viewModel.probeAvailability()
         }
         // Remote deck: fetch the album (and its server-side decisions) once
-        // on open. Local decks have nothing to load. A failure lands in
-        // viewModel.remoteError and shows in the alert below; there is no
-        // automatic retry, reopening the deck is the retry.
+        // on open (sending any swipes queued offline first; offline it opens
+        // from the saved listing). Local decks have nothing to load. A failure
+        // lands in viewModel.remoteError and shows in the alert below;
+        // reopening the deck is the retry.
         .task {
             if viewModel.isRemote { await viewModel.loadRemote() }
         }

@@ -93,6 +93,12 @@ enum RemoteAlbumFixtures {
     /// reopening the deck within a test run.
     static let sharedClient = FixtureRemoteAlbumClient(albumId: RemoteAlbumService.oliverAlbumId)
 
+    /// Listing cache + offline outbox for the fixture album: one fresh temp
+    /// dir per process, so state lasts the test run (like `sharedClient`) but
+    /// never leaks into the next one.
+    static let storageDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("remote-album-fixture-\(UUID().uuidString)", isDirectory: true)
+
     static func thumbnailURL(mediaKey: String) -> URL {
         URL(string: "\(thumbnailScheme)://\(mediaKey)")!
     }

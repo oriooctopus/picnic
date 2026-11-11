@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import Combine
 
 /// One reversible batch of SortState writes, plus (optionally) the Compare
 /// group those writes resolved. A plain swipe (markForDelete/markKept)
@@ -66,6 +67,12 @@ final class DeckViewModel: ObservableObject {
     @Published var remoteError: String?
     /// Remote only: true until the first listing arrives (or fails).
     @Published private(set) var isLoadingRemote = false
+    /// Remote only: swipes saved on the phone that the server has not
+    /// received yet (made offline). Shown in the banner so it's clear they
+    /// still need a connection to count.
+    @Published private(set) var remotePendingCount = 0
+    /// Remote only: re-sends queued swipes each time the network comes back.
+    private var reconnectObserver: AnyCancellable?
 
     @Published var orderedItems: [DeckItem] { didSet { refresh(follow: nil) } }
     /// Persisted directly via UserDefaults rather than @AppStorage: this
@@ -208,6 +215,11 @@ final class DeckViewModel: ObservableObject {
         self.isLoadingRemote = true
         wireAvailability()
         refresh(follow: nil)
+        // dropFirst: the current value is replayed on subscribe, and the
+        // deck's own loadRemote() already flushes on open.
+        reconnectObserver = Connectivity.shared.$epoch.dropFirst().sink { [weak self] _ in
+            Task { await self?.flushRemotePending() }
+        }
     }
 
     private func wireAvailability() {
@@ -272,22 +284,48 @@ final class DeckViewModel: ObservableObject {
     /// (e.g. the album was reset server-side) can never hide an undecided item.
     /// Opens on the first undecided item so a resumed triage continues where
     /// it left off. Failure is surfaced via `remoteError`, not retried.
+    ///
+    /// Offline: queued swipes are sent first (so the listing already includes
+    /// them). With the server unreachable the deck opens from the last saved
+    /// listing instead. That listing predates swipes made since it was saved,
+    /// so there SortStore wins over the listing's decision (SortStore holds
+    /// every swipe made on this phone, sent or queued) and the counter is
+    /// recounted from the merged states. Online, swipes still queued (flush
+    /// stopped partway) are laid over the server's states and counts, or the
+    /// deck would show them undecided again until they're sent.
     func loadRemote() async {
         guard let remote else { return }
         isLoadingRemote = true
         defer { isLoadingRemote = false }
         do {
-            let snapshot = try await remote.load()
-            for item in snapshot.items {
-                let state: SortState
-                switch item.decision {
-                case .keep: state = .kept
-                case .skip: state = .skipped
-                case nil: state = .unsorted
+            await flushRemotePending()
+            let (snapshot, isCached) = try await remote.load()
+            var counts = snapshot.counts
+            if isCached {
+                var keep = 0, skip = 0
+                for item in snapshot.items {
+                    let local = sortStore.state(forID: item.id)
+                    let state = local == .unsorted ? Self.sortState(item.decision) : local
+                    sortStore.setState(state, forID: item.id, monthKey: monthKey, recordsActivity: false)
+                    if state == .kept { keep += 1 } else if state == .skipped { skip += 1 }
                 }
-                sortStore.setState(state, forID: item.id, monthKey: monthKey, recordsActivity: false)
+                counts = RemoteAlbumCounts(total: snapshot.items.count, keep: keep, skip: skip,
+                                           undecided: snapshot.items.count - keep - skip,
+                                           downloaded: snapshot.counts.downloaded)
+            } else {
+                for item in snapshot.items {
+                    sortStore.setState(Self.sortState(item.decision), forID: item.id, monthKey: monthKey,
+                                       recordsActivity: false)
+                }
+                let byKey = Dictionary(uniqueKeysWithValues: snapshot.items.map { ($0.mediaKey, $0) })
+                for entry in try remote.pending() {
+                    guard let item = byKey[entry.mediaKey] else { continue }
+                    sortStore.setState(Self.sortState(entry.decision), forID: item.id, monthKey: monthKey,
+                                       recordsActivity: false)
+                    counts = counts.applying(entry.decision, replacing: item.decision)
+                }
             }
-            remoteCounts = snapshot.counts
+            remoteCounts = counts
             remoteTrimOverrides = [:]
             // orderedItems' didSet runs refresh(), which rebuilds visibleItems
             // (honoring hideSorted); the index below is into THAT list.
@@ -296,6 +334,39 @@ final class DeckViewModel: ObservableObject {
             currentIndex = visibleItems.firstIndex { sortStore.state(forID: $0.id) == .unsorted } ?? 0
         } catch {
             remoteError = "\(error)"
+        }
+    }
+
+    private static func sortState(_ decision: RemoteDecision?) -> SortState {
+        switch decision {
+        case .keep: return .kept
+        case .skip: return .skipped
+        case nil: return .unsorted
+        }
+    }
+
+    /// Sends swipes queued while offline (on open and on every reconnect).
+    /// Once the queue is empty the server's counts replace the local
+    /// estimate (while some are still queued, the server's counts would
+    /// leave those out). A swipe the server rejected is reverted to unsorted
+    /// with the error shown, the same as a failed online swipe.
+    func flushRemotePending() async {
+        guard let remote else { return }
+        do {
+            guard try !remote.pending().isEmpty else { return remotePendingCount = 0 }
+            let (counts, rejected) = try await remote.flushPending()
+            let after = try remote.pending()
+            remotePendingCount = after.count
+            if let counts, after.isEmpty { remoteCounts = counts }
+            guard !rejected.isEmpty else { return }
+            let rejectedKeys = Set(rejected.map(\.entry.mediaKey))
+            for item in orderedItems where rejectedKeys.contains(item.remoteItem?.mediaKey ?? "") {
+                sortStore.setState(.unsorted, forID: item.id, monthKey: monthKey, recordsActivity: false)
+            }
+            refresh(follow: currentItem?.id)
+            remoteError = rejected.map(\.message).joined(separator: "\n")
+        } catch {
+            remoteError = "Couldn't send saved swipes: \(error)"
         }
     }
 
@@ -597,13 +668,14 @@ final class DeckViewModel: ObservableObject {
     }
 
     /// Remote-album swipe: writes the SortStore cache optimistically, advances
-    /// like a local swipe, and POSTs the decision. If the POST fails the cache
-    /// write is reverted and the deck goes back to that item, with the error
-    /// in `remoteError` (an alert) — the server is the source of truth, so the
-    /// UI must not keep a decision the server never recorded. No undo entry is
-    /// ever pushed: the server API cannot un-decide, so `undoStack` stays
-    /// empty and DeckView's undo button stays disabled. No retry queue; a
-    /// failed swipe is simply redone by the user.
+    /// like a local swipe, and POSTs the decision. If the server is
+    /// unreachable the decision goes to the durable outbox and is sent on
+    /// reconnect (`flushRemotePending`). If the server ANSWERS with an error
+    /// the cache write is reverted and the deck goes back to that item, with
+    /// the error in `remoteError` (an alert): the server is the source of
+    /// truth, so the UI must not keep a decision the server refused. No undo
+    /// entry is ever pushed: the server API cannot un-decide, so `undoStack`
+    /// stays empty and DeckView's undo button stays disabled.
     private func decideRemote(_ decision: RemoteDecision, on item: DeckItem) {
         guard let remote, let remoteItem = item.remoteItem else { return }
         let previous = sortStore.state(forID: item.id)
@@ -612,13 +684,32 @@ final class DeckViewModel: ObservableObject {
         if visibleItems.indices.contains(currentIndex), visibleItems[currentIndex].id == item.id {
             advance()
         }
+        // Offline (known up front, or found out from the POST): the swipe
+        // stays and goes to the outbox; the counter moves locally. Skipping
+        // the POST when already offline avoids a timeout wait per swipe.
+        func revert(_ message: String) {
+            sortStore.setState(previous, forID: item.id, monthKey: monthKey, recordsActivity: false)
+            refresh(follow: item.id)
+            remoteError = message
+        }
+        func queue() {
+            do {
+                try remote.enqueue(decision, mediaKey: remoteItem.mediaKey)
+                remotePendingCount = try remote.pending().count
+                let was: RemoteDecision? = previous == .kept ? .keep : previous == .skipped ? .skip : nil
+                remoteCounts = remoteCounts?.applying(decision, replacing: was)
+            } catch {
+                revert("Couldn't save \(decision.rawValue) offline: \(error)")
+            }
+        }
+        if isOffline() { return queue() }
         Task {
             do {
                 remoteCounts = try await remote.decide(mediaKey: remoteItem.mediaKey, decision)
+            } catch where isUnreachable(error) {
+                queue()
             } catch {
-                sortStore.setState(previous, forID: item.id, monthKey: monthKey, recordsActivity: false)
-                refresh(follow: item.id)
-                remoteError = "Couldn't save \(decision.rawValue): \(error)"
+                revert("Couldn't save \(decision.rawValue): \(error)")
             }
         }
     }

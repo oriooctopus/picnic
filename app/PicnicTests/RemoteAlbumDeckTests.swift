@@ -17,6 +17,8 @@ final class RemoteAlbumDeckTests: XCTestCase {
         var failNextPost = false
         var postedTrims: [(mediaKey: String, trim: RemoteTrim)] = []
         var failNextTrim = false
+        /// Every call fails the way an unreachable server does (URLError).
+        var unreachable = false
         let albumId = RemoteAlbumService.oliverAlbumId
 
         struct Boom: Error, CustomStringConvertible { var description: String { "boom" } }
@@ -30,6 +32,7 @@ final class RemoteAlbumDeckTests: XCTestCase {
         }
 
         func fetchAlbum(albumId: String) async throws -> RemoteAlbumSnapshot {
+            if unreachable { throw URLError(.notConnectedToInternet) }
             // k0 is already kept on the "server": the deck must open on k1.
             let items = [item(0, decision: .keep), item(1), item(2), item(3)]
             return RemoteAlbumSnapshot(
@@ -47,6 +50,7 @@ final class RemoteAlbumDeckTests: XCTestCase {
         }
 
         func postDecision(albumId: String, mediaKey: String, decision: RemoteDecision) async throws -> RemoteAlbumCounts {
+            if unreachable { throw URLError(.notConnectedToInternet) }
             if failNextPost {
                 failNextPost = false
                 throw Boom()
@@ -61,19 +65,106 @@ final class RemoteAlbumDeckTests: XCTestCase {
         let store: SortStore
         let client: FakeClient
         let viewModel: DeckViewModel
+        let service: RemoteAlbumService
+
+        /// A second deck over the same store, server and disk: what reopening
+        /// the deck (or relaunching the app) sees.
+        func reopen() -> DeckViewModel {
+            DeckViewModel(remoteAlbum: service, title: "Oliver! album", sortStore: store)
+        }
     }
 
     private func makeRig() async throws -> Rig {
         let container = try TestSupport.inMemoryContainer()
         let store = SortStore(context: container.mainContext)
         let client = FakeClient()
-        let viewModel = DeckViewModel(
-            remoteAlbum: RemoteAlbumService(albumId: client.albumId, client: client),
-            title: "Oliver! album",
-            sortStore: store
-        )
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("remote-album-test-\(UUID().uuidString)")
+        let service = RemoteAlbumService(albumId: client.albumId, client: client, storageDirectory: dir)
+        let viewModel = DeckViewModel(remoteAlbum: service, title: "Oliver! album", sortStore: store)
+        viewModel.isOffline = { false }
         await viewModel.loadRemote()
-        return Rig(container: container, store: store, client: client, viewModel: viewModel)
+        return Rig(container: container, store: store, client: client, viewModel: viewModel, service: service)
+    }
+
+    // MARK: offline
+
+    /// Server unreachable mid-swipe: the swipe must stay (not revert, no
+    /// alert), wait in the outbox, and reach the server once it's back.
+    func testUnreachableSwipeIsQueuedThenSentOnReconnect() async throws {
+        let rig = try await makeRig()
+        let swiped = try XCTUnwrap(rig.viewModel.currentItem)
+        rig.client.unreachable = true
+
+        rig.viewModel.markKept()
+
+        await eventually("swipe queued") { rig.viewModel.remotePendingCount == 1 }
+        XCTAssertNil(rig.viewModel.remoteError, "an offline swipe must not raise the failed-save alert")
+        XCTAssertEqual(rig.store.state(forID: swiped.id), .kept, "an offline swipe must not be reverted")
+        XCTAssertEqual(rig.viewModel.remoteCounts?.keep, 2, "counter must move for a queued keep")
+        XCTAssertEqual(rig.viewModel.remoteCounts?.undecided, 2)
+        XCTAssertTrue(rig.client.posted.isEmpty)
+
+        rig.client.unreachable = false
+        await rig.viewModel.flushRemotePending()
+
+        XCTAssertEqual(rig.client.posted.map(\.mediaKey), ["k1"], "the queued swipe must reach the server")
+        XCTAssertEqual(rig.client.posted.first?.decision, .keep)
+        XCTAssertEqual(rig.viewModel.remotePendingCount, 0)
+        XCTAssertEqual(try rig.service.pending(), [], "a sent swipe must leave the outbox")
+    }
+
+    /// Opening the deck with no connection: it must open from the saved
+    /// listing, keep swipes made since that listing was saved (sent and
+    /// queued), and keep the queue across the reopen until it is sent.
+    func testOfflineReopenUsesSavedListingAndKeepsLaterSwipes() async throws {
+        let rig = try await makeRig()
+        rig.viewModel.markKept()  // k1, sent online, AFTER the listing was saved
+        await eventually("k1 sent") { rig.client.posted.count == 1 }
+        rig.client.unreachable = true
+        rig.viewModel.isOffline = { true }
+        rig.viewModel.markForDelete()  // k2, queued
+        XCTAssertEqual(rig.viewModel.remotePendingCount, 1)
+
+        let reopened = rig.reopen()
+        reopened.isOffline = { true }
+        await reopened.loadRemote()
+
+        XCTAssertNil(reopened.remoteError, "offline open must not fail when a listing was saved: \(reopened.remoteError ?? "")")
+        XCTAssertEqual(reopened.currentItem?.id, "gphotos:oliver-album:k3",
+                       "k1 (sent after the listing was saved) and k2 (queued) must not come back as undecided")
+        XCTAssertEqual(rig.store.state(forID: "gphotos:oliver-album:k1"), .kept)
+        XCTAssertEqual(rig.store.state(forID: "gphotos:oliver-album:k2"), .skipped)
+        XCTAssertEqual(reopened.remoteCounts?.keep, 2)
+        XCTAssertEqual(reopened.remoteCounts?.skip, 1)
+        XCTAssertEqual(reopened.remoteCounts?.undecided, 1)
+        XCTAssertEqual(reopened.remotePendingCount, 1, "the queue must survive reopening the deck")
+
+        rig.client.unreachable = false
+        let online = rig.reopen()
+        online.isOffline = { false }
+        await online.loadRemote()
+        XCTAssertEqual(rig.client.posted.map(\.mediaKey), ["k1", "k2"], "the queued skip must be sent on the next online open")
+        XCTAssertEqual(online.remotePendingCount, 0)
+    }
+
+    func testOfflineFirstOpenWithNoSavedListingShowsError() async throws {
+        let container = try TestSupport.inMemoryContainer()
+        let client = FakeClient()
+        client.unreachable = true
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("remote-album-test-\(UUID().uuidString)")
+        let viewModel = DeckViewModel(
+            remoteAlbum: RemoteAlbumService(albumId: client.albumId, client: client, storageDirectory: dir),
+            title: "Oliver! album", sortStore: SortStore(context: container.mainContext))
+        await viewModel.loadRemote()
+        XCTAssertNotNil(viewModel.remoteError, "nothing saved yet: the failure must be shown, not an empty deck")
+    }
+
+    func testCountsApplyingMovesOneItem() {
+        let c = RemoteAlbumCounts(total: 4, keep: 1, skip: 1, undecided: 2, downloaded: 0)
+        XCTAssertEqual(c.applying(.keep, replacing: nil),
+                       RemoteAlbumCounts(total: 4, keep: 2, skip: 1, undecided: 1, downloaded: 0))
+        XCTAssertEqual(c.applying(.keep, replacing: .skip),
+                       RemoteAlbumCounts(total: 4, keep: 2, skip: 0, undecided: 2, downloaded: 0))
     }
 
     func testLoadSeedsStoreFromServerAndOpensOnFirstUndecided() async throws {

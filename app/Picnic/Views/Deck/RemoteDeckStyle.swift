@@ -34,8 +34,8 @@ enum RemoteDeckStyle {
     static let cardCornerRadius: CGFloat = 24
 
     /// "N kept · M left", from the SERVER's counts (never local state).
-    static func counterText(_ counts: RemoteAlbumCounts) -> String {
-        "\(counts.keep) kept · \(counts.undecided) left"
+    static func counterText(_ counts: RemoteAlbumCounts, pending: Int = 0) -> String {
+        "\(counts.keep) kept · \(counts.undecided) left" + (pending > 0 ? " · \(pending) unsent" : "")
     }
 
     static let bannerIdentifier = "deck.remoteBanner"
@@ -48,6 +48,8 @@ enum RemoteDeckStyle {
 /// different place at a glance.
 struct RemoteDeckBanner: View {
     let counts: RemoteAlbumCounts?
+    /// Swipes made offline, not yet on the server.
+    var pending = 0
 
     var body: some View {
         HStack(spacing: 8) {
@@ -56,7 +58,7 @@ struct RemoteDeckBanner: View {
                 .accessibilityIdentifier(RemoteDeckStyle.bannerIdentifier)
             Spacer()
             if let counts {
-                Text(RemoteDeckStyle.counterText(counts))
+                Text(RemoteDeckStyle.counterText(counts, pending: pending))
                     .accessibilityIdentifier(RemoteDeckStyle.counterIdentifier)
             }
         }

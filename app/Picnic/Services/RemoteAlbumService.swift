@@ -15,6 +15,15 @@ struct RemoteAlbumCounts: Codable, Equatable {
     let skip: Int
     let undecided: Int
     let downloaded: Int
+
+    /// These counts with one item moved from `previous` (nil = undecided) to
+    /// `decision`. Used for a decision the server has not seen yet (made
+    /// offline), so the "N kept · M left" counter still moves on each swipe.
+    func applying(_ decision: RemoteDecision, replacing previous: RemoteDecision?) -> RemoteAlbumCounts {
+        func delta(_ d: RemoteDecision?) -> Int { (decision == d ? 1 : 0) - (previous == d ? 1 : 0) }
+        return RemoteAlbumCounts(total: total, keep: keep + delta(.keep), skip: skip + delta(.skip),
+                                 undecided: undecided + delta(nil), downloaded: downloaded)
+    }
 }
 
 /// Wire strings of the server's item `kind` (server/lib/album.mjs KINDS).
@@ -31,7 +40,7 @@ struct RemoteTrim: Codable, Equatable {
 
 /// One album item with its thumbnail resolved to the SERVER'S cached copy
 /// (never the raw Google URL, which is not reachable/authorized from the app).
-struct RemoteAlbumItem: Equatable, Identifiable {
+struct RemoteAlbumItem: Equatable, Identifiable, Codable {
     let albumId: String
     let mediaKey: String
     let captureMs: Int64
@@ -78,7 +87,8 @@ struct RemoteAlbumItem: Equatable, Identifiable {
     var creationDate: Date { Date(timeIntervalSince1970: TimeInterval(captureMs) / 1000) }
 }
 
-struct RemoteAlbumSnapshot {
+/// Codable so the last listing can be saved to disk for offline opens.
+struct RemoteAlbumSnapshot: Codable {
     let counts: RemoteAlbumCounts
     /// Ordered by captureMs ascending (oldest first), the order the deck steps in.
     let items: [RemoteAlbumItem]
@@ -216,19 +226,45 @@ struct HTTPRemoteAlbumClient: RemoteAlbumClient {
     }
 }
 
-/// What DeckViewModel talks to for a remote album. Errors propagate to the
-/// caller (the deck shows them in an alert); there is deliberately no retry
-/// queue — a failed decision is reverted locally and the user swipes again.
+/// A decision made while the server was unreachable, waiting to be POSTed.
+struct PendingRemoteDecision: Codable, Equatable {
+    let mediaKey: String
+    let decision: RemoteDecision
+}
+
+/// True for a failure that means "could not reach the server" (offline,
+/// timeout, tailnet down), as opposed to the server answering with an error
+/// (`RemoteAlbumError.badStatus`). Only the first kind is queued for later:
+/// a server that answered and refused will refuse again.
+func isUnreachable(_ error: Error) -> Bool { error is URLError }
+
+/// What DeckViewModel talks to for a remote album.
+///
+/// Offline support (swiping on the subway): every successful listing is
+/// saved to disk and served instead when the server is unreachable, and a
+/// decision that could not reach the server goes to a durable outbox
+/// (`pending.json`) that `flushPending` POSTs once the server answers again.
+/// The card images themselves are already on disk via RemoteDisplayCache
+/// (DeckPrefetcher fills it 750 cards ahead while the deck is open online).
+/// A decision the server answered with an error still propagates to the
+/// caller, which reverts it (the server is the source of truth).
 struct RemoteAlbumService {
     /// The one album this app triages today.
     static let oliverAlbumId = "oliver-album"
 
     let albumId: String
     let client: RemoteAlbumClient
+    /// Holds `listing.json` and `pending.json`. Application Support, not
+    /// Caches: iOS may purge Caches under disk pressure, and the outbox holds
+    /// swipes that exist nowhere else.
+    let storageDirectory: URL
 
-    init(albumId: String, client: RemoteAlbumClient = HTTPRemoteAlbumClient()) {
+    init(albumId: String, client: RemoteAlbumClient = HTTPRemoteAlbumClient(), storageDirectory: URL? = nil) {
         self.albumId = albumId
         self.client = client
+        self.storageDirectory = storageDirectory ?? FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("remote-album/\(albumId)", isDirectory: true)
     }
 
     /// Service for a "remote:<albumId>" resume key's album id.
@@ -242,14 +278,77 @@ struct RemoteAlbumService {
     static var oliverAlbum: RemoteAlbumService {
         #if DEBUG
         if RemoteAlbumFixtures.isSeeded {
-            return RemoteAlbumService(albumId: oliverAlbumId, client: RemoteAlbumFixtures.sharedClient)
+            // Fresh temp dir per launch: a fixture run must never see a
+            // listing or outbox left by a previous test.
+            return RemoteAlbumService(albumId: oliverAlbumId, client: RemoteAlbumFixtures.sharedClient,
+                                      storageDirectory: RemoteAlbumFixtures.storageDirectory)
         }
         #endif
         return RemoteAlbumService(albumId: oliverAlbumId)
     }
 
-    func load() async throws -> RemoteAlbumSnapshot {
-        try await client.fetchAlbum(albumId: albumId)
+    private var listingFile: URL { storageDirectory.appendingPathComponent("listing.json") }
+    private var pendingFile: URL { storageDirectory.appendingPathComponent("pending.json") }
+
+    /// The server's listing (saved to disk on success), or, when the server is
+    /// unreachable, the last saved listing with `isCached` true. Throws when
+    /// unreachable with nothing saved yet, or when the server answers with an
+    /// error (a cached listing would hide a real server problem).
+    func load() async throws -> (snapshot: RemoteAlbumSnapshot, isCached: Bool) {
+        do {
+            let snapshot = try await client.fetchAlbum(albumId: albumId)
+            try write(snapshot, to: listingFile)
+            return (snapshot, false)
+        } catch where isUnreachable(error) {
+            guard FileManager.default.fileExists(atPath: listingFile.path) else { throw error }
+            let data = try Data(contentsOf: listingFile)
+            return (try JSONDecoder().decode(RemoteAlbumSnapshot.self, from: data), true)
+        }
+    }
+
+    /// Decisions waiting to be sent, oldest first. Throws on an unreadable
+    /// outbox rather than reading it as empty, which would silently lose swipes.
+    func pending() throws -> [PendingRemoteDecision] {
+        guard FileManager.default.fileExists(atPath: pendingFile.path) else { return [] }
+        return try JSONDecoder().decode([PendingRemoteDecision].self, from: Data(contentsOf: pendingFile))
+    }
+
+    /// Queues a decision to send later; a newer decision for the same item
+    /// replaces the older one.
+    func enqueue(_ decision: RemoteDecision, mediaKey: String) throws {
+        let list = try pending().filter { $0.mediaKey != mediaKey }
+            + [PendingRemoteDecision(mediaKey: mediaKey, decision: decision)]
+        try write(list, to: pendingFile)
+    }
+
+    /// POSTs queued decisions oldest first, removing each one only after the
+    /// server answered. Stops at the first unreachable failure (it and the
+    /// rest stay queued for the next flush). A decision the server REJECTS is
+    /// dropped and its message returned in `rejected`, so one bad entry (e.g.
+    /// an item removed from the album) cannot block the queue forever.
+    /// `counts` is the server's totals after the last accepted POST.
+    func flushPending() async throws
+        -> (counts: RemoteAlbumCounts?, rejected: [(entry: PendingRemoteDecision, message: String)]) {
+        var counts: RemoteAlbumCounts?
+        var rejected: [(entry: PendingRemoteDecision, message: String)] = []
+        for entry in try pending() {
+            do {
+                counts = try await decide(mediaKey: entry.mediaKey, entry.decision)
+            } catch where isUnreachable(error) {
+                break
+            } catch {
+                rejected.append((entry, "Couldn't save \(entry.decision.rawValue): \(error)"))
+            }
+            // Re-read rather than drop the first element: a swipe made while
+            // this POST was in flight may have appended to the file.
+            try write(try pending().filter { $0 != entry }, to: pendingFile)
+        }
+        return (counts, rejected)
+    }
+
+    private func write<T: Encodable>(_ value: T, to file: URL) throws {
+        try FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+        try JSONEncoder().encode(value).write(to: file, options: .atomic)
     }
 
     func saveTrim(mediaKey: String, _ trim: RemoteTrim) async throws {
