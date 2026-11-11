@@ -3666,6 +3666,26 @@ final class WalkthroughUITests: XCTestCase {
                        "the trim must come back from the server listing after reopening the deck, got \(lengthLabel.label)")
     }
 
+    /// Offline (`--force-offline`): swipes in the remote deck must stick and
+    /// be counted, with the banner showing how many are waiting to be sent.
+    func testRemoteAlbumDeckOfflineSwipesQueue() throws {
+        relaunch(withExtraArguments: ["--seed-remote-album", "--reset-sort-state", "--force-offline"])
+        let deckCard = openRemoteAlbumDeckFromUtilities()
+        let counter = app.descendants(matching: .any)["deck.remoteCounter"].firstMatch
+        XCTAssertTrue(counter.waitForExistence(timeout: 15))
+        for _ in 0..<2 {
+            deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+                .press(forDuration: 0.1,
+                       thenDragTo: deckCard.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)),
+                       withVelocity: .default,
+                       thenHoldForDuration: 0.1)
+            sleep(1)
+        }
+        expectation(for: NSPredicate(format: "label == %@", "2 kept · 10 left · 2 unsent"), evaluatedWith: counter)
+        waitForExpectations(timeout: 10)
+        capture("95-remote-deck-offline-unsent")
+    }
+
     /// Swipe in the remote deck, kill the app, cold-launch WITHOUT
     /// --skip-auto-open-deck: the app must reopen the remote deck (banner
     /// showing), not a local month.

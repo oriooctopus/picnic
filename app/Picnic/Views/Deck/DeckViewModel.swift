@@ -345,30 +345,37 @@ final class DeckViewModel: ObservableObject {
         }
     }
 
-    /// Sends swipes queued while offline (on open and on every reconnect).
+    /// Sends swipes queued while offline (on open, on every reconnect, and
+    /// after any online swipe succeeds, which covers a server that was down
+    /// while the phone stayed online: no reconnect event fires for that).
     /// Once the queue is empty the server's counts replace the local
     /// estimate (while some are still queued, the server's counts would
-    /// leave those out). A swipe the server rejected is reverted to unsorted
-    /// with the error shown, the same as a failed online swipe.
+    /// leave those out). If the server rejected any, the listing is reloaded
+    /// so their states and the counter come back from server truth, with the
+    /// error shown, the same outcome as a failed online swipe.
     func flushRemotePending() async {
-        guard let remote else { return }
+        guard let remote, !isFlushingRemote else { return }
+        // Guards against the open-time flush and a reconnect flush running
+        // at once and POSTing the same entry twice.
+        isFlushingRemote = true
+        defer { isFlushingRemote = false }
+        var rejectedMessages: [String] = []
         do {
             guard try !remote.pending().isEmpty else { return remotePendingCount = 0 }
             let (counts, rejected) = try await remote.flushPending()
             let after = try remote.pending()
             remotePendingCount = after.count
             if let counts, after.isEmpty { remoteCounts = counts }
-            guard !rejected.isEmpty else { return }
-            let rejectedKeys = Set(rejected.map(\.entry.mediaKey))
-            for item in orderedItems where rejectedKeys.contains(item.remoteItem?.mediaKey ?? "") {
-                sortStore.setState(.unsorted, forID: item.id, monthKey: monthKey, recordsActivity: false)
-            }
-            refresh(follow: currentItem?.id)
-            remoteError = rejected.map(\.message).joined(separator: "\n")
+            rejectedMessages = rejected.map(\.message)
         } catch {
             remoteError = "Couldn't send saved swipes: \(error)"
         }
+        guard !rejectedMessages.isEmpty else { return }
+        isFlushingRemote = false  // loadRemote flushes again (now without the rejected ones)
+        await loadRemote()
+        remoteError = rejectedMessages.joined(separator: "\n")
     }
+    private var isFlushingRemote = false
 
     /// The saved kept-range of a remote video (this session's save, else the
     /// server's), nil when untrimmed or not a remote video.
@@ -706,6 +713,8 @@ final class DeckViewModel: ObservableObject {
         Task {
             do {
                 remoteCounts = try await remote.decide(mediaKey: remoteItem.mediaKey, decision)
+                // The server is reachable again: send anything queued earlier.
+                if remotePendingCount > 0 { await flushRemotePending() }
             } catch where isUnreachable(error) {
                 queue()
             } catch {

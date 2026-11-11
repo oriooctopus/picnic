@@ -19,6 +19,9 @@ final class RemoteAlbumDeckTests: XCTestCase {
         var failNextTrim = false
         /// Every call fails the way an unreachable server does (URLError).
         var unreachable = false
+        /// POSTs fail as unreachable once this many have succeeded (0 = all
+        /// POSTs fail while the listing GET still works).
+        var postsUnreachableAfter: Int?
         let albumId = RemoteAlbumService.oliverAlbumId
 
         struct Boom: Error, CustomStringConvertible { var description: String { "boom" } }
@@ -51,6 +54,7 @@ final class RemoteAlbumDeckTests: XCTestCase {
 
         func postDecision(albumId: String, mediaKey: String, decision: RemoteDecision) async throws -> RemoteAlbumCounts {
             if unreachable { throw URLError(.notConnectedToInternet) }
+            if let limit = postsUnreachableAfter, posted.count >= limit { throw URLError(.timedOut) }
             if failNextPost {
                 failNextPost = false
                 throw Boom()
@@ -145,6 +149,64 @@ final class RemoteAlbumDeckTests: XCTestCase {
         await online.loadRemote()
         XCTAssertEqual(rig.client.posted.map(\.mediaKey), ["k1", "k2"], "the queued skip must be sent on the next online open")
         XCTAssertEqual(online.remotePendingCount, 0)
+    }
+
+    /// Flush stops at the first unreachable POST: what was sent leaves the
+    /// outbox, everything after stays, in order.
+    func testPartialFlushKeepsUnsentEntriesInOrder() async throws {
+        let rig = try await makeRig()
+        rig.viewModel.isOffline = { true }
+        rig.viewModel.markKept()        // k1
+        rig.viewModel.markForDelete()   // k2
+        rig.viewModel.markKept()        // k3
+        XCTAssertEqual(rig.viewModel.remotePendingCount, 3)
+
+        rig.client.postsUnreachableAfter = 1
+        await rig.viewModel.flushRemotePending()
+
+        XCTAssertEqual(rig.client.posted.map(\.mediaKey), ["k1"])
+        XCTAssertEqual(try rig.service.pending().map(\.mediaKey), ["k2", "k3"],
+                       "unsent swipes must stay queued, oldest first")
+        XCTAssertEqual(rig.viewModel.remotePendingCount, 2)
+    }
+
+    /// Server answers the listing but POSTs still fail: queued swipes must be
+    /// laid over the fresh listing, not shown as undecided again.
+    func testOnlineReopenOverlaysStillQueuedSwipes() async throws {
+        let rig = try await makeRig()
+        rig.viewModel.isOffline = { true }
+        rig.viewModel.markKept()        // k1
+        rig.viewModel.markForDelete()   // k2
+        rig.client.postsUnreachableAfter = 0
+
+        let reopened = rig.reopen()
+        reopened.isOffline = { false }
+        await reopened.loadRemote()
+
+        XCTAssertNil(reopened.remoteError)
+        XCTAssertEqual(reopened.currentItem?.id, "gphotos:oliver-album:k3")
+        XCTAssertEqual(rig.store.state(forID: "gphotos:oliver-album:k2"), .skipped)
+        XCTAssertEqual(reopened.remoteCounts?.keep, 2)
+        XCTAssertEqual(reopened.remoteCounts?.skip, 1)
+        XCTAssertEqual(reopened.remoteCounts?.undecided, 1)
+        XCTAssertEqual(reopened.remotePendingCount, 2)
+    }
+
+    /// A queued swipe the server refuses: dropped from the outbox, shown as
+    /// an error, and the item and counter go back to the server's truth.
+    func testRejectedQueuedSwipeRevertsFromServer() async throws {
+        let rig = try await makeRig()
+        rig.viewModel.isOffline = { true }
+        rig.viewModel.markKept()  // k1
+        rig.client.failNextPost = true
+
+        await rig.viewModel.flushRemotePending()
+
+        XCTAssertNotNil(rig.viewModel.remoteError, "a refused swipe must be shown")
+        XCTAssertEqual(try rig.service.pending(), [], "a refused swipe must not block the queue")
+        XCTAssertEqual(rig.store.state(forID: "gphotos:oliver-album:k1"), .unsorted)
+        XCTAssertEqual(rig.viewModel.remoteCounts?.keep, 1, "counter must drop the refused keep")
+        XCTAssertEqual(rig.viewModel.currentItem?.id, "gphotos:oliver-album:k1")
     }
 
     func testOfflineFirstOpenWithNoSavedListingShowsError() async throws {

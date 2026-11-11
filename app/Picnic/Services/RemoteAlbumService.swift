@@ -327,6 +327,12 @@ struct RemoteAlbumService {
     /// dropped and its message returned in `rejected`, so one bad entry (e.g.
     /// an item removed from the album) cannot block the queue forever.
     /// `counts` is the server's totals after the last accepted POST.
+    ///
+    /// @MainActor is load-bearing: `enqueue` runs on the main actor (from a
+    /// swipe), so pinning this here too means each read-filter-write of
+    /// pending.json below runs without a swipe's write landing in between.
+    /// Off the main actor, a swipe made during a POST could be overwritten.
+    @MainActor
     func flushPending() async throws
         -> (counts: RemoteAlbumCounts?, rejected: [(entry: PendingRemoteDecision, message: String)]) {
         var counts: RemoteAlbumCounts?
