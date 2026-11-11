@@ -2,7 +2,7 @@ import XCTest
 @testable import Picnic
 
 @MainActor
-final class SuperappUploadsViewModelTests: XCTestCase {
+final class SuperappScreenshotFilterTests: XCTestCase {
     private func upload(_ id: String) -> SuperappUpload {
         SuperappUpload(id: id, filename: "\(id).PNG", captureDate: nil, captureDateHasOffset: false, pixelWidth: nil, pixelHeight: nil)
     }
