@@ -24,6 +24,16 @@ enum SuperappLibraryMatcher {
         }
     }
 
+    /// Whether the library asset is a screenshot. In `--superapp-seed` mode every
+    /// seeded asset counts (PhotoKit cannot create screenshot-subtype assets).
+    static func isScreenshot(assetID: String) -> Bool {
+        #if DEBUG
+        if SuperappSeed.isEnabled { return true }
+        #endif
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [assetID], options: nil).firstObject else { return false }
+        return asset.mediaSubtypes.contains(.photoScreenshot)
+    }
+
     /// Uploaded records still in the library: fetch + match, off the main thread.
     static func loadMatched() async throws -> (uploads: [SuperappUpload], matches: [SuperappMatch]) {
         #if DEBUG

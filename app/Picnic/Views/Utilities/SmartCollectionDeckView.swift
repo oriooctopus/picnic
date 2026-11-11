@@ -9,8 +9,19 @@ struct SmartCollectionDeckView: View {
     @EnvironmentObject var appState: AppState
     let kind: SmartCollectionKind
 
+    private enum Segment: Hashable { case all, uploaded }
+
+    @StateObject private var uploads: SuperappUploadsViewModel
+    @State private var segment: Segment = .all
     @State private var assets: [PHAsset] = []
     @State private var pageIndex = 0
+
+    init(kind: SmartCollectionKind, photoLibrary: PhotoLibraryService) {
+        self.kind = kind
+        _uploads = StateObject(wrappedValue: .live(photoLibrary: photoLibrary, assetFilter: SuperappLibraryMatcher.isScreenshot))
+    }
+
+    private var hasUploadedSegment: Bool { kind == .screenshots }
 
     var body: some View {
         VStack {
@@ -24,7 +35,23 @@ struct SmartCollectionDeckView: View {
             }
             .padding()
 
-            if assets.isEmpty {
+            if hasUploadedSegment {
+                Picker("", selection: $segment) {
+                    Text("All").tag(Segment.all)
+                    Text(uploadedLabel).tag(Segment.uploaded)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .accessibilityIdentifier("smartCollection.segment")
+            }
+
+            if segment == .uploaded {
+                SuperappUploadsGrid(
+                    viewModel: uploads,
+                    onDone: { segment = .all; Task { await reload() } },
+                    onClose: { dismiss() }
+                )
+            } else if assets.isEmpty {
                 Spacer()
                 Text("Nothing here yet").foregroundStyle(.white.opacity(0.6))
                 Spacer()
@@ -40,7 +67,16 @@ struct SmartCollectionDeckView: View {
             }
         }
         .background(Color.black.ignoresSafeArea())
-        .task { assets = appState.photoLibrary.fetchSmartCollection(kind) }
+        .task { await reload() }
+    }
+
+    private var uploadedLabel: String {
+        uploads.state == .loading ? "Uploaded" : "Uploaded \(uploads.items.count)"
+    }
+
+    private func reload() async {
+        assets = appState.photoLibrary.fetchSmartCollection(kind)
+        if hasUploadedSegment { await uploads.load() }
     }
 }
 

@@ -68,7 +68,7 @@ struct UtilitiesView: View {
         .fullScreenCover(item: $destination) { destination in
             switch destination {
             case .smartCollection(let kind):
-                SmartCollectionDeckView(kind: kind).environmentObject(appState)
+                SmartCollectionDeckView(kind: kind, photoLibrary: appState.photoLibrary).environmentObject(appState)
             case .remoteAlbum:
                 // Remote mode: the same DeckView, fed a server-backed album
                 // instead of PhotoKit assets. photoLibrary/mirrorQueue are

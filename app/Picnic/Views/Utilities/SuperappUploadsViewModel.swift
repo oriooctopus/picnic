@@ -26,17 +26,41 @@ final class SuperappUploadsViewModel: ObservableObject {
     @Published private(set) var actionMessage: String?
 
     private let loadMatched: () async throws -> (uploads: [SuperappUpload], matches: [SuperappMatch])
+    private let assetFilter: (String) -> Bool
     private let deleteAssets: ([String]) async throws -> Void
     private let resolve: ([String], SuperappUploadsClient.Action) async throws -> Void
 
     init(
         loadMatched: @escaping () async throws -> (uploads: [SuperappUpload], matches: [SuperappMatch]) = SuperappLibraryMatcher.loadMatched,
+        assetFilter: @escaping (String) -> Bool = { _ in true },
         deleteAssets: @escaping ([String]) async throws -> Void,
         resolve: @escaping ([String], SuperappUploadsClient.Action) async throws -> Void = { try await SuperappUploadsClient.resolve(ids: $0, action: $1) }
     ) {
         self.loadMatched = loadMatched
+        self.assetFilter = assetFilter
         self.deleteAssets = deleteAssets
         self.resolve = resolve
+    }
+
+    /// The real PhotoKit-backed model; `assetFilter` limits which matched assets are listed.
+    static func live(photoLibrary: PhotoLibraryService, assetFilter: @escaping (String) -> Bool = { _ in true }) -> SuperappUploadsViewModel {
+        SuperappUploadsViewModel(
+            assetFilter: assetFilter,
+            deleteAssets: { ids in
+                var assets: [PHAsset] = []
+                PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in assets.append(asset) }
+                #if DEBUG
+                if SuperappSeed.isEnabled { return }
+                #endif
+                try await photoLibrary.deleteAssets(assets)
+            },
+            resolve: { ids, action in
+                #if DEBUG
+                if SuperappSeed.isEnabled { return }
+                #endif
+                try await SuperappUploadsClient.resolve(ids: ids, action: action)
+            }
+        )
     }
 
     var deleteCount: Int { items.count - kept.count }
@@ -53,7 +77,7 @@ final class SuperappUploadsViewModel: ObservableObject {
         actionMessage = nil
         do {
             let (uploads, matches) = try await loadMatched()
-            let assetByUpload = Dictionary(uniqueKeysWithValues: matches.map { ($0.uploadID, $0.assetID) })
+            let assetByUpload = Dictionary(uniqueKeysWithValues: matches.filter { assetFilter($0.assetID) }.map { ($0.uploadID, $0.assetID) })
             items = uploads.compactMap { upload in
                 assetByUpload[upload.id].map { Item(id: upload.id, assetID: $0) }
             }

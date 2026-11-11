@@ -2878,6 +2878,30 @@ final class WalkthroughUITests: XCTestCase {
         capture("superapp-uploaded-one-kept")
     }
 
+    /// Screenshots smart collection: "All" | "Uploaded N" segment. Seed mode
+    /// treats every seeded asset as a screenshot so the Uploaded segment has tiles.
+    func testScreenshotsUploadedSegment() throws {
+        relaunch(withExtraArguments: ["--superapp-seed"])
+        _ = openMyLifeGrid()
+        goToUtilities()
+
+        let tile = app.descendants(matching: .any)["smartCollection.tile.screenshots"].firstMatch
+        XCTAssertTrue(tile.waitForExistence(timeout: 10), "Utilities should list the Screenshots tile")
+        tile.tap()
+
+        let segment = app.segmentedControls["smartCollection.segment"]
+        XCTAssertTrue(segment.waitForExistence(timeout: 10), "Screenshots should show the All | Uploaded segment")
+        let uploaded = segment.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Uploaded '")).firstMatch
+        XCTAssertTrue(uploaded.waitForExistence(timeout: 20), "Uploaded segment should show a count")
+        capture("screenshots-segment-all")
+        uploaded.tap()
+
+        let delete = app.buttons["superapp.deleteButton"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 20), "Uploaded segment should show the delete button")
+        XCTAssertTrue(delete.label.hasPrefix("Delete "), "Got: \(delete.label)")
+        capture("screenshots-segment-uploaded")
+    }
+
     /// Regression test for the March 2026 bug report: a scan still in
     /// progress (server status "scanning") must render the scanning state,
     /// never the empty/"everything matches" loaded state. Launches with

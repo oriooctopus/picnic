@@ -4,35 +4,50 @@ import Photos
 /// Library photos/videos already uploaded to the desktop via the Superapp.
 /// All start selected for deletion; tapping a tile flips it to keep.
 struct SuperappUploadsView: View {
-    @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel: SuperappUploadsViewModel
+
+    init(photoLibrary: PhotoLibraryService) {
+        _viewModel = StateObject(wrappedValue: .live(photoLibrary: photoLibrary))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Uploaded")
+                    .font(.title2.bold())
+                    .foregroundStyle(.white)
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 32, height: 32)
+                        .background(Circle().fill(Color(white: 0.18)))
+                }
+                .accessibilityIdentifier("superapp.close")
+            }
+            .padding(.horizontal)
+            .padding(.top, 8)
+            SuperappUploadsGrid(viewModel: viewModel, onDone: { dismiss() }, onClose: { dismiss() })
+                .task { await viewModel.load() }
+        }
+        .background(Color.black.ignoresSafeArea())
+    }
+}
+
+/// The batch-delete grid, embeddable without its own title/close button.
+/// The owner loads the model.
+struct SuperappUploadsGrid: View {
+    @ObservedObject var viewModel: SuperappUploadsViewModel
+    let onDone: () -> Void
+    let onClose: () -> Void
     @State private var enlargedAssetID: String?
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 4)
 
-    init(photoLibrary: PhotoLibraryService) {
-        _viewModel = StateObject(wrappedValue: SuperappUploadsViewModel(
-            deleteAssets: { ids in
-                var assets: [PHAsset] = []
-                PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in assets.append(asset) }
-                #if DEBUG
-                if SuperappSeed.isEnabled { return }
-                #endif
-                try await photoLibrary.deleteAssets(assets)
-            },
-            resolve: { ids, action in
-                #if DEBUG
-                if SuperappSeed.isEnabled { return }
-                #endif
-                try await SuperappUploadsClient.resolve(ids: ids, action: action)
-            }
-        ))
-    }
-
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
             switch viewModel.state {
             case .loading:
                 ProgressView().tint(.white)
@@ -41,10 +56,9 @@ struct SuperappUploadsView: View {
             case .loaded, .deleting:
                 content
             case .done:
-                Color.clear.onAppear { dismiss() }
+                Color.clear.onAppear { onDone() }
             }
         }
-        .task { await viewModel.load() }
         .overlay {
             if let id = enlargedAssetID { enlarged(id) }
         }
@@ -52,15 +66,6 @@ struct SuperappUploadsView: View {
 
     private var content: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Uploaded")
-                    .font(.title2.bold())
-                    .foregroundStyle(.white)
-                Spacer()
-                closeButton
-            }
-            .padding(.horizontal)
-            .padding(.top, 8)
             ScrollView {
                 LazyVGrid(columns: columns, spacing: 6) {
                     ForEach(viewModel.items) { tile($0) }
@@ -92,17 +97,6 @@ struct SuperappUploadsView: View {
             .padding(.bottom, 8)
             .accessibilityIdentifier("superapp.deleteButton")
         }
-    }
-
-    private var closeButton: some View {
-        Button { dismiss() } label: {
-            Image(systemName: "xmark")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 32, height: 32)
-                .background(Circle().fill(Color(white: 0.18)))
-        }
-        .accessibilityIdentifier("superapp.close")
     }
 
     private func tile(_ item: SuperappUploadsViewModel.Item) -> some View {
@@ -147,7 +141,7 @@ struct SuperappUploadsView: View {
                 .multilineTextAlignment(.center)
             Button("Retry") { Task { await viewModel.load() } }
                 .buttonStyle(.borderedProminent)
-            Button("Close") { dismiss() }.foregroundStyle(.white)
+            Button("Close") { onClose() }.foregroundStyle(.white)
         }
         .padding()
         .accessibilityIdentifier("superapp.error")
