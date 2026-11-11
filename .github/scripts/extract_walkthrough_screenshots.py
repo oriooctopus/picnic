@@ -89,6 +89,7 @@ OPTIONAL = [
     "79-remote-trim-open", "80-remote-trim-dragged", "81-remote-trim-reopened",
     "82-remote-trim-reopened-after-reopen-deck",
     "83-remote-card-display-resolution", "84-remote-card-no-display-keeps-thumb",
+    "95-remote-deck-offline-unsent",
     "99-final-testRemoteAlbumDeck",
     # Copy Picnic Link (test53).
     "53-share-sheet", "53-linked-photo", "99-final-test53CopyPicnicLinkOpensPhotoFullScreen",
