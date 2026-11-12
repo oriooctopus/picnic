@@ -2902,6 +2902,46 @@ final class WalkthroughUITests: XCTestCase {
         capture("screenshots-segment-uploaded")
     }
 
+    /// Screenshots "All" grid mode: every screenshot starts marked for
+    /// deletion, tapping one keeps it, and the keep survives closing the view.
+    func testScreenshotsAllGrid() throws {
+        relaunch(withExtraArguments: ["--superapp-seed"])
+        _ = openMyLifeGrid()
+        goToUtilities()
+
+        let tile = app.descendants(matching: .any)["smartCollection.tile.screenshots"].firstMatch
+        XCTAssertTrue(tile.waitForExistence(timeout: 10), "Utilities should list the Screenshots tile")
+        tile.tap()
+
+        let toggle = app.buttons["smartCollection.gridToggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10), "Screenshots should show the grid toggle")
+        toggle.tap()
+
+        let delete = app.buttons["superapp.deleteButton"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 20), "Grid mode should show the delete button")
+        let items = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'superapp.item.'"))
+        XCTAssertTrue(items.firstMatch.waitForExistence(timeout: 20), "Grid mode should list tiles")
+        // Un-keep anything a previous run on this simulator left kept.
+        let keptBefore = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'superapp.item.' AND label == 'keep'"))
+        while keptBefore.count > 0 { keptBefore.firstMatch.tap() }
+        let allLabel = delete.label
+        capture("screenshots-grid-all-delete")
+
+        items.element(boundBy: 1).tap()
+        capture("screenshots-grid-one-kept")
+        XCTAssertNotEqual(delete.label, allLabel, "Keeping a tile should lower the delete count")
+        let oneKeptLabel = delete.label
+
+        app.buttons["smartCollection.dismiss"].tap()
+        XCTAssertTrue(tile.waitForExistence(timeout: 10))
+        tile.tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        toggle.tap()
+        XCTAssertTrue(delete.waitForExistence(timeout: 20))
+        capture("screenshots-grid-reopened")
+        XCTAssertEqual(delete.label, oneKeptLabel, "The kept tile should still be kept after reopening")
+    }
+
     /// Regression test for the March 2026 bug report: a scan still in
     /// progress (server status "scanning") must render the scanning state,
     /// never the empty/"everything matches" loaded state. Launches with

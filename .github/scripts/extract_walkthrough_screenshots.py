@@ -92,6 +92,8 @@ OPTIONAL = [
     "95-remote-deck-offline-unsent",
     "screenshots-segment-all",
     "screenshots-segment-uploaded", "99-final-testScreenshotsUploadedSegment",
+    "screenshots-grid-all-delete", "screenshots-grid-one-kept", "screenshots-grid-reopened",
+    "99-final-testScreenshotsAllGrid",
     "99-final-testRemoteAlbumDeck",
     # Copy Picnic Link (test53).
     "53-share-sheet", "53-linked-photo", "99-final-test53CopyPicnicLinkOpensPhotoFullScreen",

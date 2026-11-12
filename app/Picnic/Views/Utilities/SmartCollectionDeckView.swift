@@ -4,6 +4,7 @@ import Photos
 /// Read-only paged browser for a smart collection. Deliberately simpler than
 /// the month Deck (no swipe-to-delete-cue semantics): SPEC.md scopes
 /// Utilities to browsable smart collections with counts, not sortable decks.
+/// Screenshots add two batch-delete grids: a grid mode for All, and Uploaded.
 struct SmartCollectionDeckView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var appState: AppState
@@ -12,13 +13,16 @@ struct SmartCollectionDeckView: View {
     private enum Segment: Hashable { case all, uploaded }
 
     @StateObject private var uploads: SuperappUploadsViewModel
+    @StateObject private var allGrid: SuperappUploadsViewModel
     @State private var segment: Segment = .all
+    @State private var gridMode = false
     @State private var assets: [PHAsset] = []
     @State private var pageIndex = 0
 
     init(kind: SmartCollectionKind, photoLibrary: PhotoLibraryService) {
         self.kind = kind
         _uploads = StateObject(wrappedValue: .live(photoLibrary: photoLibrary, assetFilter: SuperappLibraryMatcher.isScreenshot))
+        _allGrid = StateObject(wrappedValue: .liveCollection(photoLibrary: photoLibrary, kind: kind))
     }
 
     private var hasUploadedSegment: Bool { kind == .screenshots }
@@ -28,6 +32,16 @@ struct SmartCollectionDeckView: View {
             HStack {
                 Text(kind.title).font(.headline).foregroundStyle(.white)
                 Spacer()
+                if hasUploadedSegment && segment == .all {
+                    Button {
+                        gridMode.toggle()
+                        if gridMode { Task { await allGrid.load() } }
+                    } label: {
+                        Image(systemName: gridMode ? "rectangle.portrait" : "square.grid.3x3").foregroundStyle(.white)
+                    }
+                    .padding(.trailing, 16)
+                    .accessibilityIdentifier("smartCollection.gridToggle")
+                }
                 Button { dismiss() } label: {
                     Image(systemName: "xmark").foregroundStyle(.white)
                 }
@@ -49,6 +63,13 @@ struct SmartCollectionDeckView: View {
                 SuperappUploadsGrid(
                     viewModel: uploads,
                     onDone: { segment = .all; Task { await reload() } },
+                    onClose: { dismiss() }
+                )
+            } else if gridMode {
+                // Stays in the grid after a delete: reloading shows the kept tiles.
+                SuperappUploadsGrid(
+                    viewModel: allGrid,
+                    onDone: { Task { await reload(); await allGrid.load() } },
                     onClose: { dismiss() }
                 )
             } else if assets.isEmpty {
