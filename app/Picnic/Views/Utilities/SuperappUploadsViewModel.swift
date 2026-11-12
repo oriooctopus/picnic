@@ -125,7 +125,7 @@ final class SuperappUploadsViewModel: ObservableObject {
             items = try await loadItems()
             // Intersect with the current items so ids of deleted assets drop out.
             let stored = keptStore.flatMap { $0.defaults.stringArray(forKey: $0.key) } ?? []
-            kept = []
+            kept = Set(stored).intersection(items.map(\.id))
             state = .loaded
         } catch {
             state = .failed(error.localizedDescription)
