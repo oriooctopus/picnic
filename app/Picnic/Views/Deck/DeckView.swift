@@ -170,6 +170,7 @@ struct DeckView: View {
                         // off also keeps the left swipe live: deleteBlocked
                         // would otherwise remove `.left` from the card.
                         showsICloudBadge: !viewModel.isRemote && imageState.showsICloudBadge,
+                        showsDownloading: !viewModel.isRemote && imageState.showsDownloading,
                         deleteBlocked: !viewModel.isRemote && imageState.deleteBlocked,
                         onBlockedDelete: { showToast(.deleteBlocked, seconds: 3) },
                         onDelete: { viewModel.markForDelete() },
@@ -1192,6 +1193,7 @@ private struct DeckCard: View {
     let onCompare: (CompareGroup) -> Void
     let onLongPress: () -> Void
     let showsICloudBadge: Bool
+    let showsDownloading: Bool
     let deleteBlocked: Bool
     let onBlockedDelete: () -> Void
     let onDelete: () -> Void
@@ -1236,6 +1238,7 @@ private struct DeckCard: View {
             onCompare: { if let compareGroup { onCompare(compareGroup) } },
             onLongPress: onLongPress,
             showsICloudBadge: showsICloudBadge,
+            showsDownloading: showsDownloading,
             deleteBlocked: deleteBlocked,
             onBlockedDelete: onBlockedDelete,
             onDelete: onDelete,
@@ -1280,6 +1283,7 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
     let onCompare: () -> Void
     let onLongPress: () -> Void
     let showsICloudBadge: Bool
+    let showsDownloading: Bool
     let deleteBlocked: Bool
     let onBlockedDelete: () -> Void
     let onDelete: () -> Void
@@ -1301,8 +1305,8 @@ private struct ShuffleCardRepresentable: UIViewRepresentable {
     func updateUIView(_ card: PicnicSwipeCard, context: Context) {
         card.configure(
             image: image, isLivePhoto: isLivePhoto, compareCount: compareCount, videoPlayer: videoPlayer,
-            showsICloudBadge: showsICloudBadge, deleteBlocked: deleteBlocked,
-            isRemote: isRemote
+            showsICloudBadge: showsICloudBadge, showsDownloading: showsDownloading,
+            deleteBlocked: deleteBlocked, isRemote: isRemote
         )
         card.onBlockedDelete = onBlockedDelete
         card.onCompare = onCompare

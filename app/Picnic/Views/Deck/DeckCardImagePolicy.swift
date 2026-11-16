@@ -73,22 +73,36 @@ enum DeckCardImagePolicy {
 struct DeckCardImageState: Equatable {
     private(set) var quality: DeckCardImagePolicy.Quality = .loading
     private(set) var isInCloud = false
+    /// PhotoKit's final callback has arrived. Until then a `.partial` card is
+    /// mid-download: PhotoKit only sets `isInCloud` once a download FAILS, so
+    /// without this a slow iCloud download looked exactly like a permanently
+    /// blurry photo, with no badge and no spinner.
+    private(set) var isFinal = false
 
     /// A new card became current. A prefetched stand-in is pixels on screen, but
     /// not the final image.
     mutating func begin(prefetched: Bool) {
         quality = prefetched ? .partial : .loading
         isInCloud = false
+        isFinal = false
     }
 
     /// Video cards have their own load/retry UI and are never delete-blocked.
-    mutating func markVideo() { quality = .full }
+    mutating func markVideo() { quality = .full; isFinal = true }
 
     mutating func apply(_ update: DeckImageUpdate) {
         quality = DeckCardImagePolicy.next(after: quality, hasImage: update.image != nil, isDegraded: update.isDegraded)
         isInCloud = update.isInCloud
+        // Same rule as ThumbnailLoader.imageUpdates: a degraded image is
+        // followed by another callback, anything else ends the request.
+        if !(update.isDegraded && update.image != nil) { isFinal = true }
     }
 
-    var showsICloudBadge: Bool { DeckCardImagePolicy.showsICloudBadge(quality: quality, isInCloud: isInCloud) }
+    /// A low-res stand-in is on screen and the full image is still on its way.
+    var showsDownloading: Bool { quality == .partial && !isFinal }
+
+    var showsICloudBadge: Bool {
+        !showsDownloading && DeckCardImagePolicy.showsICloudBadge(quality: quality, isInCloud: isInCloud)
+    }
     var deleteBlocked: Bool { DeckCardImagePolicy.deleteBlocked(quality: quality) }
 }

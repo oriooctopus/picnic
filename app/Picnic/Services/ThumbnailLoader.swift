@@ -47,6 +47,9 @@ enum ThumbnailLoader {
     /// stand-in. Same DEBUG-only, read-once pattern as `--slow-image-loads`.
     static let simulateUndownloaded = ProcessInfo.processInfo.arguments.contains("--simulate-undownloaded-images")
     static let simulateICloudLowRes = ProcessInfo.processInfo.arguments.contains("--simulate-icloud-lowres")
+    /// `--simulate-icloud-downloading`: only the degraded stand-in arrives and
+    /// the full image never does, i.e. a download still in flight.
+    static let simulateICloudDownloading = ProcessInfo.processInfo.arguments.contains("--simulate-icloud-downloading")
     /// `--simulate-partially-downloaded` makes `LocalAvailability` report every
     /// odd-positioned item (month order) as not downloaded, so a UI test can
     /// see offline-only mode filter a deck without a real iCloud library.
@@ -59,15 +62,14 @@ enum ThumbnailLoader {
         if simulateUndownloaded {
             return [DeckImageUpdate(image: nil, isDegraded: false, isInCloud: true)]
         }
-        if simulateICloudLowRes {
+        if simulateICloudLowRes || simulateICloudDownloading {
             let standIn = UIGraphicsImageRenderer(size: CGSize(width: 60, height: 80)).image { ctx in
                 UIColor.gray.setFill()
                 ctx.fill(CGRect(x: 0, y: 0, width: 60, height: 80))
             }
-            return [
-                DeckImageUpdate(image: standIn, isDegraded: true, isInCloud: true),
-                DeckImageUpdate(image: nil, isDegraded: false, isInCloud: true),
-            ]
+            let degraded = DeckImageUpdate(image: standIn, isDegraded: true, isInCloud: false)
+            if simulateICloudDownloading { return [degraded] }
+            return [degraded, DeckImageUpdate(image: nil, isDegraded: false, isInCloud: true)]
         }
         return nil
     }

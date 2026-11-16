@@ -55,6 +55,19 @@ final class DeckOfflineGateUITests: XCTestCase {
         XCTAssertTrue(pending.waitForExistence(timeout: 5), "the user can see the low-res photo, so delete must be allowed")
         XCTAssertEqual(pending.label, "1")
     }
+
+    func testCardStillDownloadingShowsTheDownloadingBadge() {
+        let (app, _) = launch("--simulate-icloud-downloading")
+        let badge = app.descendants(matching: .any)["deck.downloadingBadge"].firstMatch
+        XCTAssertTrue(badge.waitForExistence(timeout: 10),
+                      "a low-res card whose full image is still downloading must say so")
+        XCTAssertFalse(app.descendants(matching: .any)["deck.iCloudBadge"].firstMatch.exists,
+                       "the in-iCloud badge is for a failed download, not one in progress")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "deck-downloading-badge"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
 }
 
 /// BestPhotoResolver reads PHAssetResource's non-public `fileSize` by KVC. The

@@ -127,6 +127,36 @@ final class PicnicSwipeCard: SwipeCard {
         return button
     }()
 
+    /// Shown while a low-res stand-in is on screen and the full image is still
+    /// downloading from iCloud, so a blurry card reads as "loading", not as a
+    /// bad photo. Revealed only after `downloadingBadgeDelay`: a local photo's
+    /// full image follows its stand-in within a few frames, and showing this
+    /// at once would flash it on nearly every swipe.
+    private let downloadingBadge: UIButton = {
+        var config = UIButton.Configuration.filled()
+        config.baseBackgroundColor = UIColor.black.withAlphaComponent(0.55)
+        config.baseForegroundColor = .white
+        config.showsActivityIndicator = true
+        config.title = "Downloading"
+        config.imagePadding = 6
+        config.cornerStyle = .capsule
+        config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 10, bottom: 4, trailing: 10)
+        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
+            var attrs = attrs
+            attrs.font = UIFont.preferredFont(forTextStyle: .caption1)
+            return attrs
+        }
+        let button = UIButton(configuration: config)
+        button.isUserInteractionEnabled = false
+        button.isHidden = true
+        button.accessibilityIdentifier = "deck.downloadingBadge"
+        return button
+    }()
+    /// Guessed, not measured: longer than a local full-image decode, short
+    /// enough that a real iCloud wait is flagged almost at once.
+    static let downloadingBadgeDelay: TimeInterval = 0.4
+    private var pendingDownloadingReveal: DispatchWorkItem?
+
     /// Accent frame for the remote-album deck (see RemoteDeckStyle). A real
     /// subview of `dragView`, not a SwiftUI overlay, so it rides Shuffle's drag
     /// transform with the photo. Hidden for local cards, which therefore look
@@ -177,6 +207,9 @@ final class PicnicSwipeCard: SwipeCard {
             if !iCloudBadge.isHidden {
                 elements.append(iCloudBadge)
             }
+            if !downloadingBadge.isHidden {
+                elements.append(downloadingBadge)
+            }
             return elements
         }
         set {}
@@ -223,6 +256,7 @@ final class PicnicSwipeCard: SwipeCard {
         dragView.addSubview(liveBadge)
         dragView.addSubview(comparePill)
         dragView.addSubview(iCloudBadge)
+        dragView.addSubview(downloadingBadge)
         dragView.addSubview(remoteBorderView)
         comparePill.accessibilityIdentifier = "deck.comparePill"
         comparePill.addTarget(self, action: #selector(handleCompareTap), for: .touchUpInside)
@@ -291,6 +325,12 @@ final class PicnicSwipeCard: SwipeCard {
         dragView.bringSubviewToFront(liveBadge)
         dragView.bringSubviewToFront(comparePill)
         dragView.bringSubviewToFront(iCloudBadge)
+        let downloadingSize = downloadingBadge.sizeThatFits(CGSize(width: dragView.bounds.width, height: 32))
+        downloadingBadge.frame = CGRect(
+            x: dragView.bounds.width - downloadingSize.width - 12, y: 12,
+            width: downloadingSize.width, height: downloadingSize.height
+        )
+        dragView.bringSubviewToFront(downloadingBadge)
         // Frame goes on top of everything so badges never cover it.
         dragView.bringSubviewToFront(remoteBorderView)
     }
@@ -311,15 +351,36 @@ final class PicnicSwipeCard: SwipeCard {
     /// Test hooks: what the configured card currently lets and shows.
     var allowsDeleteSwipe: Bool { swipeDirections.contains(.left) }
     var isICloudBadgeVisible: Bool { !iCloudBadge.isHidden }
+    var isDownloadingBadgeVisible: Bool { !downloadingBadge.isHidden }
+
+    /// Hides at once; shows only if still downloading after the delay.
+    /// configure runs on every SwiftUI update, so an already scheduled or
+    /// visible badge is left alone rather than restarting the timer.
+    private func setDownloading(_ downloading: Bool) {
+        guard downloading else {
+            pendingDownloadingReveal?.cancel()
+            pendingDownloadingReveal = nil
+            downloadingBadge.isHidden = true
+            return
+        }
+        guard downloadingBadge.isHidden, pendingDownloadingReveal == nil else { return }
+        let reveal = DispatchWorkItem { [weak self] in
+            self?.downloadingBadge.isHidden = false
+            self?.pendingDownloadingReveal = nil
+        }
+        pendingDownloadingReveal = reveal
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.downloadingBadgeDelay, execute: reveal)
+    }
 
     func configure(
         image: UIImage?, isLivePhoto: Bool, compareCount: Int?, videoPlayer: AVPlayer?,
-        showsICloudBadge: Bool = false, deleteBlocked: Bool = false,
+        showsICloudBadge: Bool = false, showsDownloading: Bool = false, deleteBlocked: Bool = false,
         isRemote: Bool = false
     ) {
         imageView.image = image
         remoteBorderView.isHidden = !isRemote
         iCloudBadge.isHidden = !showsICloudBadge
+        setDownloading(showsDownloading)
         self.deleteBlocked = deleteBlocked
         // Shuffle only commits a swipe in a listed direction; leaving .left out
         // makes a left drag a cancelled swipe (spring back) while keep stays live.

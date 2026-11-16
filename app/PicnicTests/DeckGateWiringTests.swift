@@ -28,12 +28,25 @@ final class DeckGateWiringTests: XCTestCase {
         var s = DeckCardImageState()
         s.begin(prefetched: false)
         s.apply(update(image: true, degraded: true, inCloud: true))
-        XCTAssertTrue(s.showsICloudBadge, "low-res stand-in of an iCloud photo must show the badge")
+        XCTAssertTrue(s.showsDownloading, "while the full image is still coming, the card says it is downloading")
+        XCTAssertFalse(s.showsICloudBadge, "the in-iCloud badge waits until the download has actually failed")
         // iCloud download fails: PhotoKit's final callback has no image.
         s.apply(update(image: false, degraded: false, inCloud: true))
         XCTAssertEqual(s.quality, .partial, "a failed download after a low-res image must keep .partial (the fold)")
         XCTAssertFalse(s.deleteBlocked, "the user can see the low-res photo, so delete stays allowed")
         XCTAssertTrue(s.showsICloudBadge, "badge stays while the low-res stand-in is what is shown")
+        XCTAssertFalse(s.showsDownloading, "a finished (failed) request is no longer downloading")
+    }
+
+    func testPrefetchedStandInShowsDownloadingUntilTheFullImageArrives() {
+        var s = DeckCardImageState()
+        s.begin(prefetched: true)
+        XCTAssertTrue(s.showsDownloading, "a promoted prefetch is low-res until PhotoKit's final image")
+        // PhotoKit's degraded callback during a live download has isInCloud false.
+        s.apply(update(image: true, degraded: true, inCloud: false))
+        XCTAssertTrue(s.showsDownloading, "a degraded callback is not the end of the download")
+        s.apply(update(image: true, degraded: false, inCloud: false))
+        XCTAssertFalse(s.showsDownloading, "the full image ends the downloading state")
     }
 
     func testFullImageClearsBadgeAndPrefetchedCardStartsPartial() {
