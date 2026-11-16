@@ -325,7 +325,10 @@ final class PicnicSwipeCard: SwipeCard {
         dragView.bringSubviewToFront(liveBadge)
         dragView.bringSubviewToFront(comparePill)
         dragView.bringSubviewToFront(iCloudBadge)
-        let downloadingSize = downloadingBadge.sizeThatFits(CGSize(width: dragView.bounds.width, height: 32))
+        // intrinsicContentSize, not sizeThatFits: on CI the latter left out the
+        // activity indicator, so the drawn capsule overran its frame and sat
+        // flush against the card's right edge instead of 12pt in.
+        let downloadingSize = downloadingBadge.intrinsicContentSize
         downloadingBadge.frame = CGRect(
             x: dragView.bounds.width - downloadingSize.width - 12, y: 12,
             width: downloadingSize.width, height: downloadingSize.height
@@ -366,6 +369,8 @@ final class PicnicSwipeCard: SwipeCard {
         guard downloadingBadge.isHidden, pendingDownloadingReveal == nil else { return }
         let reveal = DispatchWorkItem { [weak self] in
             self?.downloadingBadge.isHidden = false
+            // Re-measure now that it is visible (see layoutSubviews).
+            self?.setNeedsLayout()
             self?.pendingDownloadingReveal = nil
         }
         pendingDownloadingReveal = reveal
