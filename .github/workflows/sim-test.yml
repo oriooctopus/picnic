@@ -104,10 +104,22 @@ jobs:
             "${FLAGS[@]}" \
             CODE_SIGNING_ALLOWED=NO
 
+      # XCTAttachment screenshots live inside the .xcresult bundle; export them
+      # so a test's `add(XCTAttachment(screenshot:))` reaches the artifact
+      # (same xcresulttool call as visual-walk.yml).
+      - name: Export test attachments
+        if: always()
+        run: |
+          mkdir -p attachments
+          XCRESULT=$(ls -d app/build/Logs/Test/*.xcresult 2>/dev/null | head -1 || true)
+          [ -n "$XCRESULT" ] && xcrun xcresulttool export attachments --path "$XCRESULT" --output-path attachments || true
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sim-screens
-          path: my-life-screen.png
+          path: |
+            my-life-screen.png
+            attachments/
           if-no-files-found: ignore
