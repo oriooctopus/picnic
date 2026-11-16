@@ -2942,6 +2942,28 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(delete.label, oneKeptLabel, "The kept tile should still be kept after reopening")
     }
 
+    /// Screenshots grid bulk selection: Keep all zeroes the delete count,
+    /// Delete all restores it.
+    func testScreenshotsKeepAllDeleteAll() throws {
+        relaunch(withExtraArguments: ["--superapp-seed"])
+        _ = openMyLifeGrid()
+        goToUtilities()
+        let tile = app.descendants(matching: .any)["smartCollection.tile.screenshots"].firstMatch
+        XCTAssertTrue(tile.waitForExistence(timeout: 10))
+        tile.tap()
+        let toggle = app.buttons["smartCollection.gridToggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        toggle.tap()
+        let delete = app.buttons["superapp.deleteButton"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 20))
+        app.buttons["superapp.keepAll"].tap()
+        XCTAssertFalse(delete.isEnabled, "Keep all leaves nothing to delete")
+        capture("screenshots-grid-keep-all")
+        app.buttons["superapp.deleteAll"].tap()
+        XCTAssertTrue(delete.isEnabled, "Delete all marks every tile for deletion")
+        capture("screenshots-grid-delete-all")
+    }
+
     /// Regression test for the March 2026 bug report: a scan still in
     /// progress (server status "scanning") must render the scanning state,
     /// never the empty/"everything matches" loaded state. Launches with

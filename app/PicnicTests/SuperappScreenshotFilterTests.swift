@@ -50,6 +50,24 @@ final class SuperappScreenshotFilterTests: XCTestCase {
         XCTAssertEqual(model.state, .done)
     }
 
+    func testKeepAllDeleteAllAndPaint() async {
+        let defaults = UserDefaults(suiteName: "paint-\(UUID().uuidString)")!
+        let model = collectionModel(["a", "b", "c", "d"], defaults: defaults)
+        await model.load()
+        XCTAssertEqual(model.deleteCount, 4)
+        model.setAllKept(true)
+        XCTAssertEqual(model.deleteCount, 0)
+        model.setAllKept(false)
+        XCTAssertEqual(model.deleteCount, 4)
+        // Drag-paint: two tiles set to keep, persisted only at endPaint.
+        model.set(model.items[1], kept: true)
+        model.set(model.items[2], kept: true)
+        XCTAssertEqual(model.deleteCount, 2)
+        XCTAssertNil(defaults.stringArray(forKey: "kept"))
+        model.endPaint()
+        XCTAssertEqual(Set(defaults.stringArray(forKey: "kept") ?? []), ["b", "c"])
+    }
+
     // MARK: - Whole-collection grid (liveCollection shape: item id == asset id)
 
     private func collectionModel(

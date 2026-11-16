@@ -115,6 +115,25 @@ final class SuperappUploadsViewModel: ObservableObject {
     func toggle(_ item: Item) {
         guard state == .loaded else { return }
         if kept.contains(item.id) { kept.remove(item.id) } else { kept.insert(item.id) }
+        persistKept()
+    }
+
+    /// Marks every tile keep (true) or delete (false) in one step.
+    func setAllKept(_ keep: Bool) {
+        guard state == .loaded else { return }
+        kept = keep ? Set(items.map(\.id)) : []
+        persistKept()
+    }
+
+    /// Drag-select paint: sets one tile without persisting; call `endPaint()` when the drag ends.
+    func set(_ item: Item, kept keep: Bool) {
+        guard state == .loaded, kept.contains(item.id) != keep else { return }
+        if keep { kept.insert(item.id) } else { kept.remove(item.id) }
+    }
+
+    func endPaint() { persistKept() }
+
+    private func persistKept() {
         if let keptStore { keptStore.defaults.set(Array(kept), forKey: keptStore.key) }
     }
 
