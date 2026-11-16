@@ -309,7 +309,13 @@ final class PicnicSwipeCard: SwipeCard {
         imageView.frame = dragView.bounds
         videoLayerView.frame = dragView.bounds
         remoteBorderView.frame = dragView.bounds
-        liveBadge.frame = CGRect(x: 12, y: 12, width: 32, height: 32)
+        // Corner badges anchor to the photo as drawn, not to the card box: the
+        // image is aspect-fit, so a 3:4 photo in the 4:5 card leaves black side
+        // bars that blend into the background, and box-anchored badges ended
+        // up sitting on the photo's edge instead of 12pt inside it.
+        let photo = imageView.image.map { AVMakeRect(aspectRatio: $0.size, insideRect: dragView.bounds) }
+            ?? dragView.bounds
+        liveBadge.frame = CGRect(x: photo.minX + 12, y: photo.minY + 12, width: 32, height: 32)
         let pillSize = comparePill.sizeThatFits(CGSize(width: dragView.bounds.width, height: 44))
         comparePill.frame = CGRect(
             x: (dragView.bounds.width - pillSize.width) / 2,
@@ -319,18 +325,15 @@ final class PicnicSwipeCard: SwipeCard {
         )
         let badgeSize = iCloudBadge.sizeThatFits(CGSize(width: dragView.bounds.width, height: 32))
         iCloudBadge.frame = CGRect(
-            x: dragView.bounds.width - badgeSize.width - 12, y: 12,
+            x: photo.maxX - badgeSize.width - 12, y: photo.minY + 12,
             width: badgeSize.width, height: badgeSize.height
         )
         dragView.bringSubviewToFront(liveBadge)
         dragView.bringSubviewToFront(comparePill)
         dragView.bringSubviewToFront(iCloudBadge)
-        // intrinsicContentSize, not sizeThatFits: on CI the latter left out the
-        // activity indicator, so the drawn capsule overran its frame and sat
-        // flush against the card's right edge instead of 12pt in.
-        let downloadingSize = downloadingBadge.intrinsicContentSize
+        let downloadingSize = downloadingBadge.sizeThatFits(CGSize(width: dragView.bounds.width, height: 32))
         downloadingBadge.frame = CGRect(
-            x: dragView.bounds.width - downloadingSize.width - 12, y: 12,
+            x: photo.maxX - downloadingSize.width - 12, y: photo.minY + 12,
             width: downloadingSize.width, height: downloadingSize.height
         )
         dragView.bringSubviewToFront(downloadingBadge)
@@ -369,8 +372,6 @@ final class PicnicSwipeCard: SwipeCard {
         guard downloadingBadge.isHidden, pendingDownloadingReveal == nil else { return }
         let reveal = DispatchWorkItem { [weak self] in
             self?.downloadingBadge.isHidden = false
-            // Re-measure now that it is visible (see layoutSubviews).
-            self?.setNeedsLayout()
             self?.pendingDownloadingReveal = nil
         }
         pendingDownloadingReveal = reveal
@@ -382,6 +383,8 @@ final class PicnicSwipeCard: SwipeCard {
         showsICloudBadge: Bool = false, showsDownloading: Bool = false, deleteBlocked: Bool = false,
         isRemote: Bool = false
     ) {
+        // A new photo can have a different aspect, which moves the corner badges.
+        if imageView.image?.size != image?.size { setNeedsLayout() }
         imageView.image = image
         remoteBorderView.isHidden = !isRemote
         iCloudBadge.isHidden = !showsICloudBadge
