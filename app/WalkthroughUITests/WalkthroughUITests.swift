@@ -4024,7 +4024,7 @@ final class WalkthroughUITests: XCTestCase {
         let original = app.buttons["download.quality.original"]
         let sized = expectation(for: NSPredicate(format: "label BEGINSWITH 'Original · ' AND NOT (label ENDSWITH '…')"), evaluatedWith: original)
         if XCTWaiter().wait(for: [sized], timeout: 20) != .completed {
-            XCTFail("DIAG original label=\(original.label) value=\(original.value ?? "nil")")
+            XCTFail("Original size never loaded: \(original.label)")
         }
         capture("download-setup")
 

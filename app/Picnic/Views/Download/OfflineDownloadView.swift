@@ -296,7 +296,7 @@ struct OfflineDownloadView: View {
                 .background(RoundedRectangle(cornerRadius: 9).fill(on ? DL.segOn : .clear))
         }
         .accessibilityIdentifier(id)
-        .accessibilityValue(on ? "selected" : downloader.sizeDebug + " items\(downloader.items.count)")
+        .accessibilityValue(on ? "selected" : "")
     }
 
     // MARK: Primary button

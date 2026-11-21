@@ -357,9 +357,7 @@ final class OfflineDownloader: ObservableObject {
     /// Photos always, not only in Original mode: the tray shows "Original · <size>"
     /// next to Screen so he can compare before switching, and loading only after
     /// the switch left that label on "…" forever (seen on the phone). Videos when on.
-    @Published var sizeDebug = "none" // TEMP diagnostic
     func loadSizes() async {
-        sizeDebug = "start m\(months.count) have\(sizes.count)"
         for month in months {
             var wanted: [String] = month.photoIDs
             if includeVideos { wanted += month.videoIDs }
@@ -367,11 +365,15 @@ final class OfflineDownloader: ObservableObject {
             if wanted.isEmpty { continue }
             let ids = wanted
             let loader = sizeLoader
-            let loaded = await Task.detached(priority: .utility) { loader(ids) }.value
+            // A GCD queue, not Task.detached: the reads block (PhotoKit fetch + KVC per
+            // resource), and on the cooperative pool they never got a thread while the
+            // grid's thumbnail work held it. Proven on CI: the first month's detached
+            // task had not returned after 20 s, so the label stayed "Original · …".
+            let loaded = await withCheckedContinuation { cont in
+                DispatchQueue.global(qos: .userInitiated).async { cont.resume(returning: loader(ids)) }
+            }
             sizes.merge(loaded) { _, new in new }
-            sizeDebug += " req\(ids.count)got\(loaded.count)"
         }
-        sizeDebug += " end have\(sizes.count) cancelled\(Task.isCancelled)"
     }
 
     nonisolated static func fileSizes(_ ids: [String]) -> [String: Int64] {
