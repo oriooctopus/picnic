@@ -230,7 +230,10 @@ final class AppState: ObservableObject {
         // plan's unsorted lists follow what was just sorted.
         let paceCutoff = Date().addingTimeInterval(-Double(OfflineDownloadPlan.paceWindowDays) * 86_400)
         offlineDownloader.update(
-            months: OfflineDownloadPlan.months(from: monthBuckets) { [sortStore] in sortStore.state(forID: $0) == .unsorted },
+            months: OfflineDownloadPlan.months(
+                from: monthBuckets,
+                isMonthSorted: { [sortStore] in sortStore.isMonthManuallySorted($0) },
+                isUnsorted: { [sortStore] in sortStore.state(forID: $0) == .unsorted }),
             pace: OfflineDownloadPlan.pace(timestamps: sortStore.sortTimestamps(since: paceCutoff))
         )
     }

@@ -66,6 +66,15 @@ final class OfflineDownloadPlanTests: XCTestCase {
         XCTAssertEqual(m.videoIDs, ["c"])
     }
 
+    func testManuallySortedMonthIsEmpty() {
+        let m = OfflineDownloadPlan.month(
+            year: 2026, month: 8,
+            assets: [(id: "a", isVideo: false), (id: "c", isVideo: true)],
+            manuallySorted: true, isUnsorted: { _ in true })
+        XCTAssertEqual(m.photoIDs, [])
+        XCTAssertEqual(m.videoIDs, [])
+    }
+
     func testPaceDefaultsWithTooFewRecords() {
         let start = Date(timeIntervalSince1970: 1_000_000)
         let few = (0..<49).map { start.addingTimeInterval(Double($0) * 6) }

@@ -96,8 +96,10 @@ final class OfflineDownloader: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         directory: URL = OfflineDownloader.defaultDirectory,
-        fetch: Fetch? = nil
+        fetch: Fetch? = nil,
+        sizeLoader: @escaping @Sendable ([String]) -> [String: Int64] = OfflineDownloader.fileSizes
     ) {
+        self.sizeLoader = sizeLoader
         self.defaults = defaults
         self.completedURL = directory.appendingPathComponent(Self.completedFileName)
         self.fetch = fetch ?? Self.defaultFetch
@@ -349,22 +351,26 @@ final class OfflineDownloader: ObservableObject {
 
     // MARK: Sizes
 
-    /// Loads real file sizes (off the main thread, one month at a time, cached)
-    /// for what the current quality needs: photos in Original mode, videos when on.
+    private let sizeLoader: @Sendable ([String]) -> [String: Int64]
+
+    /// Loads real file sizes (off the main thread, one month at a time, cached).
+    /// Photos always, not only in Original mode: the tray shows "Original · <size>"
+    /// next to Screen so he can compare before switching, and loading only after
+    /// the switch left that label on "…" forever (seen on the phone). Videos when on.
     func loadSizes() async {
         for month in months {
-            var wanted: [String] = []
-            if quality == .original { wanted += month.photoIDs }
+            var wanted: [String] = month.photoIDs
             if includeVideos { wanted += month.videoIDs }
             wanted = wanted.filter { sizes[$0] == nil }
             if wanted.isEmpty { continue }
             let ids = wanted
-            let loaded = await Task.detached(priority: .utility) { Self.fileSizes(ids: ids) }.value
+            let loader = sizeLoader
+            let loaded = await Task.detached(priority: .utility) { loader(ids) }.value
             sizes.merge(loaded) { _, new in new }
         }
     }
 
-    nonisolated static func fileSizes(ids: [String]) -> [String: Int64] {
+    nonisolated static func fileSizes(_ ids: [String]) -> [String: Int64] {
         var out: [String: Int64] = [:]
         PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in
             out[asset.localIdentifier] = BestPhotoResolver.fileSize(for: asset)

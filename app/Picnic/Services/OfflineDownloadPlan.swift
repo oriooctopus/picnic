@@ -38,8 +38,10 @@ enum OfflineDownloadPlan {
     // MARK: Months
 
     /// Unsorted photos and videos of `assets` (id, isVideo) in the given order.
-    static func month(year: Int, month: Int, assets: [(id: String, isVideo: Bool)], isUnsorted: (String) -> Bool) -> PlanMonth {
-        let unsorted = assets.filter { isUnsorted($0.id) }
+    /// `manuallySorted` empties the month (see `months(from:)`).
+    static func month(year: Int, month: Int, assets: [(id: String, isVideo: Bool)], manuallySorted: Bool = false,
+                      isUnsorted: (String) -> Bool) -> PlanMonth {
+        let unsorted = manuallySorted ? [] : assets.filter { isUnsorted($0.id) }
         return PlanMonth(
             year: year, month: month,
             photoIDs: unsorted.filter { !$0.isVideo }.map(\.id),
@@ -47,11 +49,16 @@ enum OfflineDownloadPlan {
         )
     }
 
-    /// Newest first, like My Life.
-    static func months(from buckets: [MonthBucket], isUnsorted: (String) -> Bool) -> [PlanMonth] {
+    /// Newest first, like My Life. A month Oliver marked sorted by hand ("Mark as
+    /// sorted" on My Life) contributes nothing even if some of its photos are
+    /// still unsorted: My Life shows it as Sorted, so downloading it would spend
+    /// flight time on a month he already decided not to sort (seen on the phone:
+    /// Aug/Apr/Mar ticked with 30/1/34 photos while My Life said "Sorted").
+    static func months(from buckets: [MonthBucket], isMonthSorted: (String) -> Bool, isUnsorted: (String) -> Bool) -> [PlanMonth] {
         buckets.sorted { ($0.year, $0.month) > ($1.year, $1.month) }.map { bucket in
             month(year: bucket.year, month: bucket.month,
-                  assets: bucket.assets.map { ($0.localIdentifier, $0.mediaType == .video) }, isUnsorted: isUnsorted)
+                  assets: bucket.assets.map { ($0.localIdentifier, $0.mediaType == .video) },
+                  manuallySorted: isMonthSorted(bucket.key), isUnsorted: isUnsorted)
         }
     }
 

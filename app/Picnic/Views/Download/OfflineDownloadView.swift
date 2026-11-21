@@ -32,7 +32,9 @@ struct DownloadHeaderButton: View {
                         .stroke(DL.green, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                         .rotationEffect(.degrees(-90))
                 }
-                Image(systemName: downloader.state == .paused ? "pause.fill" : "arrow.down")
+                // Always the arrow, as in mockup C: the ring shows progress, and a
+                // pause glyph read as "tap to pause" while the run was already paused.
+                Image(systemName: "arrow.down")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(.white)
             }

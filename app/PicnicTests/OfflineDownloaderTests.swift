@@ -74,6 +74,16 @@ final class OfflineDownloaderTests: XCTestCase {
         XCTAssertEqual(d.items.count, 16)
     }
 
+    func testPhotoSizesLoadInScreenModeForTheOriginalLabel() async {
+        let e = env()
+        let d = OfflineDownloader(defaults: e.0, directory: e.1, fetch: FetchRecorder().fetch,
+                                  sizeLoader: { ids in Dictionary(uniqueKeysWithValues: ids.map { ($0, 1_000) }) })
+        d.update(months: [monthA, monthB], pace: 8)
+        XCTAssertEqual(d.quality, .screen)
+        await d.loadSizes()
+        XCTAssertEqual(d.sizes.count, 16, "every photo's original size loads while Screen is selected")
+    }
+
     func testRunsAllItemsAndGoesIdle() async {
         let rec = FetchRecorder()
         let d = make(env(), rec)
