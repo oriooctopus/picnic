@@ -41,6 +41,39 @@ final class OfflineDownloaderTests: XCTestCase {
         return d
     }
 
+    func testSetLimitCutsQueueAndZeroDeselects() {
+        let d = make(env(), FetchRecorder())
+        d.setLimit(3, for: monthA)
+        XCTAssertEqual(d.items.filter { $0.monthKey == monthA.key }.map(\.id), ["a0", "a1", "a2"])
+        XCTAssertEqual(d.items.filter { $0.monthKey == monthB.key }.count, 8)
+        XCTAssertTrue(d.manualSelection)
+        d.setLimit(0, for: monthA)
+        XCTAssertFalse(d.selectedKeys.contains(monthA.key))
+        XCTAssertNil(d.limits[monthA.key])
+        XCTAssertEqual(d.items.count, 8)
+        d.setLimit(8, for: monthB) // all of it = no limit
+        XCTAssertNil(d.limits[monthB.key])
+    }
+
+    func testLimitsPersistAcrossInstances() {
+        let e = env()
+        let d = make(e, FetchRecorder())
+        d.setLimit(5, for: monthB)
+        let again = OfflineDownloader(defaults: e.0, directory: e.1, fetch: FetchRecorder().fetch)
+        XCTAssertEqual(again.limits, [monthB.key: 5])
+        again.update(months: [monthA, monthB], pace: 8)
+        XCTAssertEqual(again.items.filter { $0.monthKey == monthB.key }.count, 5)
+    }
+
+    func testChoosingHoursClearsManualLimits() {
+        let d = make(env(), FetchRecorder())
+        d.setLimit(2, for: monthA)
+        d.chooseHours(3) // 1440 budget fits both months whole
+        XCTAssertTrue(d.limits.isEmpty)
+        XCTAssertFalse(d.manualSelection)
+        XCTAssertEqual(d.items.count, 16)
+    }
+
     func testRunsAllItemsAndGoesIdle() async {
         let rec = FetchRecorder()
         let d = make(env(), rec)

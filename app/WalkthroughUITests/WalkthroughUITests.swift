@@ -4052,5 +4052,26 @@ final class WalkthroughUITests: XCTestCase {
         while Date() < valueDeadline, (card.value as? String) != "downloaded" { Thread.sleep(forTimeInterval: 0.3) }
         capture("mylife-downloaded")
         XCTAssertEqual(card.value as? String, "downloaded", "Month card should report the downloaded badge")
+
+        // Per-month limit: long-press a selectable month card, halve it in the sheet.
+        open.tap()
+        let selectableCard = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH 'download.month.20' AND value != 'sorted'")).firstMatch
+        XCTAssertTrue(selectableCard.waitForExistence(timeout: 10), "Download grid should show month cards")
+        selectableCard.press(forDuration: 1.0)
+        let sheet = app.descendants(matching: .any)["download.month.sheet"].firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10), "Long press should open the month sheet")
+        let half = app.buttons["download.month.preset.50"]
+        XCTAssertTrue(half.waitForExistence(timeout: 5), "Month sheet should show the 50% preset")
+        half.tap()
+        let halfDeadline = Date().addingTimeInterval(5)
+        while Date() < halfDeadline, (half.value as? String) != "selected" { Thread.sleep(forTimeInterval: 0.2) }
+        XCTAssertEqual(half.value as? String, "selected", "Tapping 50% should select that preset")
+        XCTAssertTrue(app.sliders["download.month.slider"].exists, "Month sheet should show the slider")
+        capture("download-month-sheet", delay: 0.5)
+        sheet.swipeDown()
+        let sheetGone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: sheet)
+        XCTAssertEqual(XCTWaiter().wait(for: [sheetGone], timeout: 10), .completed, "Swiping down should dismiss the month sheet")
+        capture("download-grid-limited", delay: 0.5)
     }
 }

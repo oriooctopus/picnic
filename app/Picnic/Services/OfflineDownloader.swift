@@ -29,6 +29,7 @@ final class OfflineDownloader: ObservableObject {
     static let videosKey = "offlineDownload.videos"
     static let selectedKey = "offlineDownload.selected"
     static let manualKey = "offlineDownload.manual"
+    static let limitsKey = "offlineDownload.limits"
     static let wasRunningKey = "offlineDownload.wasRunning"
     static let completedFileName = "offline-download-completed.json"
 
@@ -48,6 +49,10 @@ final class OfflineDownloader: ObservableObject {
         didSet { saveSettings(); rebuildItems() }
     }
     @Published private(set) var selectedKeys: Set<String> {
+        didSet { saveSettings(); rebuildItems() }
+    }
+    /// Per-month photo limit (monthKey -> first n photos). Absent = the whole month.
+    @Published private(set) var limits: [String: Int] {
         didSet { saveSettings(); rebuildItems() }
     }
     /// True once a month was toggled by hand; a chip tap clears it.
@@ -101,6 +106,7 @@ final class OfflineDownloader: ObservableObject {
         includeVideos = defaults.bool(forKey: Self.videosKey)
         selectedKeys = Set(defaults.stringArray(forKey: Self.selectedKey) ?? [])
         manualSelection = defaults.bool(forKey: Self.manualKey)
+        limits = defaults.dictionary(forKey: Self.limitsKey) as? [String: Int] ?? [:]
         interrupted = defaults.bool(forKey: Self.wasRunningKey)
         // A missing file is the normal first launch; a present but unreadable one is a bug to see.
         if let data = try? Data(contentsOf: completedURL) {
@@ -120,7 +126,7 @@ final class OfflineDownloader: ObservableObject {
 
     /// `--reset-offline-download`: must run before the downloader is constructed.
     static func reset(defaults: UserDefaults = .standard, directory: URL = defaultDirectory) {
-        for key in [hoursKey, qualityKey, videosKey, selectedKey, manualKey, wasRunningKey] {
+        for key in [hoursKey, qualityKey, videosKey, selectedKey, manualKey, limitsKey, wasRunningKey] {
             defaults.removeObject(forKey: key)
         }
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(completedFileName))
@@ -136,7 +142,7 @@ final class OfflineDownloader: ObservableObject {
         self.pace = pace
         self.months = months
         if !manualSelection && state == .idle {
-            selectedKeys = OfflineDownloadPlan.autoPick(hours: hours, pace: pace, months: months, includeVideos: includeVideos)
+            applyAutoPick()
         }
         resumeIfInterrupted()
     }
@@ -155,7 +161,33 @@ final class OfflineDownloader: ObservableObject {
     func chooseHours(_ h: Int) {
         hours = h
         manualSelection = false
-        selectedKeys = OfflineDownloadPlan.autoPick(hours: h, pace: pace, months: months, includeVideos: includeVideos)
+        applyAutoPick()
+    }
+
+    /// Replaces selection AND limits: an auto-pick discards any hand-set limits.
+    private func applyAutoPick() {
+        let pick = OfflineDownloadPlan.autoPick(hours: hours, pace: pace, months: months, includeVideos: includeVideos)
+        limits = pick.limits
+        selectedKeys = pick.keys
+    }
+
+    /// "How much of this month": the first `n` photos. 0 deselects the month (and
+    /// forgets the limit, so selecting it again means the whole month); n >= all is
+    /// stored as no limit. Hand-set, so the selection turns manual.
+    func setLimit(_ n: Int, for month: PlanMonth) {
+        manualSelection = true
+        if n <= 0 {
+            limits[month.key] = nil
+            selectedKeys.remove(month.key)
+        } else {
+            limits[month.key] = n >= month.photoIDs.count ? nil : n
+            selectedKeys.insert(month.key)
+        }
+    }
+
+    /// Photos of the month that will be downloaded: the limit when set, else all.
+    func photoLimit(for month: PlanMonth) -> Int {
+        min(limits[month.key] ?? month.photoIDs.count, month.photoIDs.count)
     }
 
     func toggle(_ monthKey: String) {
@@ -164,7 +196,7 @@ final class OfflineDownloader: ObservableObject {
     }
 
     private func rebuildItems() {
-        items = OfflineDownloadPlan.queue(months: months, selected: selectedKeys, includeVideos: includeVideos)
+        items = OfflineDownloadPlan.queue(months: months, selected: selectedKeys, limits: limits, includeVideos: includeVideos)
     }
 
     // MARK: Progress
@@ -181,8 +213,9 @@ final class OfflineDownloader: ObservableObject {
     var remainingCount: Int { items.count - doneCount }
     var failedCount: Int { items.filter { failed.contains($0.id) }.count }
 
+    /// The month's items under its limit (what would be queued if it is selected).
     func monthItems(_ month: PlanMonth) -> [Item] {
-        OfflineDownloadPlan.items(for: month, includeVideos: includeVideos)
+        OfflineDownloadPlan.items(for: month, includeVideos: includeVideos, limit: limits[month.key])
     }
 
     /// Every unsorted item of the month is on the device at the current quality.
@@ -301,6 +334,7 @@ final class OfflineDownloader: ObservableObject {
         defaults.set(includeVideos, forKey: Self.videosKey)
         defaults.set(Array(selectedKeys), forKey: Self.selectedKey)
         defaults.set(manualSelection, forKey: Self.manualKey)
+        defaults.set(limits, forKey: Self.limitsKey)
     }
 
     func saveCompleted() {

@@ -12,19 +12,41 @@ final class OfflineDownloadPlanTests: XCTestCase {
 
     func testAutoPickStopsOnceTargetReached() {
         // 1h at 5/min = 300: Nov 142 < 300 so Oct is added (452), then stop.
-        let picked = OfflineDownloadPlan.autoPick(hours: 1, pace: 5, months: months, includeVideos: false)
+        let picked = OfflineDownloadPlan.autoPick(hours: 1, pace: 5, months: months, includeVideos: false).keys
         XCTAssertEqual(picked, ["2026-11", "2026-10"])
     }
 
     func testAutoPickTakesAllWhenTargetExceedsTotal() {
-        XCTAssertEqual(OfflineDownloadPlan.autoPick(hours: 1, pace: 8, months: months, includeVideos: false).count, 3)
-        XCTAssertEqual(OfflineDownloadPlan.autoPick(hours: 10, pace: 8, months: months, includeVideos: false).count, 3)
+        XCTAssertEqual(OfflineDownloadPlan.autoPick(hours: 1, pace: 8, months: months, includeVideos: false).keys.count, 3)
+        XCTAssertEqual(OfflineDownloadPlan.autoPick(hours: 10, pace: 8, months: months, includeVideos: false).keys.count, 3)
     }
 
     func testAutoPickCountsVideosOnlyWhenOn() {
         let ms = [month(2026, 11, photos: 100, videos: 300), month(2026, 10, photos: 100)]
-        XCTAssertEqual(OfflineDownloadPlan.autoPick(hours: 1, pace: 5, months: ms, includeVideos: false).count, 2)
-        XCTAssertEqual(OfflineDownloadPlan.autoPick(hours: 1, pace: 5, months: ms, includeVideos: true), ["2026-11"])
+        XCTAssertEqual(OfflineDownloadPlan.autoPick(hours: 1, pace: 5, months: ms, includeVideos: false).keys.count, 2)
+        XCTAssertEqual(OfflineDownloadPlan.autoPick(hours: 1, pace: 5, months: ms, includeVideos: true).keys, ["2026-11"])
+    }
+
+    func testAutoPickTrimsLastMonthToFitBudget() {
+        // 300 budget: Nov 142 whole, Oct trimmed to the remaining 158 instead of all 310.
+        let pick = OfflineDownloadPlan.autoPick(hours: 1, pace: 5, months: months, includeVideos: false)
+        XCTAssertEqual(pick.limits, ["2026-10": 158])
+        let q = OfflineDownloadPlan.queue(months: months, selected: pick.keys, limits: pick.limits, includeVideos: false)
+        XCTAssertEqual(q.count, 300)
+    }
+
+    func testAutoPickNoLimitWhenMonthsFitExactly() {
+        let ms = [month(2026, 11, photos: 150), month(2026, 10, photos: 150), month(2026, 9, photos: 50)]
+        let pick = OfflineDownloadPlan.autoPick(hours: 1, pace: 5, months: ms, includeVideos: false)
+        XCTAssertEqual(pick.keys, ["2026-11", "2026-10"])
+        XCTAssertTrue(pick.limits.isEmpty)
+    }
+
+    func testQueueRespectsLimitFirstNInOrderAndKeepsVideos() {
+        let ms = [month(2026, 11, photos: 5, videos: 2), month(2026, 10, photos: 5)]
+        let q = OfflineDownloadPlan.queue(months: ms, selected: ["2026-11", "2026-10"], limits: ["2026-11": 2], includeVideos: true)
+        XCTAssertEqual(q.map(\.id), ["p2026-11-0", "p2026-11-1", "v2026-11-0", "v2026-11-1",
+                                      "p2026-10-0", "p2026-10-1", "p2026-10-2", "p2026-10-3", "p2026-10-4"])
     }
 
     func testQueueOrderIsNewestFirstPhotosBeforeVideosAndOnlySelected() {

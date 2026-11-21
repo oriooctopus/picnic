@@ -55,31 +55,53 @@ enum OfflineDownloadPlan {
         }
     }
 
-    /// A month's download items: photos in month order, then its videos when on.
-    static func items(for month: PlanMonth, includeVideos: Bool) -> [Item] {
-        month.photoIDs.map { Item(id: $0, monthKey: month.key, isVideo: false) }
+    /// A month's download items: its first `limit` photos in month order (all when
+    /// nil), then its videos when on. The limit counts photos only: videos are a
+    /// separate switch with their own count, and a "how much of this month" slider
+    /// over a mixed list would make the first n ambiguous.
+    static func items(for month: PlanMonth, includeVideos: Bool, limit: Int? = nil) -> [Item] {
+        let photos = limit.map { Array(month.photoIDs.prefix($0)) } ?? month.photoIDs
+        return photos.map { Item(id: $0, monthKey: month.key, isVideo: false) }
             + (includeVideos ? month.videoIDs.map { Item(id: $0, monthKey: month.key, isVideo: true) } : [])
     }
 
+    /// What auto-pick chose: whole months, plus a photo limit on the last one when
+    /// taking it whole would overshoot the hour budget.
+    struct AutoPick: Equatable {
+        var keys: Set<String> = []
+        var limits: [String: Int] = [:]
+    }
+
     /// Months (given newest first) selected newest-first until the cumulative
-    /// item count reaches `hours` of sorting at `pace` items per minute.
-    static func autoPick(hours: Int, pace: Double, months: [PlanMonth], includeVideos: Bool) -> Set<String> {
+    /// item count reaches `hours` of sorting at `pace` items per minute. The month
+    /// that crosses the target is trimmed (first n photos) so the plan lands on the
+    /// budget instead of overshooting by up to a whole month.
+    static func autoPick(hours: Int, pace: Double, months: [PlanMonth], includeVideos: Bool) -> AutoPick {
         let target = Double(hours) * 60 * pace
-        var picked: Set<String> = []
+        var pick = AutoPick()
         var total = 0
         for month in months {
             let count = items(for: month, includeVideos: includeVideos).count
             if count == 0 { continue }
             if Double(total) >= target { break }
-            picked.insert(month.key)
+            pick.keys.insert(month.key)
+            let remaining = Int((target - Double(total)).rounded(.up))
+            if count > remaining {
+                // Videos are not limited, so they come out of the budget first. If they
+                // alone fill it there is no sensible photo limit; keep the month whole.
+                let photoLimit = remaining - (count - month.photoIDs.count)
+                if photoLimit >= 1 { pick.limits[month.key] = photoLimit }
+            }
             total += count
         }
-        return picked
+        return pick
     }
 
-    /// The download queue: selected months in the given (newest first) order.
-    static func queue(months: [PlanMonth], selected: Set<String>, includeVideos: Bool) -> [Item] {
-        months.filter { selected.contains($0.key) }.flatMap { items(for: $0, includeVideos: includeVideos) }
+    /// The download queue: selected months in the given (newest first) order,
+    /// each cut to its entry in `limits` (absent = whole month).
+    static func queue(months: [PlanMonth], selected: Set<String>, limits: [String: Int] = [:], includeVideos: Bool) -> [Item] {
+        months.filter { selected.contains($0.key) }
+            .flatMap { items(for: $0, includeVideos: includeVideos, limit: limits[$0.key]) }
     }
 
     // MARK: Pace
