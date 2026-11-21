@@ -66,6 +66,7 @@ final class OfflineDownloadPlanTests: XCTestCase {
         XCTAssertEqual(OfflineDownloadPlan.formatBytes(45_360_000_000), "45 GB")
         XCTAssertEqual(OfflineDownloadPlan.formatBytes(4_310_000_000), "4.3 GB")
         XCTAssertEqual(OfflineDownloadPlan.formatBytes(870_400_000), "870 MB")
-        XCTAssertEqual(OfflineDownloadPlan.formatBytes(24_500_000), "24.5 MB")
+        XCTAssertEqual(OfflineDownloadPlan.formatBytes(24_400_000), "24 MB")
+        XCTAssertEqual(OfflineDownloadPlan.formatBytes(4_500_000), "4.5 MB")
     }
 }

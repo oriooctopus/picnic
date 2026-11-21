@@ -117,7 +117,7 @@ enum OfflineDownloadPlan {
         Int((Double(readyCount) / max(pace, 1)).rounded())
     }
 
-    /// "48 GB", "4.3 GB", "870 MB", "24.5 MB": one decimal only below 10 of a
+    /// "48 GB", "4.3 GB", "870 MB", "24 MB", "4.5 MB": one decimal only below 10 of a
     /// unit. ByteCountFormatter's .file style printed "45.36 GB free", precision
     /// that a size estimate and a free-space readout don't have.
     static func formatBytes(_ bytes: Int64) -> String {
