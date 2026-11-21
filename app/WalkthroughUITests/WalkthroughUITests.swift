@@ -4023,7 +4023,9 @@ final class WalkthroughUITests: XCTestCase {
         // after switching. It must fill without touching the toggle.
         let original = app.buttons["download.quality.original"]
         let sized = expectation(for: NSPredicate(format: "label BEGINSWITH 'Original · ' AND NOT (label ENDSWITH '…')"), evaluatedWith: original)
-        wait(for: [sized], timeout: 20)
+        if XCTWaiter().wait(for: [sized], timeout: 20) != .completed {
+            XCTFail("DIAG original label=\(original.label) value=\(original.value ?? "nil")")
+        }
         capture("download-setup")
 
         app.buttons["download.hours.1"].tap()
