@@ -97,6 +97,8 @@ OPTIONAL = [
     "99-final-testRemoteAlbumDeck",
     # Copy Picnic Link (test53).
     "53-share-sheet", "53-linked-photo", "99-final-test53CopyPicnicLinkOpensPhotoFullScreen",
+    # Offline download screen (test57).
+    "download-setup", "download-progress", "mylife-downloaded", "99-final-test57OfflineDownloadFlow",
 ]
 
 EXPECTED = REQUIRED + OPTIONAL
