@@ -4018,6 +4018,12 @@ final class WalkthroughUITests: XCTestCase {
         open.tap()
         let primary = app.buttons["download.primary"]
         XCTAssertTrue(primary.waitForExistence(timeout: 10), "Download screen should show its primary button")
+        // Original sizes load in the background while Screen is selected; on the
+        // phone the label sat on "Original · …" forever because they only loaded
+        // after switching. It must fill without touching the toggle.
+        let original = app.buttons["download.quality.original"]
+        let sized = expectation(for: NSPredicate(format: "label BEGINSWITH 'Original · ' AND NOT (label ENDSWITH '…')"), evaluatedWith: original)
+        wait(for: [sized], timeout: 20)
         capture("download-setup")
 
         app.buttons["download.hours.1"].tap()
