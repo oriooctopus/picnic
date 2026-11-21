@@ -342,10 +342,12 @@ final class OfflineDownloader: ObservableObject {
 
     static var defaultFetch: Fetch {
         #if DEBUG
-        // `--simulate-offline-download`: succeed after ~150 ms with no PhotoKit,
-        // so UI tests can watch a whole run on the simulator.
+        // `--simulate-offline-download`: succeed after ~800 ms with no PhotoKit,
+        // so UI tests can watch a whole run on the simulator. Was 150 ms, which
+        // finished the 35-photo seed library before the test could capture the
+        // mid-run state; 800 ms x 35 / 4 in flight is ~7 s.
         if ProcessInfo.processInfo.arguments.contains("--simulate-offline-download") {
-            return { _, _ in try await Task.sleep(nanoseconds: 150_000_000) }
+            return { _, _ in try await Task.sleep(nanoseconds: 800_000_000) }
         }
         #endif
         return { item, quality in try await fetchReal(item, quality) }

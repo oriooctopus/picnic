@@ -4025,6 +4025,11 @@ final class WalkthroughUITests: XCTestCase {
         let progress = app.staticTexts["download.progress"]
         XCTAssertTrue(progress.waitForExistence(timeout: 10), "Progress should show once the run starts")
         capture("download-progress", delay: 0.3)
+        // The shot above must show a run in progress, not an already-finished one.
+        XCTAssertEqual(primary.label, "Pause", "Primary button reads Pause mid-run")
+        XCTAssertNotEqual(progress.label.components(separatedBy: " / ").first,
+                          progress.label.components(separatedBy: " / ").last,
+                          "Captured progress should be mid-run, got \(progress.label)")
 
         // "<done> / <total>": wait until both halves match.
         let deadline = Date().addingTimeInterval(60)

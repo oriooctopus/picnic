@@ -63,5 +63,9 @@ final class OfflineDownloadPlanTests: XCTestCase {
         XCTAssertEqual(OfflineDownloadPlan.formatDuration(minutes: 60), "1h")
         XCTAssertEqual(OfflineDownloadPlan.formatDuration(minutes: 45), "45m")
         XCTAssertEqual(OfflineDownloadPlan.screenBytes(photoCount: 10), 7_000_000)
+        XCTAssertEqual(OfflineDownloadPlan.formatBytes(45_360_000_000), "45 GB")
+        XCTAssertEqual(OfflineDownloadPlan.formatBytes(4_310_000_000), "4.3 GB")
+        XCTAssertEqual(OfflineDownloadPlan.formatBytes(870_400_000), "870 MB")
+        XCTAssertEqual(OfflineDownloadPlan.formatBytes(24_500_000), "24.5 MB")
     }
 }
