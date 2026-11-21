@@ -114,7 +114,7 @@ final class OfflineDownloader: ObservableObject {
         refreshFreeSpace()
     }
 
-    static var defaultDirectory: URL {
+    nonisolated static var defaultDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     }
 
