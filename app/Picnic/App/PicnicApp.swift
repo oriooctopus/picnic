@@ -18,6 +18,7 @@ struct PicnicApp: App {
                 .onChange(of: scenePhase) { _, newPhase in
                     // See JobRuntime.scenePhaseChanged (tested): foreground drains,
                     // polling stops when we leave .active.
+                    if newPhase == .active { appState.offlineDownloader.resumeIfInterrupted() }
                     Task { await appState.jobs.scenePhaseChanged(active: newPhase == .active) }
                 }
         }

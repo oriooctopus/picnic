@@ -187,19 +187,30 @@ final class DeckPrefetcher {
         remoteInFlight.removeAll()
     }
 
-    private func start(_ asset: PHAsset) {
+    /// The screen-size request the card (and LocalAvailability's probe) asks for,
+    /// with network allowed. Shared with OfflineDownloader so a bulk download
+    /// fetches exactly the derivative a prefetch would.
+    nonisolated static func screenDownloadOptions() -> PHImageRequestOptions {
         let options = PHImageRequestOptions()
         options.deliveryMode = .highQualityFormat
         options.isNetworkAccessAllowed = true
         options.resizeMode = .exact
+        return options
+    }
+
+    /// Same completeness test as LocalAvailability's probe: a failed or
+    /// degraded result must not unlock the card in offline-only mode.
+    nonisolated static func isCompleteScreenImage(_ image: UIImage?, _ info: [AnyHashable: Any]?) -> Bool {
+        image != nil && (info?[PHImageResultIsDegradedKey] as? Bool) != true
+    }
+
+    private func start(_ asset: PHAsset) {
         let id = asset.localIdentifier
         let requestID = PHImageManager.default().requestImage(
-            for: asset, targetSize: ThumbnailLoader.screenPixelSize, contentMode: .aspectFit, options: options
+            for: asset, targetSize: ThumbnailLoader.screenPixelSize, contentMode: .aspectFit, options: Self.screenDownloadOptions()
         ) { [weak self] image, info in
             if (info?[PHImageCancelledKey] as? Bool) == true { return }
-            // Same completeness test as LocalAvailability's probe: a failed or
-            // degraded result must not unlock the card in offline-only mode.
-            let complete = image != nil && (info?[PHImageResultIsDegradedKey] as? Bool) != true
+            let complete = Self.isCompleteScreenImage(image, info)
             Task { @MainActor [weak self] in
                 guard let self, self.inFlight[id] != nil else { return }
                 self.inFlight[id] = nil

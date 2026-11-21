@@ -6,6 +6,8 @@ struct MonthCardView: View {
     /// Observed directly: AppState doesn't forward SortStore's changes, so
     /// without this the context-menu sort toggles never redrew the card.
     @ObservedObject var sortStore: SortStore
+    /// Observed so the downloaded badge appears as a run completes a month.
+    @ObservedObject var downloader: OfflineDownloader
     let month: MonthBucket
 
     @State private var coverImage: UIImage?
@@ -16,6 +18,12 @@ struct MonthCardView: View {
 
     private var isSorted: Bool {
         sortStore.isMonthManuallySorted(month.key) || (month.assets.isEmpty == false && remainingCount == 0)
+    }
+
+    /// Every unsorted photo of the month is on the device (screen size or better).
+    private var isDownloaded: Bool {
+        let ids = month.assets.filter { $0.mediaType == .image && sortStore.state(for: $0) == .unsorted }.map(\.localIdentifier)
+        return !ids.isEmpty && ids.allSatisfy { downloader.isDone($0, quality: .screen) }
     }
 
     // Portrait ~2:3 per PARITY.md.
@@ -64,6 +72,16 @@ struct MonthCardView: View {
                     .padding(10)
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                if isDownloaded {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(5)
+                        .background(Circle().fill(.black.opacity(0.5)))
+                        .padding(6)
+                }
+            }
             .contentShape(RoundedRectangle(cornerRadius: cornerRadius))
             // Single AX element for the whole card, sized to the true
             // rendered frame — not one element per inner layer (cover Image
@@ -71,6 +89,9 @@ struct MonthCardView: View {
             // to a stale, mis-sized frame instead of the actual card location.
             .accessibilityElement(children: .ignore)
             .accessibilityIdentifier("monthCard.\(month.key)")
+            // The badge is not a child element (that would break the single-AX-element
+            // card above); UI tests read it from the value instead.
+            .accessibilityValue(isDownloaded ? "downloaded" : "")
             .accessibilityLabel("\(month.monthAbbreviation), \(isSorted ? "Sorted" : "\(remainingCount) remaining")")
             .contextMenu {
                 Button {

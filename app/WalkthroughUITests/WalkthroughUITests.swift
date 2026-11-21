@@ -4005,4 +4005,47 @@ final class WalkthroughUITests: XCTestCase {
         let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: image)
         XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 10), .completed, "Close should dismiss the photo")
     }
+
+    /// Download for offline end to end with the simulated fetch (no PhotoKit
+    /// downloads): open the screen, pick a chip, run to completion, and see the
+    /// downloaded state on the month card. Presence and values only, no frames.
+    func test57OfflineDownloadFlow() throws {
+        relaunch(withExtraArguments: ["--reset-offline-download", "--reset-sort-state", "--simulate-offline-download"])
+        openMyLifeGrid()
+
+        let open = app.buttons["myLife.downloadButton"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10), "My Life header should show the download button")
+        open.tap()
+        let primary = app.buttons["download.primary"]
+        XCTAssertTrue(primary.waitForExistence(timeout: 10), "Download screen should show its primary button")
+        capture("download-setup")
+
+        app.buttons["download.hours.1"].tap()
+        primary.tap()
+        let progress = app.staticTexts["download.progress"]
+        XCTAssertTrue(progress.waitForExistence(timeout: 10), "Progress should show once the run starts")
+        capture("download-progress", delay: 0.3)
+
+        // "<done> / <total>": wait until both halves match.
+        let deadline = Date().addingTimeInterval(60)
+        var finished = false
+        while Date() < deadline, !finished {
+            let parts = progress.label.replacingOccurrences(of: ",", with: "").components(separatedBy: " / ")
+            if parts.count == 2, let done = Int(parts[0]), let total = Int(parts[1]), total > 0, done == total {
+                finished = true
+            } else {
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+        }
+        XCTAssertTrue(finished, "Run should complete, last progress: \(progress.label)")
+        XCTAssertEqual(primary.label, "Ready", "Primary button reads Ready when everything is downloaded")
+
+        app.buttons["download.done"].tap()
+        let card = app.descendants(matching: .any)["monthCard.2025-05"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(card), "Seeded month should be back on the grid")
+        let valueDeadline = Date().addingTimeInterval(10)
+        while Date() < valueDeadline, (card.value as? String) != "downloaded" { Thread.sleep(forTimeInterval: 0.3) }
+        capture("mylife-downloaded")
+        XCTAssertEqual(card.value as? String, "downloaded", "Month card should report the downloaded badge")
+    }
 }

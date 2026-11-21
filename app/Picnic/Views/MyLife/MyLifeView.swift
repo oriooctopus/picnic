@@ -11,6 +11,7 @@ struct MyLifeView: View {
     @State private var scrollProxy: ScrollViewProxy?
     @State private var showScrollTop = false
     @State private var selectedMonth: MonthBucket?
+    @State private var showDownload = false
     /// Cold-launch resume into the remote album deck (see AutoOpenTarget).
     @State private var resumeRemoteAlbumId: String?
 
@@ -80,7 +81,7 @@ struct MyLifeView: View {
 
                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
                             ForEach(entry.months) { month in
-                                MonthCardView(sortStore: appState.sortStore, month: month)
+                                MonthCardView(sortStore: appState.sortStore, downloader: appState.offlineDownloader, month: month)
                                     .environmentObject(appState)
                                     .onTapGesture { selectedMonth = month }
                             }
@@ -154,6 +155,13 @@ struct MyLifeView: View {
                     .environmentObject(appState)
             }
         )
+        // Same own-background-view rule as above.
+        .background(
+            Color.clear.fullScreenCover(isPresented: $showDownload) {
+                OfflineDownloadView(downloader: appState.offlineDownloader)
+                    .environmentObject(appState)
+            }
+        )
         .background(Color.black.ignoresSafeArea())
     }
 
@@ -193,6 +201,7 @@ struct MyLifeView: View {
                 .foregroundStyle(.white)
             Spacer()
             HStack(spacing: 12) {
+                DownloadHeaderButton(downloader: appState.offlineDownloader) { showDownload = true }
                 Image(systemName: "line.3.horizontal.decrease.circle.fill")
                     .font(.system(size: 22))
                     .foregroundStyle(.white, Color(white: 0.18))

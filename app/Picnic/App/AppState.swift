@@ -15,6 +15,10 @@ final class AppState: ObservableObject {
     var outfitLog: OutfitLogStore { jobs.outfitLog }
     var trimReplace: TrimReplaceStore { jobs.trimReplace }
 
+    /// Bulk "Download for offline" run; see OfflineDownloader. Constructed at
+    /// the end of init, after the debug reset block.
+    let offlineDownloader: OfflineDownloader
+
     @Published var monthBuckets: [MonthBucket] = []
     // Set by MonthCardView's "Clean up Google" context-menu button; MyLifeView
     // observes it and presents ReconcileReviewView via a second
@@ -84,6 +88,11 @@ final class AppState: ObservableObject {
         if args.contains("--reset-offline-only") {
             UserDefaults.standard.removeObject(forKey: DeckViewModel.offlineOnlyDefaultsKey)
         }
+        // Same persistence story for the offline download settings and its
+        // completed-ids file; must run before OfflineDownloader is constructed.
+        if args.contains("--reset-offline-download") {
+            OfflineDownloader.reset()
+        }
         // Debug-only, UI-test-only: unlike hideSorted's single UserDefaults
         // key, actual sort progress (kept/markedForDelete marks, per-month
         // "manually sorted" flags, and resolved compare-group choices) lives
@@ -142,6 +151,7 @@ final class AppState: ObservableObject {
         #else
         jobs = JobRuntime(context: modelContext, pathSource: NetworkPathWatcher())
         #endif
+        offlineDownloader = OfflineDownloader()
     }
 
     func bootstrap() async {
@@ -216,5 +226,12 @@ final class AppState: ObservableObject {
 
     func refreshMonths() {
         monthBuckets = photoLibrary.fetchMonthBuckets()
+        // Also runs after every deck dismissal (MyLifeView), so the download
+        // plan's unsorted lists follow what was just sorted.
+        let paceCutoff = Date().addingTimeInterval(-Double(OfflineDownloadPlan.paceWindowDays) * 86_400)
+        offlineDownloader.update(
+            months: OfflineDownloadPlan.months(from: monthBuckets) { [sortStore] in sortStore.state(forID: $0) == .unsorted },
+            pace: OfflineDownloadPlan.pace(timestamps: sortStore.sortTimestamps(since: paceCutoff))
+        )
     }
 }

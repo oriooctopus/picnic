@@ -110,6 +110,15 @@ final class SortStore: ObservableObject {
         return Set(((try? context.fetch(descriptor)) ?? []).map(\.assetLocalID))
     }
 
+    /// When each asset was last sorted (any state but unsorted) since `cutoff`;
+    /// the sorting-pace history for OfflineDownloadPlan.
+    func sortTimestamps(since cutoff: Date) -> [Date] {
+        let unsorted = SortState.unsorted.rawValue
+        let descriptor = FetchDescriptor<AssetSortRecord>(
+            predicate: #Predicate { $0.stateRaw != unsorted && $0.updatedAt >= cutoff })
+        return ((try? context.fetch(descriptor)) ?? []).map(\.updatedAt)
+    }
+
     func setState(_ state: SortState, for asset: PHAsset, monthKey: String) {
         setState(state, forID: asset.localIdentifier, monthKey: monthKey)
     }
