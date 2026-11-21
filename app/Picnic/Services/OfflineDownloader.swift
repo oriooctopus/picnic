@@ -357,7 +357,9 @@ final class OfflineDownloader: ObservableObject {
     /// Photos always, not only in Original mode: the tray shows "Original · <size>"
     /// next to Screen so he can compare before switching, and loading only after
     /// the switch left that label on "…" forever (seen on the phone). Videos when on.
+    @Published var sizeDebug = "none" // TEMP diagnostic
     func loadSizes() async {
+        sizeDebug = "start m\(months.count) have\(sizes.count)"
         for month in months {
             var wanted: [String] = month.photoIDs
             if includeVideos { wanted += month.videoIDs }
@@ -367,7 +369,9 @@ final class OfflineDownloader: ObservableObject {
             let loader = sizeLoader
             let loaded = await Task.detached(priority: .utility) { loader(ids) }.value
             sizes.merge(loaded) { _, new in new }
+            sizeDebug += " req\(ids.count)got\(loaded.count)"
         }
+        sizeDebug += " end have\(sizes.count) cancelled\(Task.isCancelled)"
     }
 
     nonisolated static func fileSizes(_ ids: [String]) -> [String: Int64] {
