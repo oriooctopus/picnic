@@ -134,6 +134,14 @@ enum OfflineDownloadPlan {
         return m == 0 ? "\(h)h" : "\(h)h \(m)m"
     }
 
+    /// Sorting-time estimate for `count` items: "0m" for none, "<1m" when it rounds
+    /// to zero minutes (a lone photo would otherwise read "~0m"), else "~1h 40m".
+    static func formatSortTime(count: Int, pace: Double) -> String {
+        if count == 0 { return "0m" }
+        let minutes = readyMinutes(readyCount: count, pace: pace)
+        return minutes < 1 ? "<1m" : "~" + formatDuration(minutes: minutes)
+    }
+
     /// How much sorting time `readyCount` downloaded items cover.
     static func readyMinutes(readyCount: Int, pace: Double) -> Int {
         Int((Double(readyCount) / max(pace, 1)).rounded())

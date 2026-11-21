@@ -4069,9 +4069,11 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(half.value as? String, "selected", "Tapping 50% should select that preset")
         XCTAssertTrue(app.sliders["download.month.slider"].exists, "Month sheet should show the slider")
         capture("download-month-sheet", delay: 0.5)
-        sheet.swipeDown()
+        // Tap the dimmed area above the medium-detent sheet: sheet.swipeDown() would start at the
+        // element's centre (slider/thumbnails) and scroll content instead of dragging the sheet.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
         let sheetGone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: sheet)
-        XCTAssertEqual(XCTWaiter().wait(for: [sheetGone], timeout: 10), .completed, "Swiping down should dismiss the month sheet")
+        XCTAssertEqual(XCTWaiter().wait(for: [sheetGone], timeout: 10), .completed, "Tapping outside should dismiss the month sheet")
         capture("download-grid-limited", delay: 0.5)
     }
 }

@@ -118,8 +118,10 @@ struct OfflineDownloadView: View {
     private var hoursRow: some View {
         HStack(spacing: 8) {
             Text("Sorting time")
-                .font(.system(size: 13))
+                .font(.system(size: 12))
                 .foregroundStyle(DL.secondary)
+                .lineLimit(1)
+                .fixedSize()
             ForEach([1, 3, 6, 10], id: \.self) { h in
                 let on = !downloader.manualSelection && downloader.hours == h
                 Button { downloader.chooseHours(h) } label: {
@@ -186,6 +188,9 @@ struct OfflineDownloadView: View {
         .background(RoundedRectangle(cornerRadius: 24).fill(DL.card))
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
+        // Opaque black down to the physical screen edge, so the grid scrolling under the
+        // tray never shows in the strip below the rounded card.
+        .background(Color.black.ignoresSafeArea(edges: .bottom))
     }
 
     private var setupStats: some View {
@@ -479,8 +484,8 @@ private struct DownloadMonthSheet: View {
         let n = current
         let list = OfflineDownloadPlan.items(for: month, includeVideos: false, limit: n)
         let size = downloader.bytes(of: list).map(OfflineDownloadPlan.formatBytes) ?? "…"
-        let time = OfflineDownloadPlan.formatDuration(minutes: OfflineDownloadPlan.readyMinutes(readyCount: n, pace: downloader.pace))
-        return "\(n) of \(total) · \(size) · ~\(time)"
+        let time = OfflineDownloadPlan.formatSortTime(count: n, pace: downloader.pace)
+        return "\(n) of \(total) · \(size) · \(time)"
     }
 
     var body: some View {
