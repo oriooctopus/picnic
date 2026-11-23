@@ -9,6 +9,9 @@ struct MonthCardView: View {
     /// Observed so the downloaded badge appears as a run completes a month.
     @ObservedObject var downloader: OfflineDownloader
     let month: MonthBucket
+    /// Offline mode: unsorted items of this month that are downloaded, shown
+    /// in place of the remaining count. nil when offline mode is off.
+    var offlineCount: Int? = nil
 
     @State private var coverImage: UIImage?
 
@@ -63,7 +66,9 @@ struct MonthCardView: View {
                         Text(month.monthAbbreviation)
                             .font(.headline)
                             .foregroundStyle(.white)
-                        if isSorted {
+                        if let offlineCount {
+                            Text("\(offlineCount)").font(.subheadline).foregroundStyle(.white.opacity(0.85))
+                        } else if isSorted {
                             Text("Sorted").font(.subheadline.bold()).foregroundStyle(.green)
                         } else {
                             Text("\(remainingCount)").font(.subheadline).foregroundStyle(.white.opacity(0.85))
@@ -92,7 +97,8 @@ struct MonthCardView: View {
             // The badge is not a child element (that would break the single-AX-element
             // card above); UI tests read it from the value instead.
             .accessibilityValue(isDownloaded ? "downloaded" : "")
-            .accessibilityLabel("\(month.monthAbbreviation), \(isSorted ? "Sorted" : "\(remainingCount) remaining")")
+            .accessibilityLabel(offlineCount.map { "\(month.monthAbbreviation), \($0) offline" }
+                ?? "\(month.monthAbbreviation), \(isSorted ? "Sorted" : "\(remainingCount) remaining")")
             .contextMenu {
                 Button {
                     sortStore.setMonthManuallySorted(true, monthKey: month.key)

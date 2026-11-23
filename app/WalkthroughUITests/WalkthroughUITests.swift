@@ -4006,6 +4006,53 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 10), .completed, "Close should dismiss the photo")
     }
 
+    /// Offline mode (My Life header toggle): with nothing downloaded the grid
+    /// empties to "Nothing downloaded"; after a simulated download run the
+    /// downloaded month is back, showing its offline count; toggling off
+    /// restores the full grid. Presence and values only, no frames.
+    func test58OfflineModeFiltersMyLife() throws {
+        relaunch(withExtraArguments: ["--reset-offline-download", "--reset-offline-only", "--reset-sort-state",
+                                      "--simulate-offline-download"])
+        openMyLifeGrid()
+        let toggle = app.buttons["myLife.offlineMode"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10), "My Life header should show the offline mode toggle")
+        XCTAssertEqual(toggle.value as? String, "off")
+
+        toggle.tap()
+        let empty = app.staticTexts["myLife.offlineEmpty"]
+        XCTAssertTrue(empty.waitForExistence(timeout: 10), "Offline mode with nothing downloaded should say so")
+        capture("offline-mode-empty", delay: 0.5)
+        XCTAssertEqual(toggle.value as? String, "on")
+        XCTAssertFalse(app.descendants(matching: .any)["monthCard.2025-05"].exists,
+                       "Undownloaded month must be hidden in offline mode")
+
+        // Download (simulated) the newest hour of unsorted items, which starts at 2025-05.
+        app.buttons["myLife.downloadButton"].tap()
+        let primary = app.buttons["download.primary"]
+        XCTAssertTrue(primary.waitForExistence(timeout: 10), "Download screen should open")
+        app.buttons["download.hours.1"].tap()
+        primary.tap()
+        let ready = expectation(for: NSPredicate(format: "label == 'Ready'"), evaluatedWith: primary)
+        XCTAssertEqual(XCTWaiter().wait(for: [ready], timeout: 90), .completed, "Run should finish, got \(primary.label)")
+        app.buttons["download.done"].tap()
+
+        let card = app.descendants(matching: .any)["monthCard.2025-05"].firstMatch
+        XCTAssertTrue(waitForElementByScrolling(card), "Downloaded month should show in offline mode")
+        XCTAssertFalse(empty.exists, "Empty label should go once something is downloaded")
+        capture("offline-mode-on")
+        XCTAssertTrue(card.label.hasSuffix("offline"), "Card should show its offline count, got \(card.label)")
+        let offlineCards = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'monthCard.'"))
+        for i in 0..<offlineCards.count {
+            let label = offlineCards.element(boundBy: i).label
+            XCTAssertTrue(label.hasSuffix("offline"), "Every visible card in offline mode is a downloaded one, got \(label)")
+        }
+
+        toggle.tap()
+        let remaining = expectation(for: NSPredicate(format: "label ENDSWITH 'remaining' OR label ENDSWITH 'Sorted'"), evaluatedWith: card)
+        XCTAssertEqual(XCTWaiter().wait(for: [remaining], timeout: 10), .completed, "Off restores the normal count, got \(card.label)")
+        XCTAssertEqual(toggle.value as? String, "off")
+    }
+
     /// Download for offline end to end with the simulated fetch (no PhotoKit
     /// downloads): open the screen, pick a chip, run to completion, and see the
     /// downloaded state on the month card. Presence and values only, no frames.

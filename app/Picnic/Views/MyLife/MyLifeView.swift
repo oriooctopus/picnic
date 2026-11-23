@@ -14,6 +14,14 @@ struct MyLifeView: View {
     @State private var showDownload = false
     /// Cold-launch resume into the remote album deck (see AutoOpenTarget).
     @State private var resumeRemoteAlbumId: String?
+    /// Offline mode (see `OfflineMode`): the deck's persisted offline-only flag,
+    /// read through @AppStorage so a toggle flipped inside a deck's popover
+    /// updates this grid too.
+    @AppStorage(DeckViewModel.offlineOnlyDefaultsKey) private var offlineOnly = false
+    /// Mirror of `offlineDownloader.completed`: AppState does not forward the
+    /// downloader's changes, so without this the filtered grid would not pick
+    /// up months a running download finishes.
+    @State private var downloaded: [String: OfflineDownloader.Quality] = [:]
 
     /// Clears the floating tab-bar pill (see RootTabView.bottomBar): its
     /// capsule sits ~14pt vertical padding + ~20pt icon + 12pt bottom
@@ -36,8 +44,26 @@ struct MyLifeView: View {
         }
     }
 
+    /// Offline mode only: unsorted downloaded count per visible month key.
+    /// nil when offline mode is off (every month shows, with its usual count).
+    private var offlineCounts: [String: Int]? {
+        guard offlineOnly else { return nil }
+        let sortStore = appState.sortStore
+        return OfflineMode.readyCounts(
+            months: appState.monthBuckets.map { (key: $0.key, ids: $0.assets.map(\.localIdentifier)) },
+            isMonthSorted: { sortStore.isMonthManuallySorted($0) },
+            isUnsorted: { sortStore.state(forID: $0) == .unsorted },
+            isDownloaded: { downloaded[$0] != nil }
+        )
+    }
+
+    private var visibleBuckets: [MonthBucket] {
+        guard let counts = offlineCounts else { return appState.monthBuckets }
+        return appState.monthBuckets.filter { counts[$0.key] != nil }
+    }
+
     private var groupedByYear: [YearGroup] {
-        let grouped = Dictionary(grouping: appState.monthBuckets, by: \.year)
+        let grouped = Dictionary(grouping: visibleBuckets, by: \.year)
         // Descending: most recent year/month first, oldest at the bottom.
         // Deliberately the OPPOSITE of the reference app (which runs
         // oldest-first) — an explicit, one-off product decision to diverge
@@ -71,6 +97,12 @@ struct MyLifeView: View {
                             .foregroundStyle(.white.opacity(0.7))
                             .padding(.horizontal)
                             .accessibilityIdentifier("myLife.emptyReason")
+                    } else if offlineOnly && visibleBuckets.isEmpty {
+                        Text("Nothing downloaded")
+                            .font(.subheadline)
+                            .foregroundStyle(.white.opacity(0.7))
+                            .padding(.horizontal)
+                            .accessibilityIdentifier("myLife.offlineEmpty")
                     }
 
                     ForEach(groupedByYear) { entry in
@@ -81,7 +113,8 @@ struct MyLifeView: View {
 
                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4), spacing: 10) {
                             ForEach(entry.months) { month in
-                                MonthCardView(sortStore: appState.sortStore, downloader: appState.offlineDownloader, month: month)
+                                MonthCardView(sortStore: appState.sortStore, downloader: appState.offlineDownloader, month: month,
+                                              offlineCount: offlineCounts?[month.key])
                                     .environmentObject(appState)
                                     .onTapGesture { selectedMonth = month }
                             }
@@ -109,6 +142,11 @@ struct MyLifeView: View {
             // seeding — so watch both signals rather than either alone.
             .onChange(of: appState.monthBuckets.map(\.id)) { _, _ in autoOpenLatestMonthIfNeeded() }
             .onChange(of: appState.isSeeding) { _, _ in autoOpenLatestMonthIfNeeded() }
+            .onReceive(appState.offlineDownloader.$completed) { downloaded = $0 }
+            // In offline mode an auto-open attempted before this mirror filled
+            // found no visible month and bailed without marking itself done;
+            // retry once the downloaded list arrives.
+            .onChange(of: downloaded.count) { _, _ in autoOpenLatestMonthIfNeeded() }
         }
         .overlay(alignment: .bottom) {
             if showScrollTop {
@@ -180,7 +218,10 @@ struct MyLifeView: View {
               !appState.skipAutoOpenDeck,
               !appState.isSeeding,
               let target = AutoOpenTarget.resolve(
-                lastSwipedKey: appState.sortStore.lastSwipedMonthKey, buckets: appState.monthBuckets
+                // visibleBuckets, not monthBuckets: in offline mode a last-swiped
+                // month with nothing downloaded would open onto an empty deck, so
+                // fall back to the newest month that has something to swipe.
+                lastSwipedKey: appState.sortStore.lastSwipedMonthKey, buckets: visibleBuckets
               ) else { return }
         appState.hasAutoOpenedLatestMonth = true
         // No slide-up: the deck should read as the screen the app opened on.
@@ -201,6 +242,7 @@ struct MyLifeView: View {
                 .foregroundStyle(.white)
             Spacer()
             HStack(spacing: 12) {
+                OfflineModeButton(isOn: $offlineOnly)
                 DownloadHeaderButton(downloader: appState.offlineDownloader) { showDownload = true }
                 Image(systemName: "line.3.horizontal.decrease.circle.fill")
                     .font(.system(size: 22))
@@ -221,5 +263,24 @@ struct MyLifeView: View {
         }
         .padding(.horizontal)
         .padding(.top, 8)
+    }
+}
+
+/// Header toggle for offline mode: grey chip when off, green when on.
+private struct OfflineModeButton: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button { isOn.toggle() } label: {
+            Image(systemName: "icloud.slash")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(isOn ? .black : .white)
+                .frame(width: 34, height: 34)
+                .background(Circle().fill(isOn ? Color(red: 0.19, green: 0.82, blue: 0.345) : Color(white: 0.18)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("myLife.offlineMode")
+        .accessibilityLabel("Offline mode")
+        .accessibilityValue(isOn ? "on" : "off")
     }
 }
