@@ -244,9 +244,12 @@ struct MyLifeView: View {
             HStack(spacing: 12) {
                 OfflineModeButton(isOn: $offlineOnly)
                 DownloadHeaderButton(downloader: appState.offlineDownloader) { showDownload = true }
-                Image(systemName: "line.3.horizontal.decrease.circle.fill")
-                    .font(.system(size: 22))
-                    .foregroundStyle(.white, Color(white: 0.18))
+                Image(systemName: "line.3.horizontal.decrease")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(Color(white: 0.18)))
+                    .accessibilityIdentifier("myLife.filter")
                 HStack(spacing: 4) {
                     Image(systemName: "flame.fill").foregroundStyle(.orange)
                     Text("\(appState.sortStore.streakCount)").foregroundStyle(.white).bold()

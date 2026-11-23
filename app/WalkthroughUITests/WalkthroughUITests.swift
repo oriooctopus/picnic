@@ -4017,6 +4017,8 @@ final class WalkthroughUITests: XCTestCase {
         let toggle = app.buttons["myLife.offlineMode"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10), "My Life header should show the offline mode toggle")
         XCTAssertEqual(toggle.value as? String, "off")
+        XCTAssertTrue(app.images["myLife.filter"].exists, "My Life header should show the filter chip")
+        capture("my-life-header", delay: 0.5)
 
         toggle.tap()
         let empty = app.staticTexts["myLife.offlineEmpty"]
