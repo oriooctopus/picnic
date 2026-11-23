@@ -1101,7 +1101,7 @@ struct DeckView: View {
                     Button {
                         outfitLog.log(assetID: assetID, takenAt: takenAt)
                         toastDismissTask?.cancel()
-                        withAnimation { toast = nil }
+                        withAnimation { self.toast = nil }
                     } label: {
                         Text("Undo").fontWeight(.bold).foregroundStyle(Self.outfitLilac)
                     }
