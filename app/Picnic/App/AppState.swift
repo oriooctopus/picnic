@@ -138,11 +138,11 @@ final class AppState: ObservableObject {
         sortStore = SortStore(context: modelContext)
         #if DEBUG
         // UI-test mode (every UI test launches with --seed-library) must never
-        // reach the real Outfits server: inject an uploader that just succeeds.
+        // reach the real Outfits server: inject an uploader (and un-log) that just succeeds.
         // Same for trim replacements (POST /replace would reach the real mirror).
         if args.contains("--seed-library") {
             jobs = JobRuntime(
-                context: modelContext, pathSource: NetworkPathWatcher(), outfitUpload: { _ in },
+                context: modelContext, pathSource: NetworkPathWatcher(), outfitUpload: { _ in }, outfitRemove: { _ in },
                 trimReplace: TrimReplaceStore(upload: { _, _ in })
             )
         } else {

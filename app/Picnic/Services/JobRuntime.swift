@@ -26,6 +26,7 @@ final class JobRuntime {
             _ = try await ReconcileClient.confirm(month: job.month, ids: job.googleIds, phoneDeleted: job.phoneIndexes)
         },
         outfitUpload: @escaping (OutfitImportJob) async throws -> Void = OutfitUploader().upload,
+        outfitRemove: @escaping (OutfitImportJob) async throws -> Void = OutfitUploader().remove,
         trimReplace injectedTrimReplace: TrimReplaceStore? = nil,
         trimCandidates: @escaping (TrimReplaceStore) async -> [TrimBackfillCandidate] = { await TrimBackfillScanner.candidates(store: $0) },
         existingAssetIDs: @escaping ([String]) -> Set<String> = existingPhotoAssetIDs,
@@ -39,7 +40,7 @@ final class JobRuntime {
         let reconcile = ReconcileConfirmStore(
             context: context, send: reconcileSend, existingAssetIDs: existingAssetIDs, now: now
         )
-        let outfit = OutfitLogStore(context: context, upload: outfitUpload, now: now)
+        let outfit = OutfitLogStore(context: context, upload: outfitUpload, remove: outfitRemove, now: now)
         mirrorQueue = mirror
         reconcileConfirm = reconcile
         outfitLog = outfit

@@ -2162,6 +2162,35 @@ final class WalkthroughUITests: XCTestCase {
         capture("62-outfit-after-relaunch", delay: 1.0)
     }
 
+    /// Tapping the lilac hanger removes the photo from Outfits: the hanger
+    /// goes white at once, the card stays put, and the toast offers Undo,
+    /// which makes it lilac again.
+    func test53DeckRemoveOutfitWithUndo() throws {
+        relaunch(withExtraArguments: ["--reset-outfit-log"])
+        openMayDeck()
+        let button = app.buttons["deck.logOutfit"]
+        XCTAssertTrue(button.waitForExistence(timeout: 10))
+        button.tap()
+        // Logging swiped to the next photo; reopen the deck on the logged one.
+        relaunch(withExtraArguments: [])
+        openMayDeck()
+        XCTAssertTrue(button.waitForExistence(timeout: 10))
+        XCTAssertEqual(button.value as? String, "logged")
+        let thumb0 = app.descendants(matching: .any)["filmstrip.thumb.0"].firstMatch
+        let sortBefore = thumb0.value as? String
+
+        button.tap()
+        let undo = app.buttons["deck.outfitToast.undo"]
+        XCTAssertTrue(undo.waitForExistence(timeout: 2), "Removed toast should offer Undo")
+        capture("63-outfit-removed", delay: 0.3)
+        XCTAssertEqual(button.value as? String, "not logged", "Removal is immediate")
+        XCTAssertEqual(thumb0.value as? String, sortBefore, "Removing must not swipe the card")
+
+        undo.tap()
+        XCTAssertEqual(button.value as? String, "logged", "Undo logs it again")
+        XCTAssertFalse(undo.exists, "Undo dismisses the toast")
+    }
+
     /// setUp already launched the app; relaunching is how a test opts into
     /// extra seeding without making every other test pay for it.
     private func relaunch(withExtraArguments extra: [String]) {

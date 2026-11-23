@@ -86,6 +86,8 @@ struct DeckView: View {
 
     enum DeckToast: Equatable {
         case logged(assetID: String)
+        /// The filled hanger was tapped: Undo logs it again.
+        case removed(assetID: String, takenAt: Date)
         case openFailed
         case deleteBlocked
         case skippedVideos(count: Int)
@@ -1034,7 +1036,8 @@ struct DeckView: View {
 
     /// One-tap "Log as outfit": logs the photo, then swipes it right (keep).
     /// The hanger is lilac on an already-logged photo (e.g. after undo), and
-    /// tapping that opens Review instead of re-importing. Photos only.
+    /// tapping that removes it from Outfits, with Undo on the toast (the
+    /// DELETE waits out OutfitLogStore.removeGrace). Photos only.
     private var outfitButton: some View {
         // Only reachable from localActionsRow, so the item is always local.
         let asset = viewModel.currentItem?.phAsset
@@ -1043,8 +1046,8 @@ struct DeckView: View {
         return Button {
             guard let asset else { return }
             if isLogged {
-                outfitLog.relog(assetID: asset.localIdentifier)
-                openReview(assetID: asset.localIdentifier)
+                outfitLog.unlog(assetID: asset.localIdentifier)
+                showToast(.removed(assetID: asset.localIdentifier, takenAt: asset.creationDate ?? Date()), seconds: 4)
             } else {
                 outfitLog.log(assetID: asset.localIdentifier, takenAt: asset.creationDate ?? Date())
                 showToast(.logged(assetID: asset.localIdentifier), seconds: 4)
@@ -1092,6 +1095,17 @@ struct DeckView: View {
                         Text("Review now").fontWeight(.bold).foregroundStyle(Self.outfitLilac)
                     }
                     .accessibilityIdentifier("deck.outfitToast.review")
+                case .removed(let assetID, let takenAt):
+                    Text("Removed from Outfits").foregroundStyle(Color(red: 240 / 255, green: 234 / 255, blue: 251 / 255))
+                    Rectangle().fill(.white.opacity(0.25)).frame(width: 1, height: 18)
+                    Button {
+                        outfitLog.log(assetID: assetID, takenAt: takenAt)
+                        toastDismissTask?.cancel()
+                        withAnimation { toast = nil }
+                    } label: {
+                        Text("Undo").fontWeight(.bold).foregroundStyle(Self.outfitLilac)
+                    }
+                    .accessibilityIdentifier("deck.outfitToast.undo")
                 case .openFailed:
                     Text("Couldn't open Overland").foregroundStyle(Color(red: 240 / 255, green: 234 / 255, blue: 251 / 255))
                 case .deleteBlocked:

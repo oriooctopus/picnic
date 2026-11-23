@@ -52,7 +52,17 @@ final class OutfitLogStoreTests: XCTestCase {
             configurations: [ModelConfiguration(schema: PersistenceController.schema, isStoredInMemoryOnly: true)]
         )
         let context = ModelContext(container)
-        return (OutfitLogStore(context: context, upload: makeUploader().upload), context)
+        return (makeStore(context), context)
+    }
+
+    /// Injected clock: the un-log grace is measured on it, so tests step past
+    /// it instead of sleeping.
+    private var clock = Date()
+
+    private func makeStore(_ context: ModelContext) -> OutfitLogStore {
+        let uploader = makeUploader()
+        return OutfitLogStore(context: context, upload: uploader.upload, remove: uploader.remove,
+                              now: { [unowned self] in self.clock })
     }
 
     private func makeUploader() -> OutfitUploader {
@@ -132,33 +142,73 @@ final class OutfitLogStoreTests: XCTestCase {
         XCTAssertEqual(try jobs(context).count, 1)
     }
 
-    func testRelogEnqueuesNewOpIdUnlessJobPending() async throws {
-        let (store, context) = try makeStore()
+    /// Logs the photo and waits for its import to be sent.
+    private func logAndSend(_ store: OutfitLogStore, _ context: ModelContext) async throws -> OutfitImportJob {
         store.log(assetID: assetID, takenAt: Date())
         let job = try XCTUnwrap(jobs(context).first)
         await waitUntil { job.status == "sent" }
-        let firstOp = job.opID
+        return job
+    }
 
-        // Sent job: filled-button tap queues a fresh import with a new op id.
-        store.relog(assetID: assetID)
-        XCTAssertEqual(job.status, "pending")
-        XCTAssertNotEqual(job.opID, firstOp)
-        await waitUntil { StubProtocol.requests.count == 2 }
-        XCTAssertEqual(StubProtocol.requests[1].request.value(forHTTPHeaderField: "X-Op-Id"), job.opID.uuidString)
-        await waitUntil { job.status == "sent" }
+    func testUnlogWaitsOutGraceThenDeletesAndDropsRow() async throws {
+        let (store, context) = try makeStore()
+        let job = try await logAndSend(store, context)
+        let importOp = job.opID
+        store.unlog(assetID: assetID)
+        XCTAssertFalse(store.loggedIDs.contains(assetID), "un-log is immediate")
+
+        // Inside the grace nothing is sent, not even by a forced drain.
+        await store.drainQueue(ignoreBackoff: true)
+        XCTAssertEqual(StubProtocol.requests.count, 1)
+
+        clock = clock.addingTimeInterval(OutfitLogStore.removeGrace + 1)
+        StubProtocol.statuses = [200]
+        await store.drainQueue()
+        XCTAssertEqual(StubProtocol.requests.count, 2)
+        let (req, body) = StubProtocol.requests[1]
+        XCTAssertEqual(req.httpMethod, "DELETE")
+        XCTAssertEqual(req.url?.absoluteString, "http://host.test:8314/api/outfits/media/ABC-123%2FL0%2F001")
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+        XCTAssertEqual(json["opId"], "rm-\(importOp.uuidString)")
+        XCTAssertEqual(try jobs(context).count, 0, "row goes once the DELETE succeeded")
+
+        // Logging again afterwards is a fresh import.
+        store.log(assetID: assetID, takenAt: Date())
+        await waitUntil { StubProtocol.requests.count == 3 }
+        XCTAssertEqual(StubProtocol.requests[2].request.httpMethod, "POST")
+        XCTAssertNotEqual(StubProtocol.requests[2].request.value(forHTTPHeaderField: "X-Op-Id"), importOp.uuidString)
+    }
+
+    func testUndoInsideGraceSendsNothing() async throws {
+        let (store, context) = try makeStore()
+        let job = try await logAndSend(store, context)
+        store.unlog(assetID: assetID)
+        store.log(assetID: assetID, takenAt: Date())
+        XCTAssertTrue(store.loggedIDs.contains(assetID))
+        XCTAssertEqual(job.status, "sent", "Undo restores the sent import, no re-upload")
+        clock = clock.addingTimeInterval(OutfitLogStore.removeGrace + 1)
+        await store.drainQueue(ignoreBackoff: true)
+        XCTAssertEqual(StubProtocol.requests.count, 1, "neither a DELETE nor a second import")
         XCTAssertEqual(try jobs(context).count, 1)
+    }
 
-        // Pending job: no second job, op id untouched.
-        StubProtocol.statuses = [500]
-        store.relog(assetID: assetID)
-        await waitUntil { job.attemptCount == 1 }
-        XCTAssertEqual(job.status, "pending")
-        let pendingOp = job.opID
-        let calls = StubProtocol.requests.count
-        store.relog(assetID: assetID)
-        XCTAssertEqual(job.opID, pendingOp)
-        try await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertEqual(StubProtocol.requests.count, calls)
+    func testUnlogSurvivesRelaunchAndRetriesAfterFailure() async throws {
+        let (store, context) = try makeStore()
+        _ = try await logAndSend(store, context)
+        store.unlog(assetID: assetID)
+
+        let relaunched = makeStore(context)
+        XCTAssertFalse(relaunched.loggedIDs.contains(assetID), "un-logged state persists")
+        clock = clock.addingTimeInterval(OutfitLogStore.removeGrace + 1)
+        StubProtocol.statuses = [500, 200]
+        await relaunched.drainQueue()
+        XCTAssertEqual(StubProtocol.requests.count, 2)
+        XCTAssertEqual(try jobs(context).first?.status, "removing", "a failed DELETE stays queued, never parked as a failed upload")
+        XCTAssertEqual(relaunched.failedCount, 0)
+        await relaunched.drainQueue(ignoreBackoff: true)
+        XCTAssertEqual(StubProtocol.requests.count, 3)
+        XCTAssertEqual(StubProtocol.requests[2].request.httpMethod, "DELETE")
+        XCTAssertEqual(try jobs(context).count, 0)
     }
 
     func testReviewURLPercentEncodesSlashes() {
