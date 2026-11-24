@@ -453,6 +453,22 @@ final class WalkthroughUITests: XCTestCase {
         capture("10-utilities")
     }
 
+    /// The streak counter (flame) and gift button were removed from the My life
+    /// and Utilities headers. Matches on identifier OR label because SwiftUI
+    /// exposes SF Symbols by name in one and a localized description in the
+    /// other, and which one varies by iOS version.
+    func test54HeadersHaveNoStreakOrGift() throws {
+        let banned = NSPredicate(format:
+            "identifier IN %@ OR label IN[c] %@",
+            ["flame.fill", "gift.fill"], ["flame", "fire", "gift"])
+        openMyLifeGrid(capture00: false, capture01: false)
+        capture("54-mylife-header")
+        XCTAssertEqual(app.images.matching(banned).count, 0, "streak/gift still on My life")
+        goToUtilities()
+        capture("54-utilities-header")
+        XCTAssertEqual(app.images.matching(banned).count, 0, "streak/gift still on Utilities")
+    }
+
     func test08SmartCollections() throws {
         goToUtilities()
 
