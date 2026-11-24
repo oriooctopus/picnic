@@ -99,6 +99,7 @@ OPTIONAL = [
     "53-share-sheet", "53-linked-photo", "99-final-test53CopyPicnicLinkOpensPhotoFullScreen",
     # Offline download screen (test57).
     "download-setup", "download-progress", "mylife-downloaded", "download-month-sheet", "download-grid-limited", "99-final-test57OfflineDownloadFlow",
+    "54-mylife-header", "54-utilities-header", "99-final-test54HeadersHaveNoStreakOrGift",
 ]
 
 EXPECTED = REQUIRED + OPTIONAL
