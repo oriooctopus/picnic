@@ -128,16 +128,6 @@ struct UtilitiesView: View {
                 .foregroundStyle(.white)
                 .accessibilityIdentifier("utilities.title")
             Spacer()
-            HStack(spacing: 4) {
-                Image(systemName: "flame.fill").foregroundStyle(.orange)
-                Text("\(appState.sortStore.streakCount)").foregroundStyle(.white).bold()
-            }
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(Capsule().fill(Color(white: 0.18)))
-            Image(systemName: "gift.fill")
-                .foregroundStyle(.white)
-                .padding(10)
-                .background(Circle().fill(Color.green.opacity(0.4)))
         }
         .padding(.horizontal)
         .padding(.top, 8)

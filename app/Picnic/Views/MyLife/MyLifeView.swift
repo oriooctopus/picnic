@@ -272,18 +272,6 @@ struct MyLifeView: View {
                     .frame(width: 34, height: 34)
                     .background(Circle().fill(Color(white: 0.18)))
                     .accessibilityIdentifier("myLife.filter")
-                HStack(spacing: 4) {
-                    Image(systemName: "flame.fill").foregroundStyle(.orange)
-                    Text("\(appState.sortStore.streakCount)").foregroundStyle(.white).bold()
-                }
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(Capsule().fill(Color(white: 0.18)))
-
-                Image(systemName: "gift.fill")
-                    .font(.system(size: 18))
-                    .foregroundStyle(.white)
-                    .padding(10)
-                    .background(Circle().fill(Color.green.opacity(0.4)))
             }
         }
         .padding(.horizontal)
