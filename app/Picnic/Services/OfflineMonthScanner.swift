@@ -28,12 +28,18 @@ final class OfflineMonthScanner: ObservableObject {
     static let flushEvery = 25
 
     @Published private(set) var availableIDs: Set<String> = []
-    @Published private(set) var isScanning = false
+    /// Starts true: until the first pass has run, "nothing found" is unknown,
+    /// not empty. Starting false showed "Nothing downloaded" on the phone for
+    /// the moment between launch and the first scan (buckets not loaded yet).
+    @Published private(set) var isScanning = true
+    /// Bumped per `scan`, so a cancelled pass finishing late can't clear
+    /// `isScanning` while its replacement is still running.
+    private var generation = 0
     private var probedIDs: Set<String> = []
     private var pendingAvailable: Set<String> = []
     private var task: Task<Void, Never>?
 
-    /// The probe. Injected so the unit test can run without PHAssets.
+    /// The probe. Injectable for tests.
     typealias Probe = @Sendable (PHAsset, Int) async -> Bool
     private let probe: Probe
 
@@ -46,7 +52,16 @@ final class OfflineMonthScanner: ObservableObject {
     /// probed. Cancels a pass already running; what it learned is kept.
     func scan(months: [MonthBucket], isMonthSorted: @escaping (String) -> Bool, isUnsorted: @escaping (PHAsset) -> Bool) {
         task?.cancel()
-        task = Task { await run(months: months, isMonthSorted: isMonthSorted, isUnsorted: isUnsorted) }
+        // Months not loaded yet (PhotoKit still answering): stay "checking";
+        // the grid calls scan again when the buckets arrive.
+        guard !months.isEmpty else { return }
+        isScanning = true
+        // Bumped here, synchronously, not inside the task: otherwise the old
+        // pass could finish between this call and the new task starting, still
+        // match the generation, and clear isScanning mid-scan.
+        generation += 1
+        let myGeneration = generation
+        task = Task { await run(months: months, generation: myGeneration, isMonthSorted: isMonthSorted, isUnsorted: isUnsorted) }
     }
 
     func stop() {
@@ -54,8 +69,13 @@ final class OfflineMonthScanner: ObservableObject {
         task = nil
     }
 
-    /// Awaitable form of `scan`, for tests.
-    func run(months: [MonthBucket], isMonthSorted: (String) -> Bool, isUnsorted: (PHAsset) -> Bool) async {
+    /// One pass; `myGeneration` is the `scan` call that started it.
+    private func run(months: [MonthBucket], generation myGeneration: Int,
+                     isMonthSorted: (String) -> Bool, isUnsorted: (PHAsset) -> Bool) async {
+        defer {
+            flush()
+            if generation == myGeneration { isScanning = false }
+        }
         // (asset, index in its month): the index only feeds the DEBUG
         // partially-downloaded simulation, which keys off month position.
         let queue: [(PHAsset, Int)] = months.filter { !isMonthSorted($0.key) }.flatMap { month in
@@ -64,11 +84,6 @@ final class OfflineMonthScanner: ObservableObject {
             }
         }
         guard !queue.isEmpty else { return }
-        isScanning = true
-        defer {
-            flush()
-            isScanning = false
-        }
         let probe = self.probe
         await withTaskGroup(of: (String, Bool).self) { group in
             var next = 0
