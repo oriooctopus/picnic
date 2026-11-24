@@ -64,6 +64,13 @@ final class OfflineMonthScanner: ObservableObject {
         task = Task { await run(months: months, generation: myGeneration, isMonthSorted: isMonthSorted, isUnsorted: isUnsorted) }
     }
 
+    /// Records photos another service (the offline keeper) just downloaded, so
+    /// the grid shows them without re-probing: probed ids are never re-asked.
+    func markAvailable(_ ids: [String]) {
+        probedIDs.formUnion(ids)
+        availableIDs.formUnion(ids)
+    }
+
     func stop() {
         task?.cancel()
         task = nil

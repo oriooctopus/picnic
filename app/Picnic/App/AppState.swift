@@ -20,6 +20,8 @@ final class AppState: ObservableObject {
     let offlineDownloader: OfflineDownloader
     /// On-device check behind My Life's offline mode; see OfflineMonthScanner.
     let offlineScanner = OfflineMonthScanner()
+    /// Keeps 300 unsorted photos at full quality on the phone; see OfflineKeeper.
+    let offlineKeeper = OfflineKeeper()
 
     @Published var monthBuckets: [MonthBucket] = []
     // Set by MonthCardView's "Clean up Google" context-menu button; MyLifeView
@@ -238,5 +240,18 @@ final class AppState: ObservableObject {
                 isUnsorted: { [sortStore] in sortStore.state(forID: $0) == .unsorted }),
             pace: OfflineDownloadPlan.pace(timestamps: sortStore.sortTimestamps(since: paceCutoff))
         )
+        // Months changed (launch, a deck closed after sorting): the unsorted
+        // pool may have shrunk below the keeper's target.
+        restartOfflineKeeper()
+    }
+
+    /// (Re)starts the offline keeper over the current months; a no-op while the
+    /// app is not active (the keeper checks).
+    func restartOfflineKeeper() {
+        offlineKeeper.start(
+            months: monthBuckets,
+            isMonthSorted: { [sortStore] in sortStore.isMonthManuallySorted($0) },
+            isUnsorted: { [sortStore] in sortStore.state(for: $0) == .unsorted },
+            onAvailable: { [offlineScanner] in offlineScanner.markAvailable($0) })
     }
 }

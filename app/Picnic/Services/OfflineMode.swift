@@ -30,4 +30,16 @@ enum OfflineMode {
         }
         return out
     }
+
+    /// The ids behind `readyCounts` (same filters), for sizing what is stored.
+    static func readyIDs(
+        months: [(key: String, ids: [String])],
+        isMonthSorted: (String) -> Bool,
+        isUnsorted: (String) -> Bool,
+        isDownloaded: (String) -> Bool
+    ) -> [String] {
+        months.filter { !isMonthSorted($0.key) }
+            .flatMap { $0.ids }
+            .filter { isUnsorted($0) && isDownloaded($0) }
+    }
 }

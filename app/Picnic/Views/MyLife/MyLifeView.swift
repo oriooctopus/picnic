@@ -26,6 +26,8 @@ struct MyLifeView: View {
     /// photos found on the phone without going through the Download screen.
     @State private var onDevice: Set<String> = []
     @State private var isScanning = false
+    /// Bytes behind the offline-mode storage line (nil until first computed).
+    @StateObject private var storageMeter = OfflineStorageMeter()
 
     /// Clears the floating tab-bar pill (see RootTabView.bottomBar): its
     /// capsule sits ~14pt vertical padding + ~20pt icon + 12pt bottom
@@ -61,6 +63,43 @@ struct MyLifeView: View {
         )
     }
 
+    /// Offline mode only: ids behind `offlineCounts`, for the storage line.
+    private var offlineReadyIDs: [String] {
+        guard offlineOnly else { return [] }
+        let sortStore = appState.sortStore
+        return OfflineMode.readyIDs(
+            months: appState.monthBuckets.map { (key: $0.key, ids: $0.assets.map(\.localIdentifier)) },
+            isMonthSorted: { sortStore.isMonthManuallySorted($0) },
+            isUnsorted: { sortStore.state(forID: $0) == .unsorted },
+            isDownloaded: { downloaded[$0] != nil || onDevice.contains($0) }
+        )
+    }
+
+    private func updateStorage() {
+        guard offlineOnly else { return }
+        storageMeter.update(ids: offlineReadyIDs)
+    }
+
+    /// `152 photos · 412 MB`, or Checking while the scan or the first size read
+    /// is still running (a partial number would read as the real one).
+    private var offlineStorageLine: some View {
+        let count = offlineReadyIDs.count
+        let checking = isScanning || storageMeter.bytes == nil
+        let text = checking
+            ? "Checking"
+            : "\(count) photo\(count == 1 ? "" : "s") · \(ByteCountFormatter.string(fromByteCount: storageMeter.bytes ?? 0, countStyle: .file))"
+        return HStack(spacing: 8) {
+            if checking { ProgressView().tint(.white) }
+            Text(text)
+        }
+        .font(.subheadline)
+        .foregroundStyle(.white.opacity(0.7))
+        .padding(.horizontal)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text)
+        .accessibilityIdentifier("myLife.offlineStorage")
+    }
+
     private var visibleBuckets: [MonthBucket] {
         guard let counts = offlineCounts else { return appState.monthBuckets }
         return appState.monthBuckets.filter { counts[$0.key] != nil }
@@ -91,6 +130,8 @@ struct MyLifeView: View {
                         // pixel-offset threshold that can drift out of sync.
                         .onAppear { showScrollTop = false }
                         .onDisappear { showScrollTop = true }
+
+                    if offlineOnly { offlineStorageLine }
 
                     // An empty grid has two very different causes and the
                     // user can act on only one of them, so say which it is
@@ -154,7 +195,9 @@ struct MyLifeView: View {
             .onReceive(appState.offlineScanner.$availableIDs) { onDevice = $0 }
             .onReceive(appState.offlineScanner.$isScanning) { isScanning = $0 }
             .onAppear { updateOfflineScan() }
-            .onChange(of: offlineOnly) { _, _ in updateOfflineScan() }
+            .onChange(of: offlineOnly) { _, _ in updateOfflineScan(); updateStorage() }
+            .onChange(of: offlineReadyIDs.count) { _, _ in updateStorage() }
+            .onChange(of: isScanning) { _, _ in updateStorage() }
             .onChange(of: appState.monthBuckets.map(\.id)) { _, _ in updateOfflineScan() }
         }
         .overlay(alignment: .bottom) {

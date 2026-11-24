@@ -4065,6 +4065,11 @@ final class WalkthroughUITests: XCTestCase {
         let offline = expectation(for: NSPredicate(format: "label ENDSWITH 'offline'"), evaluatedWith: card)
         let ok = XCTWaiter().wait(for: [offline], timeout: 60)
         capture("offline-mode-on-device")
+        // Storage line under the header: `<n> photos · <size>`, never a partial number.
+        let storage = app.descendants(matching: .any)["myLife.offlineStorage"].firstMatch
+        let sized = expectation(for: NSPredicate(format: "label MATCHES %@", "^\\d+ photos? · .*"), evaluatedWith: storage)
+        XCTAssertEqual(XCTWaiter().wait(for: [sized], timeout: 60), .completed, "Storage line should read `N photos · size`, got \(storage.label)")
+        capture("offline-storage")
         XCTAssertEqual(ok, .completed, "On-device photos should keep 2025-05 visible in offline mode")
         XCTAssertFalse(app.staticTexts["myLife.offlineEmpty"].exists, "Must not say Nothing downloaded")
 

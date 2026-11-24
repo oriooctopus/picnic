@@ -581,6 +581,10 @@ struct DeckView: View {
             if let cached = WarmThumbCache.image(for: loadingID), Self.pixelCount(cached) > shownPixels() {
                 currentImage = cached
                 currentImageAssetID = loadingID
+                // Pixels are on screen: if the full image never arrives (offline,
+                // a warm copy is what offline mode counted) the card must stay
+                // `.partial`, not fall to `.none` and block delete swipes.
+                imageState.begin(prefetched: true)
             }
             // Low-res first, then full. A final result always replaces
             // currentImage; a degraded one only if it isn't a downgrade

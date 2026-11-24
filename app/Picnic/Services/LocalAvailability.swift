@@ -96,7 +96,10 @@ final class LocalAvailability {
 
     /// The probe for one item. nonisolated so the task group runs the
     /// PhotoKit/disk calls off the main actor.
-    nonisolated static func probeOne(_ item: DeckItem, monthIndex: Int) async -> Bool {
+    /// `countWarm: false` asks the stricter "full-quality original is on the
+    /// device" question, which the offline keeper needs (a WarmThumbCache copy
+    /// is enough to show a card offline but is not what the keeper maintains).
+    nonisolated static func probeOne(_ item: DeckItem, monthIndex: Int, countWarm: Bool = true) async -> Bool {
         #if DEBUG
         if ThumbnailLoader.simulateUndownloaded { return false }
         if ThumbnailLoader.simulatePartiallyDownloaded { return monthIndex % 2 == 0 }
@@ -108,7 +111,13 @@ final class LocalAvailability {
             guard !remote.isVideo, let url = remote.displayURL else { return false }
             return RemoteDisplayCache.isCached(url)
         case .local(let asset):
-            return asset.mediaType == .video ? await localVideoIsOnDevice(asset) : await localPhotoIsOnDevice(asset)
+            if asset.mediaType == .video { return await localVideoIsOnDevice(asset) }
+            // A photo whose screen-width copy sits in WarmThumbCache renders
+            // offline: DeckView puts that copy up as the card's placeholder
+            // and keeps it when the full image can't load. Without this the
+            // phone's offline mode found only the photos PhotoKit itself held.
+            if countWarm, WarmThumbCache.contains(asset.localIdentifier) { return true }
+            return await localPhotoIsOnDevice(asset)
         }
     }
 

@@ -19,6 +19,9 @@ struct PicnicApp: App {
                     // See JobRuntime.scenePhaseChanged (tested): foreground drains,
                     // polling stops when we leave .active.
                     if newPhase == .active { appState.offlineDownloader.resumeIfInterrupted() }
+                    // The keeper downloads from iCloud: foreground only.
+                    appState.offlineKeeper.setActive(newPhase == .active)
+                    if newPhase == .active { appState.restartOfflineKeeper() }
                     Task { await appState.jobs.scenePhaseChanged(active: newPhase == .active) }
                 }
         }
