@@ -4035,13 +4035,33 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter().wait(for: [gone], timeout: 10), .completed, "Close should dismiss the photo")
     }
 
+    /// Offline mode with photos already on the phone and the Download screen
+    /// never used (the phone bug: the grid said "Nothing downloaded" because it
+    /// only counted Download-screen items). The seeded simulator photos are
+    /// local, so the on-device scan must surface the seeded month.
+    func test59OfflineModeCountsPhotosAlreadyOnPhone() throws {
+        relaunch(withExtraArguments: ["--reset-offline-download", "--reset-offline-only", "--reset-sort-state"])
+        openMyLifeGrid()
+        let toggle = app.buttons["myLife.offlineMode"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10), "My Life header should show the offline mode toggle")
+        toggle.tap()
+        let card = app.descendants(matching: .any)["monthCard.2025-05"].firstMatch
+        let offline = expectation(for: NSPredicate(format: "label ENDSWITH 'offline'"), evaluatedWith: card)
+        let ok = XCTWaiter().wait(for: [offline], timeout: 60)
+        capture("offline-mode-on-device")
+        XCTAssertEqual(ok, .completed, "On-device photos should keep 2025-05 visible in offline mode")
+        XCTAssertFalse(app.staticTexts["myLife.offlineEmpty"].exists, "Must not say Nothing downloaded")
+    }
+
     /// Offline mode (My Life header toggle): with nothing downloaded the grid
     /// empties to "Nothing downloaded"; after a simulated download run the
     /// downloaded month is back, showing its offline count; toggling off
     /// restores the full grid. Presence and values only, no frames.
     func test58OfflineModeFiltersMyLife() throws {
+        // --simulate-undownloaded-images: the on-device scan finds nothing, so
+        // only the (simulated) Download run can make a month appear.
         relaunch(withExtraArguments: ["--reset-offline-download", "--reset-offline-only", "--reset-sort-state",
-                                      "--simulate-offline-download"])
+                                      "--simulate-offline-download", "--simulate-undownloaded-images"])
         openMyLifeGrid()
         let toggle = app.buttons["myLife.offlineMode"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10), "My Life header should show the offline mode toggle")

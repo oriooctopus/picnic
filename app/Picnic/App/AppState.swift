@@ -18,6 +18,8 @@ final class AppState: ObservableObject {
     /// Bulk "Download for offline" run; see OfflineDownloader. Constructed at
     /// the end of init, after the debug reset block.
     let offlineDownloader: OfflineDownloader
+    /// On-device check behind My Life's offline mode; see OfflineMonthScanner.
+    let offlineScanner = OfflineMonthScanner()
 
     @Published var monthBuckets: [MonthBucket] = []
     // Set by MonthCardView's "Clean up Google" context-menu button; MyLifeView

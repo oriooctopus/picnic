@@ -96,7 +96,7 @@ final class LocalAvailability {
 
     /// The probe for one item. nonisolated so the task group runs the
     /// PhotoKit/disk calls off the main actor.
-    private nonisolated static func probeOne(_ item: DeckItem, monthIndex: Int) async -> Bool {
+    nonisolated static func probeOne(_ item: DeckItem, monthIndex: Int) async -> Bool {
         #if DEBUG
         if ThumbnailLoader.simulateUndownloaded { return false }
         if ThumbnailLoader.simulatePartiallyDownloaded { return monthIndex % 2 == 0 }

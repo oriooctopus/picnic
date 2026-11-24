@@ -22,6 +22,10 @@ struct MyLifeView: View {
     /// downloader's changes, so without this the filtered grid would not pick
     /// up months a running download finishes.
     @State private var downloaded: [String: OfflineDownloader.Quality] = [:]
+    /// Mirror of `offlineScanner.availableIDs` / `isScanning`, same reason:
+    /// photos found on the phone without going through the Download screen.
+    @State private var onDevice: Set<String> = []
+    @State private var isScanning = false
 
     /// Clears the floating tab-bar pill (see RootTabView.bottomBar): its
     /// capsule sits ~14pt vertical padding + ~20pt icon + 12pt bottom
@@ -53,7 +57,7 @@ struct MyLifeView: View {
             months: appState.monthBuckets.map { (key: $0.key, ids: $0.assets.map(\.localIdentifier)) },
             isMonthSorted: { sortStore.isMonthManuallySorted($0) },
             isUnsorted: { sortStore.state(forID: $0) == .unsorted },
-            isDownloaded: { downloaded[$0] != nil }
+            isDownloaded: { downloaded[$0] != nil || onDevice.contains($0) }
         )
     }
 
@@ -98,11 +102,15 @@ struct MyLifeView: View {
                             .padding(.horizontal)
                             .accessibilityIdentifier("myLife.emptyReason")
                     } else if offlineOnly && visibleBuckets.isEmpty {
-                        Text("Nothing downloaded")
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.7))
-                            .padding(.horizontal)
-                            .accessibilityIdentifier("myLife.offlineEmpty")
+                        HStack(spacing: 8) {
+                            if isScanning { ProgressView().tint(.white) }
+                            Text(isScanning ? "Checking" : "Nothing downloaded")
+                        }
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .padding(.horizontal)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier(isScanning ? "myLife.offlineChecking" : "myLife.offlineEmpty")
                     }
 
                     ForEach(groupedByYear) { entry in
@@ -143,10 +151,11 @@ struct MyLifeView: View {
             .onChange(of: appState.monthBuckets.map(\.id)) { _, _ in autoOpenLatestMonthIfNeeded() }
             .onChange(of: appState.isSeeding) { _, _ in autoOpenLatestMonthIfNeeded() }
             .onReceive(appState.offlineDownloader.$completed) { downloaded = $0 }
-            // In offline mode an auto-open attempted before this mirror filled
-            // found no visible month and bailed without marking itself done;
-            // retry once the downloaded list arrives.
-            .onChange(of: downloaded.count) { _, _ in autoOpenLatestMonthIfNeeded() }
+            .onReceive(appState.offlineScanner.$availableIDs) { onDevice = $0 }
+            .onReceive(appState.offlineScanner.$isScanning) { isScanning = $0 }
+            .onAppear { updateOfflineScan() }
+            .onChange(of: offlineOnly) { _, _ in updateOfflineScan() }
+            .onChange(of: appState.monthBuckets.map(\.id)) { _, _ in updateOfflineScan() }
         }
         .overlay(alignment: .bottom) {
             if showScrollTop {
@@ -218,10 +227,10 @@ struct MyLifeView: View {
               !appState.skipAutoOpenDeck,
               !appState.isSeeding,
               let target = AutoOpenTarget.resolve(
-                // visibleBuckets, not monthBuckets: in offline mode a last-swiped
-                // month with nothing downloaded would open onto an empty deck, so
-                // fall back to the newest month that has something to swipe.
-                lastSwipedKey: appState.sortStore.lastSwipedMonthKey, buckets: visibleBuckets
+                // All months, even in offline mode: the on-device scan may not
+                // have reached the last-swiped month yet at launch, and the deck
+                // applies the offline filter itself once open.
+                lastSwipedKey: appState.sortStore.lastSwipedMonthKey, buckets: appState.monthBuckets
               ) else { return }
         appState.hasAutoOpenedLatestMonth = true
         // No slide-up: the deck should read as the screen the app opened on.
@@ -235,6 +244,19 @@ struct MyLifeView: View {
         }
     }
 
+    /// Runs the on-device scan while offline mode is on (it skips photos it
+    /// already checked, so re-running after a deck closes only probes new
+    /// unsorted items), and stops it when the mode is turned off.
+    private func updateOfflineScan() {
+        guard offlineOnly else { appState.offlineScanner.stop(); return }
+        let sortStore = appState.sortStore
+        appState.offlineScanner.scan(
+            months: appState.monthBuckets,
+            isMonthSorted: { sortStore.isMonthManuallySorted($0) },
+            isUnsorted: { sortStore.state(for: $0) == .unsorted }
+        )
+    }
+
     private var header: some View {
         HStack {
             Text("My life")
@@ -242,7 +264,7 @@ struct MyLifeView: View {
                 .foregroundStyle(.white)
             Spacer()
             HStack(spacing: 12) {
-                OfflineModeButton(isOn: $offlineOnly)
+                OfflineModeButton(isOn: $offlineOnly, isScanning: isScanning)
                 DownloadHeaderButton(downloader: appState.offlineDownloader) { showDownload = true }
                 Image(systemName: "line.3.horizontal.decrease")
                     .font(.system(size: 14, weight: .semibold))
@@ -269,15 +291,24 @@ struct MyLifeView: View {
     }
 }
 
-/// Header toggle for offline mode: grey chip when off, green when on.
+/// Header toggle for offline mode: grey chip when off, green when on, with a
+/// spinner while the on-device scan is still running.
 private struct OfflineModeButton: View {
     @Binding var isOn: Bool
+    /// Spinner in place of the icon while the on-device scan runs.
+    var isScanning: Bool
 
     var body: some View {
         Button { isOn.toggle() } label: {
-            Image(systemName: "icloud.slash")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(isOn ? .black : .white)
+            Group {
+                if isOn && isScanning {
+                    ProgressView().tint(.black)
+                } else {
+                    Image(systemName: "icloud.slash")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(isOn ? .black : .white)
+                }
+            }
                 .frame(width: 34, height: 34)
                 .background(Circle().fill(isOn ? Color(red: 0.19, green: 0.82, blue: 0.345) : Color(white: 0.18)))
         }

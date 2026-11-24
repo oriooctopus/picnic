@@ -7,13 +7,12 @@ import Foundation
 /// offline" while the deck still showed iCloud-only cards, which is exactly the
 /// "have to think about it" state this mode exists to remove.
 ///
-/// On the grid it keeps only months with at least one unsorted item that the
-/// offline downloader has finished (`OfflineDownloader.completed`). That list
-/// is the cheap, already-persisted answer; probing PhotoKit for every photo of
-/// every month (what the deck's `LocalAvailability` does for one month) would
-/// cost thousands of image requests per grid render. The trade-off: a photo
-/// that happens to be on the device without ever going through the downloader
-/// does not count here, though the deck will still show it once opened.
+/// On the grid it keeps only months with at least one unsorted item that is
+/// on the phone: either finished by the offline downloader
+/// (`OfflineDownloader.completed`) or found by `OfflineMonthScanner`'s
+/// network-off probe. The downloader list alone was the first version and
+/// showed "Nothing downloaded" on a phone whose photos were mostly local but
+/// had never gone through the Download screen.
 enum OfflineMode {
     /// Unsorted, downloaded item counts per month key, for months that have at
     /// least one. Manually sorted months are skipped (the deck treats the whole
