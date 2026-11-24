@@ -4051,6 +4051,21 @@ final class WalkthroughUITests: XCTestCase {
         capture("offline-mode-on-device")
         XCTAssertEqual(ok, .completed, "On-device photos should keep 2025-05 visible in offline mode")
         XCTAssertFalse(app.staticTexts["myLife.offlineEmpty"].exists, "Must not say Nothing downloaded")
+
+        // Cold launch with offline mode already on (the phone's state): the
+        // grid must say Checking until the scan answers, never "Nothing
+        // downloaded" first (seen on the phone before the fix).
+        relaunch(withExtraArguments: [])
+        openMyLifeGrid()
+        let deadline = Date().addingTimeInterval(30)
+        var sawEmpty = false
+        while Date() < deadline, !(card.exists && card.label.hasSuffix("offline")) {
+            if app.staticTexts["myLife.offlineEmpty"].exists { sawEmpty = true }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        capture("offline-mode-cold-launch")
+        XCTAssertFalse(sawEmpty, "Cold launch showed Nothing downloaded before the scan finished")
+        XCTAssertTrue(card.label.hasSuffix("offline"), "2025-05 should show after a cold launch, got \(card.label)")
     }
 
     /// Offline mode (My Life header toggle): with nothing downloaded the grid
