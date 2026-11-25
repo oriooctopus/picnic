@@ -33,6 +33,12 @@ final class LocalAvailability {
     /// too much work to repeat per photo across a few thousand probes.
     static let flushEvery = 25
 
+    /// The first hit of a pass flushes at once so a fresh deck fills in
+    /// immediately instead of waiting for flushEvery finds; then every flushEvery.
+    nonisolated static func shouldFlush(pending: Int, flushedFirst: Bool) -> Bool {
+        !flushedFirst || pending >= flushEvery
+    }
+
     private(set) var availableIDs: Set<String> = []
     private(set) var probedIDs: Set<String> = []
     /// True while a `probe` pass is running, so the deck can say "checking"
@@ -66,6 +72,7 @@ final class LocalAvailability {
         isProbing = true
         onChange?()
         var pendingFlush = 0
+        var flushedFirst = false
         defer {
             isProbing = false
             onChange?()
@@ -81,7 +88,7 @@ final class LocalAvailability {
                 probedIDs.insert(id)
                 if ok, availableIDs.insert(id).inserted {
                     pendingFlush += 1
-                    if pendingFlush >= Self.flushEvery { pendingFlush = 0; onChange?() }
+                    if Self.shouldFlush(pending: pendingFlush, flushedFirst: flushedFirst) { pendingFlush = 0; flushedFirst = true; onChange?() }
                 }
                 // A cancelled pass stops feeding the group; the few probes
                 // already in flight finish and are recorded.

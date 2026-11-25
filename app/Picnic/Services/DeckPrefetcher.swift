@@ -35,6 +35,10 @@ final class DeckPrefetcher {
     /// A guess, not a measured iCloud throughput; lower it if the on-card load
     /// of the CURRENT photo starts to stall behind the prefetch queue.
     static let maxInFlight = 4
+    /// Loaded-only video prefetch: videos are big, so one download at a time
+    /// (separate from the photo cap) and only the next 10. A guess.
+    static let videoMaxInFlight = 1
+    static let videoAhead = 10
     /// Remote downloads are small HTTP GETs from the tailnet box, not iCloud
     /// pulls, so a few in parallel is fine. A guess, not a measurement.
     /// DeckPrefetcherTests' cancel test assumes 4.
@@ -88,6 +92,8 @@ final class DeckPrefetcher {
     }
 
     private var inFlight: [String: PHImageRequestID] = [:]
+    private var videoInFlight: [String: PHImageRequestID] = [:]
+    private var videoDone: Set<String> = []
     private var done: Set<String> = []
 
     /// Called whenever a local photo's full-size image is confirmed on the
@@ -101,9 +107,10 @@ final class DeckPrefetcher {
     /// the visible deck: in offline-only mode the visible deck excludes
     /// undownloaded items, which are exactly what must be fetched.
     /// `isAvailable` lets already-downloaded items be skipped.
-    func recenter(items: [DeckItem], currentIndex: Int, isAvailable: @escaping (String) -> Bool = { _ in false }) {
+    func recenter(items: [DeckItem], currentIndex: Int, loadedOnly: Bool = false, isAvailable: @escaping (String) -> Bool = { _ in false }) {
         lastItems = items
         lastIndex = currentIndex
+        lastLoadedOnly = loadedOnly
         lastIsAvailable = isAvailable
         recenterRemote(items: items, currentIndex: currentIndex)
         #if DEBUG
@@ -125,6 +132,60 @@ final class DeckPrefetcher {
             if done.contains(id) || inFlight[id] != nil { continue }
             start(asset)
         }
+        recenterVideos(wanted: loadedOnly ? Self.videosWanted(items: items, currentIndex: currentIndex, isAvailable: isAvailable) : [])
+    }
+
+    /// Next unsorted local videos that are not on the device yet, nearest
+    /// first, forward only: loaded-only mode needs them downloaded ahead so
+    /// the deck stops skipping them. Capped at `videoAhead`.
+    nonisolated static func videosWanted(items: [DeckItem], currentIndex: Int, isAvailable: (String) -> Bool) -> [PHAsset] {
+        let ids = items.map { $0.phAsset.flatMap { $0.mediaType == .video ? $0.localIdentifier : nil } }
+        return videoIndices(videoIDs: ids, currentIndex: currentIndex, isAvailable: isAvailable).compactMap { items[$0].phAsset }
+    }
+
+    /// The pure half: `videoIDs[i]` is item i's id when it is a local video, else nil.
+    nonisolated static func videoIndices(videoIDs: [String?], currentIndex: Int, isAvailable: (String) -> Bool) -> [Int] {
+        let wanted = window(count: videoIDs.count, current: currentIndex, radius: forwardRadius, behind: 0).filter { i in
+            videoIDs[i].map { !isAvailable($0) } ?? false
+        }
+        return Array(wanted.prefix(videoAhead))
+    }
+
+    /// Video half of `recenter`: cancel requests that left the wanted list,
+    /// then keep at most `videoMaxInFlight` downloads running.
+    private func recenterVideos(wanted: [PHAsset]) {
+        let wantedIDs = Set(wanted.map(\.localIdentifier))
+        for (id, requestID) in videoInFlight where !wantedIDs.contains(id) {
+            PHImageManager.default().cancelImageRequest(requestID)
+            videoInFlight[id] = nil
+        }
+        for asset in wanted {
+            if videoInFlight.count >= Self.videoMaxInFlight { break }
+            let id = asset.localIdentifier
+            if videoDone.contains(id) || videoInFlight[id] != nil { continue }
+            startVideo(asset)
+        }
+    }
+
+    /// Same request shape as LocalAvailability's video probe but with network
+    /// allowed, so a finished download makes the probe answer yes.
+    private func startVideo(_ asset: PHAsset) {
+        let id = asset.localIdentifier
+        let options = PHVideoRequestOptions()
+        options.deliveryMode = .highQualityFormat
+        options.isNetworkAccessAllowed = true
+        let requestID = PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { [weak self] avAsset, _, info in
+            if (info?[PHImageCancelledKey] as? Bool) == true { return }
+            let complete = avAsset != nil
+            Task { @MainActor [weak self] in
+                guard let self, self.videoInFlight[id] != nil else { return }
+                self.videoInFlight[id] = nil
+                self.videoDone.insert(id)
+                if complete { self.onLocalAvailable?(id) }
+                self.refill()
+            }
+        }
+        videoInFlight[id] = requestID
     }
 
     /// Local photos to download, nearest first: the window over `items`, minus
@@ -183,6 +244,8 @@ final class DeckPrefetcher {
     func cancelAll() {
         for requestID in inFlight.values { PHImageManager.default().cancelImageRequest(requestID) }
         inFlight.removeAll()
+        for requestID in videoInFlight.values { PHImageManager.default().cancelImageRequest(requestID) }
+        videoInFlight.removeAll()
         for task in remoteInFlight.values { task.cancel() }
         remoteInFlight.removeAll()
     }
@@ -224,6 +287,7 @@ final class DeckPrefetcher {
 
     private var lastItems: [DeckItem] = []
     private var lastIndex = 0
+    private var lastLoadedOnly = false
     private var lastIsAvailable: (String) -> Bool = { _ in false }
-    private func refill() { recenter(items: lastItems, currentIndex: lastIndex, isAvailable: lastIsAvailable) }
+    private func refill() { recenter(items: lastItems, currentIndex: lastIndex, loadedOnly: lastLoadedOnly, isAvailable: lastIsAvailable) }
 }

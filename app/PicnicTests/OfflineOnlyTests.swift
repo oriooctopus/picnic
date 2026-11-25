@@ -41,6 +41,7 @@ final class OfflineOnlyTests: XCTestCase {
     private func resetDefaults() {
         UserDefaults.standard.removeObject(forKey: DeckViewModel.offlineOnlyDefaultsKey)
         UserDefaults.standard.removeObject(forKey: DeckViewModel.hideSortedDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: DeckViewModel.loadedOnlyDefaultsKey)
     }
     override func setUp() { resetDefaults() }
     override func tearDown() { resetDefaults() }
@@ -71,6 +72,16 @@ final class OfflineOnlyTests: XCTestCase {
 
         vm.offlineOnly = false
         XCTAssertEqual(vm.visibleItems.count, 6, "turning it off restores the full deck")
+    }
+
+    func testLoadedOnlyDefaultsOnAndNeverFiltersRemoteItems() async throws {
+        let vm = try await makeDeck(count: 4)
+        XCTAssertTrue(vm.loadedOnly, "unset key means on")
+        XCTAssertEqual(vm.visibleItems.count, 4, "remote items stream, so loaded-only must not hide them")
+        vm.loadedOnly = false
+        XCTAssertFalse(DeckViewModel(remoteAlbum: RemoteAlbumService(albumId: "a", client: Client(count: 1)), title: "t",
+                                     sortStore: SortStore(context: containers[0].mainContext)).loadedOnly,
+                       "an explicit off persists")
     }
 
     func testOfflineOnlyComposesWithHideSorted() async throws {

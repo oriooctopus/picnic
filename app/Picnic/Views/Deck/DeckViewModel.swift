@@ -102,6 +102,18 @@ final class DeckViewModel: ObservableObject {
             refresh(follow: currentItem?.id ?? lastAnchorID)
         }
     }
+    /// Loaded-only mode (default ON): local cards whose media is not on the
+    /// phone yet are skipped, so the deck never sits on "Downloading from
+    /// iCloud". The prefetcher pulls photos and videos ahead so cards turn up.
+    /// Remote-album items are exempt: remote videos stream and are never
+    /// "available". Unset key means on.
+    static let loadedOnlyDefaultsKey = "deck.loadedOnly"
+    @Published var loadedOnly = UserDefaults.standard.object(forKey: DeckViewModel.loadedOnlyDefaultsKey) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(loadedOnly, forKey: DeckViewModel.loadedOnlyDefaultsKey)
+            refresh(follow: currentItem?.id ?? lastAnchorID)
+        }
+    }
     /// Newest-first: the deck walks the month from its latest photo back to
     /// its earliest instead of the default oldest-first. Implemented by
     /// reversing `orderedItems` itself rather than only `visibleItems`, so
@@ -232,7 +244,7 @@ final class DeckViewModel: ObservableObject {
     /// a refresh rebuilds Compare groups over the whole month. `follow` keeps
     /// the deck on the card the user is looking at while items appear around it.
     private func availabilityChanged() {
-        if offlineOnly {
+        if offlineOnly || loadedOnly {
             refresh(follow: currentItem?.id ?? lastAnchorID)
         } else {
             objectWillChange.send()
@@ -470,6 +482,7 @@ final class DeckViewModel: ObservableObject {
         visibleItems = orderedItems.filter { item in
             (!hideSorted || (marks[item.id] ?? .unsorted) == .unsorted)
                 && (!offlineOnly || availability.isAvailable(item.id))
+                && (!loadedOnly || item.phAsset == nil || availability.isAvailable(item.id))
         }
 
         // Grouped over orderedItems, NOT visibleItems: a burst is defined by

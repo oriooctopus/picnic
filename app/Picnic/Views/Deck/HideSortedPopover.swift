@@ -3,6 +3,7 @@ import SwiftUI
 struct HideSortedPopover: View {
     @Binding var hideSorted: Bool
     @Binding var offlineOnly: Bool
+    @Binding var loadedOnly: Bool
     @Binding var newestFirst: Bool
     /// Unsorted, downloaded cards after the current one (`DeckViewModel.offlineReadyAhead`).
     var offlineReadyAhead: Int
@@ -34,6 +35,18 @@ struct HideSortedPopover: View {
             // stable "on"/"off" string to assert on instead of trying to
             // infer state from the symbol name.
             .accessibilityValue(hideSorted ? "on" : "off")
+
+            Button {
+                loadedOnly.toggle()
+            } label: {
+                HStack {
+                    Image(systemName: loadedOnly ? "checkmark.square.fill" : "square")
+                    Text("Not loaded yet")
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("deck.loadedOnlyToggle")
+            .accessibilityValue(loadedOnly ? "on" : "off")
 
             Button {
                 offlineOnly.toggle()

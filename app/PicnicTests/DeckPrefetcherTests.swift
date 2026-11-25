@@ -99,4 +99,27 @@ final class DeckPrefetcherTests: XCTestCase {
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertTrue(rec.cancelledKeys.isSuperset(of: Set(rec.requestedKeys)), "cancelAll cancels everything in flight")
     }
+
+    // MARK: loaded-only video prefetch
+
+    func testVideoIndicesAreNextUnavailableVideosForwardOnlyCappedAtTen() {
+        // Videos at every 5th slot; 25 and 40 already on the device.
+        let ids: [String?] = (0..<200).map { $0 % 5 == 0 ? "v\($0)" : nil }
+        let picked = DeckPrefetcher.videoIndices(videoIDs: ids, currentIndex: 20, isAvailable: { $0 == "v25" || $0 == "v40" })
+        XCTAssertEqual(picked, [30, 35, 45, 50, 55, 60, 65, 70, 75, 80], "forward, skips available and non-videos, max 10")
+        XCTAssertEqual(DeckPrefetcher.videoMaxInFlight, 1)
+    }
+
+    func testVideoIndicesIgnoreVideosBehindAndRemoteItems() {
+        XCTAssertEqual(DeckPrefetcher.videoIndices(videoIDs: ["v0", nil, "v2"], currentIndex: 1, isAvailable: { _ in false }), [2])
+        XCTAssertEqual(DeckPrefetcher.videosWanted(items: remoteItems(5, videos: [2]), currentIndex: 0, isAvailable: { _ in false }).count, 0,
+                       "remote videos stream, never prefetched")
+    }
+
+    func testAvailabilityFlushesFirstHitThenEveryFlushEvery() {
+        XCTAssertTrue(LocalAvailability.shouldFlush(pending: 1, flushedFirst: false))
+        XCTAssertFalse(LocalAvailability.shouldFlush(pending: 1, flushedFirst: true))
+        XCTAssertFalse(LocalAvailability.shouldFlush(pending: LocalAvailability.flushEvery - 1, flushedFirst: true))
+        XCTAssertTrue(LocalAvailability.shouldFlush(pending: LocalAvailability.flushEvery, flushedFirst: true))
+    }
 }

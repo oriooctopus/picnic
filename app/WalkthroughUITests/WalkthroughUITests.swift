@@ -4218,4 +4218,27 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter().wait(for: [sheetGone], timeout: 10), .completed, "Tapping outside should dismiss the month sheet")
         capture("download-grid-limited", delay: 0.5)
     }
+
+    /// The popover offers the loaded-only toggle ("Not loaded yet"), on by default.
+    func testLoadedOnlyToggleInDeckPopover() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-offline-only", "--loaded-only"])
+        openMayDeck()
+        app.buttons["deck.filter"].tap()
+        let toggle = app.descendants(matching: .any)["deck.loadedOnlyToggle"].firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5), "Popover should offer the 'Not loaded yet' toggle")
+        XCTAssertEqual(toggle.value as? String, "on", "Loaded-only defaults on")
+        capture("loaded-only-popover")
+        toggle.tap()
+        XCTAssertEqual(toggle.value as? String, "off")
+    }
+
+    /// Loaded-only with nothing on the device shows the loading screen, not "All sorted".
+    func testLoadedOnlyEmptyDeckShowsLoading() throws {
+        relaunch(withExtraArguments: ["--reset-hide-sorted", "--reset-offline-only", "--reset-sort-state",
+                                      "--loaded-only", "--simulate-undownloaded-images"])
+        openMyLifeGrid().tap()
+        let loading = app.descendants(matching: .any)["deck.loadingEmpty"].firstMatch
+        XCTAssertTrue(loading.waitForExistence(timeout: 20), "Loaded-only with nothing loaded should show the loading state")
+        capture("loaded-only-loading")
+    }
 }

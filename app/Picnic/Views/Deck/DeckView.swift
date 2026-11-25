@@ -289,11 +289,11 @@ struct DeckView: View {
         // Id includes the count because a remote deck fills in after open, and
         // the unsorted count because sorting a card changes the unsorted list
         // even when hideSorted is off and the visible list does not move.
-        .task(id: "\(viewModel.currentIndex)#\(viewModel.visibleItems.count)#\(viewModel.unsortedCount)") {
+        .task(id: "\(viewModel.currentIndex)#\(viewModel.visibleItems.count)#\(viewModel.unsortedCount)#\(viewModel.loadedOnly)") {
             prefetcher.onLocalAvailable = { [viewModel] id in viewModel.availability.markAvailable(id) }
             prefetcher.onRemoteAvailable = { [viewModel] id in viewModel.availability.markAvailable(id) }
             let source = viewModel.prefetchSource
-            prefetcher.recenter(items: source.items, currentIndex: source.anchor) { [viewModel] in
+            prefetcher.recenter(items: source.items, currentIndex: source.anchor, loadedOnly: viewModel.loadedOnly) { [viewModel] in
                 viewModel.availability.isAvailable($0)
             }
         }
@@ -301,8 +301,8 @@ struct DeckView: View {
         // screen-size decode per photo) while offline-only filters by it or the
         // popover that shows the ready count is open; cancelled when either
         // stops being true.
-        .task(id: "\(viewModel.monthKey)#\(viewModel.orderedItems.count)#\(viewModel.offlineOnly)#\(showHidePopover)") {
-            guard viewModel.offlineOnly || showHidePopover else { return }
+        .task(id: "\(viewModel.monthKey)#\(viewModel.orderedItems.count)#\(viewModel.offlineOnly)#\(viewModel.loadedOnly)#\(showHidePopover)") {
+            guard viewModel.offlineOnly || viewModel.loadedOnly || showHidePopover else { return }
             await viewModel.probeAvailability()
         }
         // Remote deck: fetch the album (and its server-side decisions) once
@@ -932,7 +932,18 @@ struct DeckView: View {
 
     private var emptyState: some View {
         VStack(spacing: 12) {
-            if viewModel.offlineOnly && !viewModel.orderedItems.isEmpty {
+            if viewModel.loadedOnly && !viewModel.orderedItems.isEmpty && viewModel.unsortedCount > 0
+                && (viewModel.availability.isProbing || Connectivity.shared.isOnline) {
+                // Loaded-only emptied the deck: cards are on their way (probe or
+                // prefetch running), not missing.
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                    .scaleEffect(1.4)
+                Text("Loading")
+                    .foregroundStyle(.white)
+                    .accessibilityIdentifier("deck.loadingEmpty")
+            } else if (viewModel.offlineOnly || (viewModel.loadedOnly && viewModel.unsortedCount > 0)) && !viewModel.orderedItems.isEmpty {
                 // Offline-only emptied the deck: "All sorted" would be a lie,
                 // the photos are merely not downloaded (or still being checked).
                 Image(systemName: viewModel.availability.isProbing ? "arrow.triangle.2.circlepath.icloud" : "icloud.slash")
@@ -1183,6 +1194,7 @@ struct DeckView: View {
                 // before the current card. markSortedUpToCurrent also no-ops
                 // for remote as a second line of defense.
                 HideSortedPopover(hideSorted: $viewModel.hideSorted, offlineOnly: $viewModel.offlineOnly,
+                                  loadedOnly: $viewModel.loadedOnly,
                                   newestFirst: $viewModel.newestFirst,
                                   offlineReadyAhead: viewModel.offlineReadyAhead, markSortedToHere: {
                     viewModel.markSortedUpToCurrent()
