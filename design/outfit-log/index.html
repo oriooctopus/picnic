@@ -1,0 +1,409 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Picnic - Log as outfit - Chosen flow</title><style>
+*{box-sizing:border-box}
+html,body{margin:0;overflow-x:hidden}
+body{background:#05070a;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;padding:56px 0 120px}
+.wrap{padding:0 24px;max-width:100%}
+h1{font-size:26px;margin:0 0 12px;font-weight:700}
+.lede{color:rgba(255,255,255,.6);font-size:15px;line-height:1.6;max-width:760px;margin:0 0 72px}
+.flow{margin-bottom:112px}
+.flow h2{font-size:21px;margin:0 0 14px;font-weight:700;line-height:1.4}
+.flow .tag{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.08em;color:#c9a2ff;border:1px solid rgba(201,162,255,.4);border-radius:99px;padding:4px 12px;margin-bottom:16px}
+.flow .sum{font-size:16px;color:rgba(255,255,255,.8);line-height:1.6;margin:0 0 16px;max-width:760px}
+.cost{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 36px}
+.cost span{font-size:13.5px;background:#12161c;border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:9px 14px;color:rgba(255,255,255,.85)}
+.cost b{color:#7ee787}
+.strip{display:flex;gap:56px;overflow-x:auto;padding:8px 24px 40px;margin:0 -24px;align-items:flex-start}
+.step{flex:none;width:390px}
+.num{font-size:12px;font-weight:700;letter-spacing:.08em;color:rgba(255,255,255,.45);margin-bottom:14px}
+.cap{font-size:15px;line-height:1.55;color:rgba(255,255,255,.85);margin-top:22px;padding:0 6px}
+.frame{position:relative;width:390px;height:844px;border-radius:44px;overflow:hidden;background:#000;border:1px solid rgba(255,255,255,.16);box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.sb{position:absolute;top:0;left:0;right:0;height:50px;display:flex;justify-content:space-between;align-items:center;padding:6px 32px 0;font-size:15px;font-weight:600;z-index:30;pointer-events:none}
+.home{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);width:134px;height:5px;border-radius:3px;background:rgba(255,255,255,.9);z-index:40}
+/* deck */
+.deck{position:absolute;inset:0;background:#000}
+.card{position:absolute;top:62px;left:16px;right:16px;height:500px;border-radius:22px;overflow:hidden}
+.card svg.ph{width:100%;height:100%;display:block}
+.acts{position:absolute;top:598px;left:0;right:0;display:flex;justify-content:center;gap:56px;align-items:center}
+.acts .b{width:44px;height:44px;display:flex;align-items:center;justify-content:center;position:relative;color:#fff}
+.acts svg{width:26px;height:26px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.acts .heart{color:#fff}
+.b.on svg{fill:#c9a2ff;stroke:#c9a2ff}
+.b.on svg .cut{stroke:#1c1130}
+.b.hl::before{content:"";position:absolute;inset:-9px;border-radius:50%;border:2px solid #c9a2ff;box-shadow:0 0 0 7px rgba(201,162,255,.18)}
+.callout{position:absolute;left:50%;transform:translateX(-50%);top:556px;background:#c9a2ff;color:#1c1130;font-size:12.5px;font-weight:700;padding:6px 12px;border-radius:99px;white-space:nowrap}
+.callout::after{content:"";position:absolute;left:50%;bottom:-5px;margin-left:-6px;border:6px solid transparent;border-bottom:0;border-top-color:#c9a2ff}
+.film{position:absolute;top:700px;left:0;right:0;display:flex;gap:6px;justify-content:center;align-items:center}
+.th{width:34px;height:46px;border-radius:6px;position:relative;opacity:.55}
+.th.cur{width:42px;height:56px;opacity:1;outline:2px solid #fff;outline-offset:1px}
+.th i{position:absolute;right:2px;bottom:2px;width:15px;height:15px;border-radius:50%;background:#c9a2ff;display:flex;align-items:center;justify-content:center}
+.th i svg{width:10px;height:10px;fill:none;stroke:#1c1130;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.pos{position:absolute;top:770px;width:100%;text-align:center;font-size:11px;font-weight:700;letter-spacing:.06em;color:rgba(255,255,255,.6)}
+.toast{position:absolute;top:84px;left:50%;transform:translateX(-50%);background:rgba(30,22,48,.92);border:1px solid rgba(201,162,255,.5);color:#f0eafb;border-radius:99px;padding:12px 20px;font-size:15px;font-weight:600;display:flex;gap:10px;align-items:center;z-index:20;white-space:nowrap}
+.toast svg{width:18px;height:18px;fill:none;stroke:#3ce6b0;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+.badge-card{position:absolute;left:30px;top:78px;background:rgba(28,17,48,.85);color:#c9a2ff;font-size:12.5px;font-weight:700;padding:7px 12px;border-radius:99px;display:flex;gap:7px;align-items:center;z-index:5}
+.badge-card svg{width:15px;height:15px;fill:#c9a2ff;stroke:#c9a2ff}
+/* dusk */
+.dusk{position:absolute;inset:0;background:radial-gradient(120% 60% at 80% 0%,#3a1f66 0%,transparent 60%),linear-gradient(170deg,#1c1130,#241442 60%,#1c1130);color:#f0eafb}
+.dusk .scr{position:absolute;inset:0;padding:64px 20px 0}
+.dim{color:#a99cc4}
+.glass{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);border-radius:18px}
+.h1{font-size:30px;font-weight:700;letter-spacing:-.01em;margin:6px 0 20px}
+.pills{display:flex;gap:8px;margin-bottom:22px}
+.pill{font-size:13px;font-weight:600;padding:8px 14px;border-radius:99px;border:1px solid rgba(255,255,255,.14);color:#a99cc4}
+.pill.on{background:#c9a2ff;color:#1c1130;border-color:#c9a2ff}
+.ocard{display:flex;gap:16px;padding:14px;margin-bottom:16px}
+.ocard .im{width:92px;height:122px;border-radius:12px;overflow:hidden;flex:none}
+.ocard .im svg{width:100%;height:100%;display:block}
+.ocard .t{font-size:16px;font-weight:700}
+.ocard .s{font-size:12.5px;margin-top:4px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.chip{font-size:12px;padding:5px 10px;border-radius:99px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12)}
+.chip.q{border-style:dashed;border-color:#f5c26b;color:#f5c26b}
+.warn{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#1c1130;background:#f5c26b;border-radius:99px;padding:4px 10px;margin-top:12px}
+.verd{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#3ce6b0;margin-top:12px}
+.glow{box-shadow:0 0 0 2px #c9a2ff,0 0 30px rgba(201,162,255,.25)}
+.back{color:#c9a2ff;font-size:16px;margin-bottom:6px}
+.btn{display:flex;align-items:center;justify-content:center;height:54px;border-radius:16px;background:#c9a2ff;color:#1c1130;font-weight:700;font-size:16px}
+.btn.ghost{background:rgba(255,255,255,.07);color:#f0eafb;border:1px solid rgba(255,255,255,.14)}
+.cand{display:flex;align-items:center;gap:14px;padding:14px;margin-bottom:12px}
+.cand .sw{width:48px;height:48px;border-radius:12px;flex:none}
+.cand .n{font-size:15px;font-weight:600}
+.cand .m{font-size:12.5px;margin-top:3px}
+.rad{margin-left:auto;width:22px;height:22px;border-radius:50%;border:2px solid rgba(255,255,255,.3);flex:none}
+.cand.sel{border-color:#c9a2ff;background:rgba(201,162,255,.14)}
+.cand.sel .rad{border-color:#c9a2ff;background:radial-gradient(#c9a2ff 45%,transparent 50%)}
+.lab{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8a7ba8;margin:22px 0 12px}
+.prow{display:flex;align-items:center;gap:12px;padding:12px 14px;margin-bottom:10px}
+.ok{width:22px;height:22px;border-radius:50%;background:rgba(60,230,176,.18);color:#3ce6b0;display:flex;align-items:center;justify-content:center;flex:none}
+.ok svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.nm{width:22px;height:22px;border-radius:50%;background:#c9a2ff;color:#1c1130;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}
+/* sheet */
+.scrim{position:absolute;inset:0;background:rgba(0,0,0,.55);z-index:10}
+.sheet{position:absolute;left:0;right:0;bottom:0;top:62px;border-radius:26px 26px 0 0;z-index:15;overflow:hidden;background:radial-gradient(120% 40% at 80% 0%,#3a1f66 0%,transparent 60%),linear-gradient(170deg,#1c1130,#241442);color:#f0eafb;padding:0 20px;border-top:1px solid rgba(255,255,255,.2)}
+.grab{width:40px;height:5px;border-radius:3px;background:rgba(255,255,255,.3);margin:9px auto 0}
+.sh{display:flex;justify-content:space-between;align-items:center;height:48px}
+.sh b{font-size:17px}
+.sh span{color:#a99cc4;font-size:15px}
+.top{display:flex;gap:18px;margin-bottom:14px}
+.pbox{position:relative;width:172px;height:230px;border-radius:14px;overflow:hidden;flex:none}
+.pbox svg.ph{width:100%;height:100%;display:block}
+.bx{position:absolute;border:2px solid #c9a2ff;border-radius:6px}
+.bx i{position:absolute;left:-2px;top:-12px;width:20px;height:20px;border-radius:50%;background:#c9a2ff;color:#1c1130;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;font-style:normal}
+.bx.w{border-color:#f5c26b}.bx.w i{background:#f5c26b}
+.scan{position:absolute;left:0;right:0;height:3px;top:46%;background:#c9a2ff;box-shadow:0 0 22px 10px rgba(201,162,255,.5)}
+.spin{width:18px;height:18px;border-radius:50%;border:3px solid rgba(201,162,255,.3);border-top-color:#c9a2ff;flex:none;animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.sk{height:56px;border-radius:14px;background:linear-gradient(90deg,rgba(255,255,255,.05),rgba(255,255,255,.12),rgba(255,255,255,.05));margin-bottom:10px}
+.summ .big{font-size:20px;font-weight:700;margin-bottom:12px}
+.summ div.l{font-size:13.5px;margin-bottom:9px;display:flex;gap:8px;align-items:center}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.pr{padding:10px 14px;margin-bottom:8px}
+.pr .row1{display:flex;align-items:center;gap:12px}
+.pr .nn{font-size:14.5px;font-weight:600}
+.pr .mm{font-size:12px}
+.opts{display:flex;gap:8px;margin:10px 0 0 34px}
+.opt{flex:1;font-size:12.5px;padding:9px 8px;border-radius:10px;border:1px solid rgba(255,255,255,.2);text-align:center}
+.opt.sel{border-color:#c9a2ff;background:rgba(201,162,255,.16);color:#fff}
+.addw{margin-left:auto;font-size:12.5px;font-weight:700;color:#c9a2ff;border:1px solid #c9a2ff;border-radius:99px;padding:6px 12px;white-space:nowrap}
+.vrow{display:flex;gap:8px;margin:14px 0 14px}
+.vc{flex:1;text-align:center;font-size:14px;font-weight:600;padding:11px 0;border-radius:99px;border:1px solid rgba(255,255,255,.2);color:#a99cc4}
+.vc.on{background:#c9a2ff;color:#1c1130;border-color:#c9a2ff}
+.sheet .btn{height:52px}
+
+.toast.act{padding:13px 18px;gap:12px;overflow:hidden;top:80px}
+.toast.act .vr{width:1px;height:18px;background:rgba(255,255,255,.25)}
+.toast.act b{color:#c9a2ff;font-weight:700}
+.toast.act .bar{position:absolute;left:0;bottom:0;height:3px;width:62%;background:rgba(201,162,255,.7)}
+.sec{margin:0 0 140px}
+.sec-hd{font-size:13px;font-weight:700;letter-spacing:.1em;color:rgba(255,255,255,.4);text-transform:uppercase;margin:0 0 18px;padding-top:8px}
+.earlier-hd{border-top:1px solid rgba(255,255,255,.12);padding-top:64px;margin:0 0 64px}
+.earlier-hd h1{font-size:26px;margin:0 0 10px}
+.earlier-hd p{color:rgba(255,255,255,.6);font-size:15px;line-height:1.6;margin:0;max-width:760px}
+.tag.chosen{color:#7ee787;border-color:rgba(126,231,135,.45)}
+.pathnote{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.06em;color:#f5c26b;margin:-4px 0 12px}
+/* real outfits idiom */
+.rscr{position:absolute;inset:0;padding:64px 16px 0;display:flex;flex-direction:column;gap:16px;overflow:hidden}
+.rscr h1{margin:0;font-size:28px;font-weight:700;letter-spacing:-.01em}
+.trow2{display:flex;align-items:baseline;justify-content:space-between}
+.search2{display:flex;align-items:center;height:48px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);border-radius:14px;color:#a99cc4;font-size:15px;flex:none}
+.search2 .l{display:flex;align-items:center;gap:8px;padding:0 12px;flex:1}
+.search2 .rule{width:1px;height:24px;background:rgba(255,255,255,.14)}
+.search2 .cam{width:48px;display:flex;justify-content:center;color:#c9a2ff}
+.rsec{display:flex;flex-direction:column;gap:8px}
+.rlab{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#a99cc4}
+.g5{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.tl{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-height:64px;padding:12px 2px 8px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);border-radius:14px;font-size:11px;color:#f0eafb}
+.tl svg{color:#c9a2ff;width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.tb{display:flex;flex-direction:column;gap:4px;min-width:0}
+.tb .ph3{position:relative;overflow:hidden;aspect-ratio:3/4;border-radius:14px;border:1px solid rgba(255,255,255,.14)}
+.tb .ph3 svg{width:100%;height:100%;display:block}
+.tb .ph3.sel{box-shadow:0 0 0 2px #c9a2ff,0 0 24px rgba(201,162,255,.3)}
+.tb .c{font-size:11px;color:#a99cc4}
+.tb .c2{font-size:11px;color:#f5c26b;display:flex;gap:5px;align-items:center;white-space:nowrap}
+.tb .c2 i{width:7px;height:7px;border-radius:50%;background:#f5c26b;flex:none}
+/* confirm screen */
+.cscr{position:absolute;inset:0;background:radial-gradient(120% 40% at 80% 0%,#3a1f66 0%,transparent 60%),linear-gradient(170deg,#1c1130,#241442 60%,#1c1130);overflow:hidden}
+.cph{position:absolute;top:0;left:0;right:0;height:340px;overflow:hidden}
+.cph svg.ph{width:100%;height:100%;display:block}
+.cbk{position:absolute;left:16px;top:54px;width:44px;height:44px;border-radius:50%;background:rgba(36,20,66,.9);display:flex;align-items:center;justify-content:center;z-index:5;color:#c9a2ff}
+.cbk svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.cph .bx{border-width:2px;border-radius:6px}
+.cph .bx.u{border-style:dashed}
+.cpan{position:absolute;top:330px;left:0;right:0;bottom:0;border-radius:24px 24px 0 0;background:linear-gradient(180deg,#2c1a4d,#241442);padding:18px 16px 0}
+.cdate{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px}
+.cdate b{font-size:24px;font-weight:700}
+.cdate span{font-size:13px;color:#a99cc4}
+.vgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:8px 0 16px}
+.vb{height:48px;border-radius:14px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-size:15px}
+.lst{border:1px solid rgba(255,255,255,.14);border-radius:18px;background:rgba(255,255,255,.07);overflow:hidden;margin-top:8px}
+.lr{display:flex;align-items:center;gap:12px;padding:10px 14px;min-height:60px;border-bottom:1px solid rgba(255,255,255,.14)}
+.lr:last-child{border-bottom:0}
+.sw36{width:36px;height:36px;border-radius:9px;border:1px solid rgba(255,255,255,.2);flex:none}
+.sw36.d{border-style:dashed;background:transparent}
+.lr .t{font-size:15px;font-weight:600}
+.lr .s{font-size:12.5px;color:#a99cc4;margin-top:1px}
+.lr .s.w{color:#f5c26b}
+.lr .chev{margin-left:auto;color:#a99cc4;width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.lr .add{margin-left:auto;font-size:13px;font-weight:600;color:#c9a2ff;white-space:nowrap}
+.lrx{padding:0 14px 14px 62px;display:flex;gap:8px;border-bottom:1px solid rgba(255,255,255,.14);margin-top:-2px}
+.ch{min-height:36px;padding:0 12px;border-radius:99px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.07);font-size:13px;display:flex;align-items:center}
+.ch.on{background:#c9a2ff;border-color:#c9a2ff;color:#1c1130;font-weight:600}
+.cbar{position:absolute;left:0;right:0;bottom:0;padding:48px 16px 34px;background:linear-gradient(transparent,#241442 45%)}
+.cbtn{height:52px;border-radius:14px;background:#c9a2ff;color:#1c1130;font-weight:700;font-size:16px;display:flex;align-items:center;justify-content:center}
+.cbtn.off{opacity:.38}
+.sk2{height:14px;border-radius:7px;background:rgba(255,255,255,.12)}
+.hint{font-size:13px;color:#a99cc4;line-height:1.5;margin-top:14px;padding:0 4px}
+.fnd{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600}
+</style></head><body><div class="wrap">
+<section class="flow sec"><span class="tag chosen">CHOSEN</span><h1 style="margin-bottom:14px">One tap, confirm whenever</h1>
+<p class="sum">Chosen: one tap logs the outfit, and confirming the detected pieces happens whenever you like, either straight from the note or later from the Outfits home. The note says Review now (it says what you will do, and the app switch is implied). The Outfits frames follow the real home screen: title row, search, Browse by category, then a new To confirm section styled like Recent outfits.</p>
+<div class="cost"><span><b>1 tap</b> to log, 0 wait</span><span>Confirming: <b>2 to 3 taps</b>, any time later</span></div>
+<div class="strip"><div class="step"><div class="num">STEP 1</div><div class="frame"><div class="deck"><div class="sb"><span>9:41</span><span>5G</span></div><div class="card"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg></div><div class="toast act"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg><span>Logged to Outfits</span><i class="vr"></i><b>Review now</b><u class="bar"></u></div>
+<div class="acts"><div class="b heart"><svg viewBox="0 0 24 24"><path d="M12 20.3S3.5 15 3.5 8.9A4.6 4.6 0 0 1 12 6.6a4.6 4.6 0 0 1 8.5 2.3C20.5 15 12 20.3 12 20.3Z"/></svg></div><div class="b on hl"><svg viewBox="0 0 24 24"><path d="M12 8.2V9.6 M12 8.2a2.3 2.3 0 1 0-2.3-2.3"/><path d="M12 9.6 3.2 15.4a1.1 1.1 0 0 0 .6 2h16.4a1.1 1.1 0 0 0 .6-2Z"/></svg></div><div class="b"><svg viewBox="0 0 24 24"><path d="M12 3.5v11 M8 7l4-3.5L16 7 M6.5 10.5H5.8A1.8 1.8 0 0 0 4 12.3v6.4A1.8 1.8 0 0 0 5.8 20.5h12.4a1.8 1.8 0 0 0 1.8-1.8v-6.4a1.8 1.8 0 0 0-1.8-1.8h-.7"/></svg></div></div>
+<div class="film"><div class="th" style="background:#8a7a62"></div><div class="th" style="background:#cfd5b4"></div><div class="th cur" style="background:#e8c9a0"></div><div class="th" style="background:#9db8c9"></div><div class="th" style="background:#d9b8c9"></div></div><div class="pos">2 OF 56</div></div><div class="home"></div></div><div class="cap">You tap the hanger. It fills, and a note offers Review now for a few seconds.</div></div><div class="step"><div class="num">STEP 2</div><div class="frame"><div class="deck"><div class="sb"><span>9:41</span><span>5G</span></div><div class="card"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg></div><div class="badge-card"><svg viewBox="0 0 24 24"><path d="M12 8.2V9.6 M12 8.2a2.3 2.3 0 1 0-2.3-2.3"/><path d="M12 9.6 3.2 15.4a1.1 1.1 0 0 0 .6 2h16.4a1.1 1.1 0 0 0 .6-2Z"/></svg>In Outfits</div>
+<div class="acts"><div class="b heart"><svg viewBox="0 0 24 24"><path d="M12 20.3S3.5 15 3.5 8.9A4.6 4.6 0 0 1 12 6.6a4.6 4.6 0 0 1 8.5 2.3C20.5 15 12 20.3 12 20.3Z"/></svg></div><div class="b on"><svg viewBox="0 0 24 24"><path d="M12 8.2V9.6 M12 8.2a2.3 2.3 0 1 0-2.3-2.3"/><path d="M12 9.6 3.2 15.4a1.1 1.1 0 0 0 .6 2h16.4a1.1 1.1 0 0 0 .6-2Z"/></svg></div><div class="b"><svg viewBox="0 0 24 24"><path d="M12 3.5v11 M8 7l4-3.5L16 7 M6.5 10.5H5.8A1.8 1.8 0 0 0 4 12.3v6.4A1.8 1.8 0 0 0 5.8 20.5h12.4a1.8 1.8 0 0 0 1.8-1.8v-6.4a1.8 1.8 0 0 0-1.8-1.8h-.7"/></svg></div></div>
+<div class="film"><div class="th" style="background:#8a7a62"></div><div class="th" style="background:#cfd5b4"></div><div class="th cur" style="background:#e8c9a0"><i><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></i></div><div class="th" style="background:#9db8c9"></div><div class="th" style="background:#d9b8c9"></div></div><div class="pos">2 OF 56</div></div><div class="home"></div></div><div class="cap">If you ignore it, the note goes away on its own and the hanger stays filled on that photo.</div></div><div class="step"><div class="num">STEP 3</div><div class="frame"><div class="cscr"><div class="sb"><span>9:41</span><span>5G</span></div><div class="cph"><svg class="ph" viewBox="-45 40 390 340" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg><div class="scan" style="top:44%"></div></div><div class="cbk"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></div>
+<div class="cpan"><div class="cdate"><b>Sat, Sep 20</b><span>From Picnic</span></div>
+<span class="rlab">Verdict</span><div class="vgrid"><div class="vb">Loved</div><div class="vb">Liked</div><div class="vb">No</div></div>
+<div class="fnd"><div class="spin"></div>Finding pieces&hellip;</div><div class="lst"><div class="lr"><span class="sw36" style="background:rgba(255,255,255,.1)"></span><div style="flex:1"><div class="sk2" style="width:55%"></div><div class="sk2" style="width:35%;margin-top:8px;height:10px"></div></div></div><div class="lr"><span class="sw36" style="background:rgba(255,255,255,.1)"></span><div style="flex:1"><div class="sk2" style="width:55%"></div><div class="sk2" style="width:35%;margin-top:8px;height:10px"></div></div></div></div><div class="hint">This takes 10 to 40 seconds. You can leave any time, it will wait under To confirm.</div></div><div class="cbar"><div class="cbtn off">Confirm</div></div></div><div class="home"></div></div><div class="cap">Optional: Review now opens the Outfits app on this outfit while the pieces are still being found.</div></div><div class="step"><div class="num">STEP 4</div><div class="frame"><div class="cscr"><div class="sb"><span>9:41</span><span>5G</span></div><div class="cph"><svg class="ph" viewBox="-45 40 390 340" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg><div class="bx w" style="left:173px;top:85px;width:44px;height:80px"><i>1</i></div><div class="bx u" style="left:145px;top:302px;width:100px;height:26px"><i>2</i></div><div class="bx" style="left:140px;top:64px;width:122px;height:110px"><i>3</i></div><div class="bx" style="left:157px;top:174px;width:82px;height:128px"><i>4</i></div></div><div class="cbk"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></div>
+<div class="cpan"><div class="cdate"><b>Sat, Sep 20</b><span>From Picnic</span></div>
+<span class="rlab">Verdict</span><div class="vgrid"><div class="vb">Loved</div><div class="vb">Liked</div><div class="vb">No</div></div>
+<span class="rlab">Pieces</span><div class="lst"><div class="lr" style="border-bottom:0"><span class="sw36" style="background:#efe4cf"></span><div><div class="t">Cream top</div><div class="s w">Best guess, tap to change</div></div></div>
+<div class="lrx"><span class="ch on">Cream crew tee</span><span class="ch">Off-white tee</span></div>
+<div class="lr"><span class="sw36 d"></span><div><div class="t">Leather loafers</div><div class="s">Not in wardrobe yet</div></div><span class="add">Add to wardrobe</span></div>
+<div class="lr"><span class="sw36" style="background:#24324f"></span><div><div class="t">Navy overshirt</div><div class="s">Outer &middot; in 4 outfits</div></div><svg class="chev" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></div>
+<div class="lr"><span class="sw36" style="background:#2b2f3a"></span><div><div class="t">Dark wash jeans</div><div class="s">Bottoms &middot; in 7 outfits</div></div><svg class="chev" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></div></div></div><div class="cbar"><div class="cbtn">Confirm</div></div></div><div class="home"></div></div><div class="cap">Pieces are boxed on the photo, one is a best guess you can change, then you tap Confirm.</div></div><div class="step"><div class="num">STEP 5</div><div class="frame"><div class="dusk"><div class="sb"><span>9:41</span><span>5G</span></div><div class="rscr" style="gap:20px">
+<div class="trow2"><h1>Outfits</h1><span class="dim" style="font-size:13px">96 logged</span></div>
+<div class="search2"><span class="l"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4"/></svg>Start from a piece</span><span class="rule"></span><span class="cam"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4zM12 9.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z"/></svg></span></div>
+<div class="rsec"><span class="rlab">Browse by category</span><div class="g5"><div class="tl"><svg viewBox="0 0 24 24"><path d="M8 3l-5 3 2 4 2-1v12h10V9l2 1 2-4-5-3a4 4 0 0 1-8 0z"/></svg><span>Tops</span></div><div class="tl"><svg viewBox="0 0 24 24"><path d="M6 3h12l1 18h-5l-2-11-2 11H5z"/></svg><span>Bottoms</span></div><div class="tl"><svg viewBox="0 0 24 24"><path d="M8 3L3 7v14h5V9M16 3l5 4v14h-5V9M8 3l4 5 4-5M12 8v13"/></svg><span>Outer</span></div><div class="tl"><svg viewBox="0 0 24 24"><path d="M3 16v-4l5-1 3-4 2 1-1 4 8 2a2 2 0 0 1 2 2v1H3zM3 19h19"/></svg><span>Shoes</span></div><div class="tl"><svg viewBox="0 0 24 24"><path d="M4 10h16v4H4zM9 10V7a3 3 0 0 1 6 0v3"/></svg><span>Extras</span></div></div></div>
+<div class="rsec"><span class="rlab">To confirm</span><div class="g3"><div class="tb"><div class="ph3 sel"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg></div><span class="c">Sep 20</span><span class="c2"><i></i>1 piece to pick</span></div><div class="tb"><div class="ph3"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g5519114305598202733" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#c8d4e0"/><stop offset="1" stop-color="#8da0b5"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g5519114305598202733)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#3a3f4a"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#d8d3c8"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#7a6a55"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#1f1f1f"/></svg></div><span class="c">Sep 14</span><span class="c2"><i></i>2 pieces to pick</span></div><div class="tb"><div class="ph3"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g3812172780301338059" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e0cfa8"/><stop offset="1" stop-color="#a99568"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g3812172780301338059)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#6b7a4a"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#f0e8d8"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2a2a30"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#d9d9d9"/></svg></div><span class="c">Sep 3</span><span class="c2"><i></i>1 piece to pick</span></div></div></div>
+<div class="rsec"><span class="rlab">Recent outfits</span><div class="g3"><div class="tb"><div class="ph3"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g802730229969958427" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#cfd5b4"/><stop offset="1" stop-color="#8f9a6e"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g802730229969958427)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#3c4a3a"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#1f1f24"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#5b6577"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#e9e6df"/></svg></div><span class="c">Jun 25</span></div><div class="tb"><div class="ph3"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g5188508474928608962" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#d9b8c9"/><stop offset="1" stop-color="#a27a8f"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g5188508474928608962)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#2a2330"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#e9d8d0"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#3a4a6b"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#2a2330"/></svg></div><span class="c">Feb 22</span></div><div class="tb"><div class="ph3"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g2984958923071830492" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9db8c9"/><stop offset="1" stop-color="#6d8798"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g2984958923071830492)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#8a4b3c"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#f3f1ec"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#c9b99a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#f1f1f1"/></svg></div><span class="c">Feb 16</span></div></div></div></div></div><div class="home"></div></div><div class="cap">Anything left unconfirmed waits in its own section on the Outfits home. Tapping one opens the same screen as step 4.</div></div><div class="step"><div class="num">STEP 6</div><div class="frame"><div class="dusk"><div class="sb"><span>9:41</span><span>5G</span></div><div class="rscr" style="gap:20px">
+<div class="trow2"><h1>Outfits</h1><span class="dim" style="font-size:13px">96 logged</span></div>
+<div class="search2"><span class="l"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4"/></svg>Start from a piece</span><span class="rule"></span><span class="cam"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4zM12 9.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z"/></svg></span></div>
+<div class="rsec"><span class="rlab">Browse by category</span><div class="g5"><div class="tl"><svg viewBox="0 0 24 24"><path d="M8 3l-5 3 2 4 2-1v12h10V9l2 1 2-4-5-3a4 4 0 0 1-8 0z"/></svg><span>Tops</span></div><div class="tl"><svg viewBox="0 0 24 24"><path d="M6 3h12l1 18h-5l-2-11-2 11H5z"/></svg><span>Bottoms</span></div><div class="tl"><svg viewBox="0 0 24 24"><path d="M8 3L3 7v14h5V9M16 3l5 4v14h-5V9M8 3l4 5 4-5M12 8v13"/></svg><span>Outer</span></div><div class="tl"><svg viewBox="0 0 24 24"><path d="M3 16v-4l5-1 3-4 2 1-1 4 8 2a2 2 0 0 1 2 2v1H3zM3 19h19"/></svg><span>Shoes</span></div><div class="tl"><svg viewBox="0 0 24 24"><path d="M4 10h16v4H4zM9 10V7a3 3 0 0 1 6 0v3"/></svg><span>Extras</span></div></div></div>
+<div class="rsec"><span class="rlab">To confirm</span><div class="g3"><div class="tb"><div class="ph3"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g5519114305598202733" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#c8d4e0"/><stop offset="1" stop-color="#8da0b5"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g5519114305598202733)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#3a3f4a"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#d8d3c8"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#7a6a55"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#1f1f1f"/></svg></div><span class="c">Sep 14</span><span class="c2"><i></i>2 pieces to pick</span></div><div class="tb"><div class="ph3"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g3812172780301338059" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e0cfa8"/><stop offset="1" stop-color="#a99568"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g3812172780301338059)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#6b7a4a"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#f0e8d8"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2a2a30"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#d9d9d9"/></svg></div><span class="c">Sep 3</span><span class="c2"><i></i>1 piece to pick</span></div></div></div>
+<div class="rsec"><span class="rlab">Recent outfits</span><div class="g3"><div class="tb"><div class="ph3"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg></div><span class="c">Sep 20</span></div><div class="tb"><div class="ph3"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g802730229969958427" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#cfd5b4"/><stop offset="1" stop-color="#8f9a6e"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g802730229969958427)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#3c4a3a"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#1f1f24"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#5b6577"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#e9e6df"/></svg></div><span class="c">Jun 25</span></div><div class="tb"><div class="ph3"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g5188508474928608962" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#d9b8c9"/><stop offset="1" stop-color="#a27a8f"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g5188508474928608962)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#2a2330"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#e9d8d0"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#3a4a6b"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#2a2330"/></svg></div><span class="c">Feb 22</span></div></div></div></div></div><div class="home"></div></div><div class="cap">After Confirm, that card leaves the section and the outfit joins Recent outfits. With none left, the section disappears.</div></div></div></section>
+<div class="earlier-hd"><h1>Earlier options</h1><p>The two flows this one was chosen from. The hanger is a plain outline that turns solid lilac once the photo is an outfit. Outfits screens in these two are rough sketches, not the real layout.</p></div>
+<section class="flow"><span class="tag">FLOW A</span><h2>One tap, done</h2>
+<p class="sum">Tap the hanger and keep sorting; the outfit is built in the background and you tidy up any unsure pieces later in the Outfits app.</p>
+<div class="cost"><span><b>1 tap</b>, 0 wait</span></div>
+<div class="strip"><div class="step"><div class="num">STEP 1</div><div class="frame"><div class="deck"><div class="sb"><span>9:41</span><span>5G</span></div><div class="card"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg></div>
+<div class="acts"><div class="b heart"><svg viewBox="0 0 24 24"><path d="M12 20.3S3.5 15 3.5 8.9A4.6 4.6 0 0 1 12 6.6a4.6 4.6 0 0 1 8.5 2.3C20.5 15 12 20.3 12 20.3Z"/></svg></div><div class="b hl"><svg viewBox="0 0 24 24"><path d="M12 8.2V9.6 M12 8.2a2.3 2.3 0 1 0-2.3-2.3"/><path d="M12 9.6 3.2 15.4a1.1 1.1 0 0 0 .6 2h16.4a1.1 1.1 0 0 0 .6-2Z"/></svg></div><div class="b"><svg viewBox="0 0 24 24"><path d="M12 3.5v11 M8 7l4-3.5L16 7 M6.5 10.5H5.8A1.8 1.8 0 0 0 4 12.3v6.4A1.8 1.8 0 0 0 5.8 20.5h12.4a1.8 1.8 0 0 0 1.8-1.8v-6.4a1.8 1.8 0 0 0-1.8-1.8h-.7"/></svg></div></div><div class="callout">Log as outfit</div>
+<div class="film"><div class="th" style="background:#8a7a62"></div><div class="th" style="background:#cfd5b4"></div><div class="th cur" style="background:#e8c9a0"></div><div class="th" style="background:#9db8c9"></div><div class="th" style="background:#d9b8c9"></div></div><div class="pos">2 OF 56</div></div><div class="home"></div></div><div class="cap">You are looking at a photo of an outfit you like and tap the hanger.</div></div><div class="step"><div class="num">STEP 2</div><div class="frame"><div class="deck"><div class="sb"><span>9:41</span><span>5G</span></div><div class="card"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g2984958923071830492" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9db8c9"/><stop offset="1" stop-color="#6d8798"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g2984958923071830492)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#8a4b3c"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#f3f1ec"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#c9b99a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#f1f1f1"/></svg></div><div class="toast"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Logged to Outfits</div>
+<div class="acts"><div class="b heart"><svg viewBox="0 0 24 24"><path d="M12 20.3S3.5 15 3.5 8.9A4.6 4.6 0 0 1 12 6.6a4.6 4.6 0 0 1 8.5 2.3C20.5 15 12 20.3 12 20.3Z"/></svg></div><div class="b"><svg viewBox="0 0 24 24"><path d="M12 8.2V9.6 M12 8.2a2.3 2.3 0 1 0-2.3-2.3"/><path d="M12 9.6 3.2 15.4a1.1 1.1 0 0 0 .6 2h16.4a1.1 1.1 0 0 0 .6-2Z"/></svg></div><div class="b"><svg viewBox="0 0 24 24"><path d="M12 3.5v11 M8 7l4-3.5L16 7 M6.5 10.5H5.8A1.8 1.8 0 0 0 4 12.3v6.4A1.8 1.8 0 0 0 5.8 20.5h12.4a1.8 1.8 0 0 0 1.8-1.8v-6.4a1.8 1.8 0 0 0-1.8-1.8h-.7"/></svg></div></div>
+<div class="film"><div class="th" style="background:#8a7a62"></div><div class="th" style="background:#cfd5b4"></div><div class="th" style="background:#e8c9a0"><i><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></i></div><div class="th cur" style="background:#9db8c9"></div><div class="th" style="background:#d9b8c9"></div></div><div class="pos">3 OF 56</div></div><div class="home"></div></div><div class="cap">A short note says it was saved, and the next photo is already on screen.</div></div><div class="step"><div class="num">STEP 3</div><div class="frame"><div class="deck"><div class="sb"><span>9:41</span><span>5G</span></div><div class="card"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg></div><div class="badge-card"><svg viewBox="0 0 24 24"><path d="M12 8.2V9.6 M12 8.2a2.3 2.3 0 1 0-2.3-2.3"/><path d="M12 9.6 3.2 15.4a1.1 1.1 0 0 0 .6 2h16.4a1.1 1.1 0 0 0 .6-2Z"/></svg>In Outfits</div>
+<div class="acts"><div class="b heart"><svg viewBox="0 0 24 24"><path d="M12 20.3S3.5 15 3.5 8.9A4.6 4.6 0 0 1 12 6.6a4.6 4.6 0 0 1 8.5 2.3C20.5 15 12 20.3 12 20.3Z"/></svg></div><div class="b on"><svg viewBox="0 0 24 24"><path d="M12 8.2V9.6 M12 8.2a2.3 2.3 0 1 0-2.3-2.3"/><path d="M12 9.6 3.2 15.4a1.1 1.1 0 0 0 .6 2h16.4a1.1 1.1 0 0 0 .6-2Z"/></svg></div><div class="b"><svg viewBox="0 0 24 24"><path d="M12 3.5v11 M8 7l4-3.5L16 7 M6.5 10.5H5.8A1.8 1.8 0 0 0 4 12.3v6.4A1.8 1.8 0 0 0 5.8 20.5h12.4a1.8 1.8 0 0 0 1.8-1.8v-6.4a1.8 1.8 0 0 0-1.8-1.8h-.7"/></svg></div></div>
+<div class="film"><div class="th" style="background:#8a7a62"></div><div class="th" style="background:#cfd5b4"></div><div class="th cur" style="background:#e8c9a0"><i><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></i></div><div class="th" style="background:#9db8c9"></div><div class="th" style="background:#d9b8c9"></div></div><div class="pos">2 OF 56</div></div><div class="home"></div></div><div class="cap">Later, back on that photo, the hanger is filled. Tapping it opens the outfit instead of making a second one.</div></div><div class="step"><div class="num">STEP 4</div><div class="frame"><div class="dusk"><div class="sb"><span>9:41</span><span>5G</span></div><div class="scr"><div class="h1">Outfits</div>
+<div class="pills"><span class="pill on">All</span><span class="pill">Needs review 1</span><span class="pill">Loved</span></div>
+<div class="glass ocard glow"><div class="im"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg></div><div><div class="t">Sat, Sep 20</div><div class="s dim">Worn Sep 20 · from Picnic</div><div class="chips"><span class="chip">Navy overshirt</span><span class="chip">Dark jeans</span><span class="chip">Leather loafers</span><span class="chip q">Cream top ?</span></div><div class="warn">Needs review</div></div></div>
+<div class="glass ocard"><div class="im"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g802730229969958427" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#cfd5b4"/><stop offset="1" stop-color="#8f9a6e"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g802730229969958427)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#3c4a3a"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#1f1f24"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#5b6577"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#e9e6df"/></svg></div><div><div class="t">Fri, Sep 12</div><div class="s dim">Worn Sep 12</div><div class="chips"><span class="chip">Grey hoodie</span><span class="chip">Black jeans</span><span class="chip">White sneakers</span></div><div class="verd">Loved</div></div></div><div class="glass ocard"><div class="im"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g5188508474928608962" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#d9b8c9"/><stop offset="1" stop-color="#a27a8f"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g5188508474928608962)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#2a2330"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#e9d8d0"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#3a4a6b"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#2a2330"/></svg></div><div><div class="t">Sun, Aug 31</div><div class="s dim">Worn Aug 31</div><div class="chips"><span class="chip">Grey hoodie</span><span class="chip">Black jeans</span><span class="chip">White sneakers</span></div><div class="verd">Liked</div></div></div></div></div><div class="home"></div></div><div class="cap">Some time later the outfit shows up in the Outfits app, dated when the photo was taken, with one piece it could not pin down.</div></div><div class="step"><div class="num">STEP 5</div><div class="frame"><div class="dusk"><div class="sb"><span>9:41</span><span>5G</span></div><div class="scr"><div class="back">&lsaquo; Outfits</div><div class="h1" style="margin-bottom:6px">Review outfit</div><div class="dim" style="font-size:14px">One piece needs your pick</div>
+<div class="lab">Which one is the cream top?</div><div class="glass cand sel"><div class="sw" style="background:#efe4cf"></div><div><div class="n">Cream crew tee</div><div class="m dim">Uniqlo · worn 6 times</div></div><div class="rad"></div></div>
+<div class="glass cand"><div class="sw" style="background:#e3d6bb"></div><div><div class="n">Off-white tee</div><div class="m dim">COS · worn 2 times</div></div><div class="rad"></div></div>
+<div class="lab">Already matched</div><div class="glass prow"><div class="ok"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div><div style="font-size:14.5px;font-weight:600">Navy overshirt</div></div><div class="glass prow"><div class="ok"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div><div style="font-size:14.5px;font-weight:600">Dark jeans</div></div><div class="glass prow"><div class="ok"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div><div style="font-size:14.5px;font-weight:600">Leather loafers</div></div>
+<div style="position:absolute;left:20px;right:20px;bottom:44px" class="btn">Confirm</div></div></div><div class="home"></div></div><div class="cap">Opening the card, you choose between the two likely matches and confirm. The badge goes away.</div></div></div></section>
+<section class="flow"><span class="tag">FLOW B</span><h2>Confirm sheet</h2>
+<p class="sum">Tap the hanger, wait for the pieces to be found, then check and save the outfit right there before returning to the deck.</p>
+<div class="cost"><span><b>About 3 taps</b>, 10 to 40 seconds wait</span></div>
+<div class="strip"><div class="step"><div class="num">STEP 1</div><div class="frame"><div class="deck"><div class="sb"><span>9:41</span><span>5G</span></div><div class="card"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg></div>
+<div class="acts"><div class="b heart"><svg viewBox="0 0 24 24"><path d="M12 20.3S3.5 15 3.5 8.9A4.6 4.6 0 0 1 12 6.6a4.6 4.6 0 0 1 8.5 2.3C20.5 15 12 20.3 12 20.3Z"/></svg></div><div class="b hl"><svg viewBox="0 0 24 24"><path d="M12 8.2V9.6 M12 8.2a2.3 2.3 0 1 0-2.3-2.3"/><path d="M12 9.6 3.2 15.4a1.1 1.1 0 0 0 .6 2h16.4a1.1 1.1 0 0 0 .6-2Z"/></svg></div><div class="b"><svg viewBox="0 0 24 24"><path d="M12 3.5v11 M8 7l4-3.5L16 7 M6.5 10.5H5.8A1.8 1.8 0 0 0 4 12.3v6.4A1.8 1.8 0 0 0 5.8 20.5h12.4a1.8 1.8 0 0 0 1.8-1.8v-6.4a1.8 1.8 0 0 0-1.8-1.8h-.7"/></svg></div></div><div class="callout">Log as outfit</div>
+<div class="film"><div class="th" style="background:#8a7a62"></div><div class="th" style="background:#cfd5b4"></div><div class="th cur" style="background:#e8c9a0"></div><div class="th" style="background:#9db8c9"></div><div class="th" style="background:#d9b8c9"></div></div><div class="pos">2 OF 56</div></div><div class="home"></div></div><div class="cap">You are looking at a photo of an outfit you like and tap the hanger.</div></div><div class="step"><div class="num">STEP 2</div><div class="frame"><div class="deck"><div class="sb"><span>9:41</span><span>5G</span></div><div class="card"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg></div>
+<div class="acts"><div class="b heart"><svg viewBox="0 0 24 24"><path d="M12 20.3S3.5 15 3.5 8.9A4.6 4.6 0 0 1 12 6.6a4.6 4.6 0 0 1 8.5 2.3C20.5 15 12 20.3 12 20.3Z"/></svg></div><div class="b"><svg viewBox="0 0 24 24"><path d="M12 8.2V9.6 M12 8.2a2.3 2.3 0 1 0-2.3-2.3"/><path d="M12 9.6 3.2 15.4a1.1 1.1 0 0 0 .6 2h16.4a1.1 1.1 0 0 0 .6-2Z"/></svg></div><div class="b"><svg viewBox="0 0 24 24"><path d="M12 3.5v11 M8 7l4-3.5L16 7 M6.5 10.5H5.8A1.8 1.8 0 0 0 4 12.3v6.4A1.8 1.8 0 0 0 5.8 20.5h12.4a1.8 1.8 0 0 0 1.8-1.8v-6.4a1.8 1.8 0 0 0-1.8-1.8h-.7"/></svg></div></div>
+<div class="film"><div class="th" style="background:#8a7a62"></div><div class="th" style="background:#cfd5b4"></div><div class="th cur" style="background:#e8c9a0"></div><div class="th" style="background:#9db8c9"></div><div class="th" style="background:#d9b8c9"></div></div><div class="pos">2 OF 56</div></div><div class="scrim"></div><div class="sheet"><div class="grab"></div><div class="sh"><span>Cancel</span><b>Log as outfit</b><span style="opacity:.35">Save</span></div>
+<div class="top"><div class="pbox"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg><div class="scan"></div></div><div class="summ" style="padding-top:8px"><div style="display:flex;gap:10px;align-items:center;margin-bottom:12px"><div class="spin"></div><div class="big" style="margin:0">Finding pieces&hellip;</div></div><div class="dim" style="font-size:13.5px;line-height:1.55">Looking at the clothes in this photo. This takes 10 to 40 seconds.</div></div></div>
+<div class="sk"></div><div class="sk"></div><div class="sk"></div><div class="sk"></div>
+</div><div class="home"></div></div><div class="cap">A sheet slides up and scans the photo. You wait here for 10 to 40 seconds.</div></div><div class="step"><div class="num">STEP 3</div><div class="frame"><div class="deck"><div class="sb"><span>9:41</span><span>5G</span></div><div class="card"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg></div>
+<div class="acts"><div class="b heart"><svg viewBox="0 0 24 24"><path d="M12 20.3S3.5 15 3.5 8.9A4.6 4.6 0 0 1 12 6.6a4.6 4.6 0 0 1 8.5 2.3C20.5 15 12 20.3 12 20.3Z"/></svg></div><div class="b"><svg viewBox="0 0 24 24"><path d="M12 8.2V9.6 M12 8.2a2.3 2.3 0 1 0-2.3-2.3"/><path d="M12 9.6 3.2 15.4a1.1 1.1 0 0 0 .6 2h16.4a1.1 1.1 0 0 0 .6-2Z"/></svg></div><div class="b"><svg viewBox="0 0 24 24"><path d="M12 3.5v11 M8 7l4-3.5L16 7 M6.5 10.5H5.8A1.8 1.8 0 0 0 4 12.3v6.4A1.8 1.8 0 0 0 5.8 20.5h12.4a1.8 1.8 0 0 0 1.8-1.8v-6.4a1.8 1.8 0 0 0-1.8-1.8h-.7"/></svg></div></div>
+<div class="film"><div class="th" style="background:#8a7a62"></div><div class="th" style="background:#cfd5b4"></div><div class="th cur" style="background:#e8c9a0"></div><div class="th" style="background:#9db8c9"></div><div class="th" style="background:#d9b8c9"></div></div><div class="pos">2 OF 56</div></div><div class="scrim"></div><div class="sheet"><div class="grab"></div><div class="sh"><span>Cancel</span><b>Log as outfit</b><span style="color:#c9a2ff;font-weight:700">Save</span></div>
+<div class="top"><div class="pbox"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg><div class="bx" style="left:31.7%;top:25%;width:36.7%;height:28.7%"><i>1</i></div><div class="bx w" style="left:42.7%;top:31%;width:14.7%;height:20%"><i>2</i></div><div class="bx" style="left:36.7%;top:53.7%;width:26.7%;height:31.2%"><i>3</i></div><div class="bx" style="left:35%;top:85.5%;width:30%;height:6.5%"><i>4</i></div></div><div class="summ" style="padding-top:8px"><div class="big">4 pieces found</div>
+<div class="l"><span class="dot" style="background:#3ce6b0"></span>2 matched</div><div class="l"><span class="dot" style="background:#f5c26b"></span>1 needs your pick</div><div class="l"><span class="dot" style="background:#c9a2ff"></span>1 is new to you</div></div></div>
+<div class="glass pr"><div class="row1"><div class="nm">1</div><div><div class="nn">Navy overshirt</div></div><div class="ok" style="margin-left:auto"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div></div></div>
+<div class="glass pr"><div class="row1"><div class="nm" style="background:#f5c26b">2</div><div><div class="nn">Cream top</div><div class="mm dim">Which one?</div></div></div><div class="opts"><div class="opt sel">Cream crew tee</div><div class="opt">Off-white tee</div></div></div>
+<div class="glass pr"><div class="row1"><div class="nm">3</div><div><div class="nn">Dark jeans</div></div><div class="ok" style="margin-left:auto"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div></div></div>
+<div class="glass pr"><div class="row1"><div class="nm">4</div><div><div class="nn">Leather loafers</div><div class="mm dim">Not in your wardrobe</div></div><div class="addw">Add to wardrobe</div></div></div>
+<div class="vrow"><div class="vc">No</div><div class="vc">Liked</div><div class="vc on">Loved</div></div>
+<div class="btn">Save outfit</div></div><div class="home"></div></div><div class="cap">Pieces appear on the photo and in a list. You pick the right cream top, add the loafers if you like, choose a verdict, and save.</div></div><div class="step"><div class="num">STEP 4</div><div class="frame"><div class="deck"><div class="sb"><span>9:41</span><span>5G</span></div><div class="card"><svg class="ph" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="g1803011772049395654" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8c9a0"/><stop offset="1" stop-color="#b98f66"/></linearGradient></defs>
+<rect x="-100" y="-20" width="500" height="460" fill="url(#g1803011772049395654)"/><rect x="-100" y="352" width="500" height="80" fill="rgba(0,0,0,.18)"/>
+<circle cx="150" cy="66" r="25" fill="#d9a98a"/><rect x="141" y="86" width="18" height="18" fill="#d9a98a"/>
+<path d="M97 108q53-14 106 0l8 100-24 6-4-66-3 74H120l-3-74-4 66-24-6Z" fill="#24324f"/>
+<path d="M130 106q20 10 40 0l-2 84h-36Z" fill="#efe4cf"/>
+<path d="M112 214h76l6 128h-30l-14-94-14 94h-30Z" fill="#2b2f3a"/>
+<path d="M100 342h38l2 24h-42Z M162 342h38v24h-40Z" fill="#4a3326"/></svg></div><div class="badge-card"><svg viewBox="0 0 24 24"><path d="M12 8.2V9.6 M12 8.2a2.3 2.3 0 1 0-2.3-2.3"/><path d="M12 9.6 3.2 15.4a1.1 1.1 0 0 0 .6 2h16.4a1.1 1.1 0 0 0 .6-2Z"/></svg>In Outfits</div>
+<div class="acts"><div class="b heart"><svg viewBox="0 0 24 24"><path d="M12 20.3S3.5 15 3.5 8.9A4.6 4.6 0 0 1 12 6.6a4.6 4.6 0 0 1 8.5 2.3C20.5 15 12 20.3 12 20.3Z"/></svg></div><div class="b on"><svg viewBox="0 0 24 24"><path d="M12 8.2V9.6 M12 8.2a2.3 2.3 0 1 0-2.3-2.3"/><path d="M12 9.6 3.2 15.4a1.1 1.1 0 0 0 .6 2h16.4a1.1 1.1 0 0 0 .6-2Z"/></svg></div><div class="b"><svg viewBox="0 0 24 24"><path d="M12 3.5v11 M8 7l4-3.5L16 7 M6.5 10.5H5.8A1.8 1.8 0 0 0 4 12.3v6.4A1.8 1.8 0 0 0 5.8 20.5h12.4a1.8 1.8 0 0 0 1.8-1.8v-6.4a1.8 1.8 0 0 0-1.8-1.8h-.7"/></svg></div></div>
+<div class="film"><div class="th" style="background:#8a7a62"></div><div class="th" style="background:#cfd5b4"></div><div class="th cur" style="background:#e8c9a0"><i><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></i></div><div class="th" style="background:#9db8c9"></div><div class="th" style="background:#d9b8c9"></div></div><div class="pos">2 OF 56</div></div><div class="home"></div></div><div class="cap">Back on the deck, the hanger is filled and you keep swiping.</div></div></div></section></div></body></html>

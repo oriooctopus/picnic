@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Picnic — Google Photos Cleanup Confirm — 3 Options</title>
+<style>
+  :root{
+    --bg:#000000;
+    --bg2:#0b0b0c;
+    --card:#1a1a1a;
+    --btn:rgba(255,255,255,0.15);
+    --white:#ffffff;
+    --dim:rgba(255,255,255,0.6);
+    --dim2:rgba(255,255,255,0.35);
+    --green:#34c759;
+    --red:#ff3b30;
+    --divider:rgba(255,255,255,0.08);
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    padding:48px 32px 100px;
+    background:#05070a;
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;
+    color:var(--white);
+  }
+  h1.page-title{
+    text-align:center;
+    font-size:22px;
+    font-weight:700;
+    margin:0 0 6px;
+  }
+  p.page-sub{
+    text-align:center;
+    color:#8b949e;
+    margin:0 0 40px;
+    font-size:14px;
+  }
+  .row{
+    display:flex;
+    gap:36px;
+    justify-content:center;
+    align-items:flex-start;
+    flex-wrap:wrap;
+  }
+  .col{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:16px;
+  }
+  .opt-label{
+    font-size:15px;
+    font-weight:700;
+    color:var(--white);
+  }
+  .opt-desc{
+    font-size:12.5px;
+    color:#8b949e;
+    max-width:360px;
+    text-align:center;
+    line-height:1.5;
+    margin:-6px 0 4px;
+  }
+  .phone{
+    width:390px;
+    height:844px;
+    background:var(--bg);
+    border-radius:52px;
+    border:10px solid #1c1c1e;
+    box-shadow:0 30px 60px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(255,255,255,0.04);
+    overflow:hidden;
+    position:relative;
+  }
+  .screen{
+    position:absolute;
+    inset:0;
+    overflow-y:auto;
+    -ms-overflow-style:none;
+    scrollbar-width:none;
+  }
+  .screen::-webkit-scrollbar{display:none;}
+  .notch{
+    position:absolute;
+    top:0; left:50%;
+    transform:translateX(-50%);
+    width:126px; height:30px;
+    background:#000;
+    border-radius:0 0 18px 18px;
+    z-index:50;
+  }
+
+  /* ---------- shared bits ---------- */
+  .statusbar{ height:52px; }
+  .top-header{
+    padding:6px 20px 14px;
+  }
+  .top-header .title-row{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    margin-bottom:6px;
+  }
+  .top-header h2{
+    font-size:20px;
+    font-weight:700;
+    margin:0;
+  }
+  .icon-btn{
+    width:40px;height:40px;
+    border-radius:50%;
+    background:var(--btn);
+    display:flex;align-items:center;justify-content:center;
+    font-size:16px;
+    color:var(--white);
+  }
+  .summary-line{
+    font-size:13px;
+    color:var(--dim);
+    line-height:1.6;
+  }
+  .summary-line b{ color:var(--white); font-weight:600; }
+
+  .selectbar{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:14px 20px;
+  }
+  .selectbar .links{
+    display:flex;
+    gap:18px;
+    font-size:13px;
+    font-weight:600;
+    color:#5eb3ff;
+  }
+  .count-pill{
+    font-size:12px;
+    color:var(--dim);
+    background:var(--btn);
+    padding:5px 12px;
+    border-radius:20px;
+  }
+
+  .section-head{
+    padding:22px 20px 10px;
+  }
+  .section-head .label{
+    font-size:14px;
+    font-weight:700;
+    color:var(--white);
+  }
+  .section-head .sub{
+    font-size:12px;
+    color:var(--dim2);
+    margin-top:3px;
+    line-height:1.5;
+  }
+
+  .grid{
+    display:grid;
+    grid-template-columns:repeat(4, 1fr);
+    gap:6px;
+    padding:0 20px;
+  }
+  .tile{
+    position:relative;
+    aspect-ratio:1/1;
+    border-radius:10px;
+    overflow:hidden;
+    background:#222;
+  }
+  .tile img{
+    width:100%;height:100%;object-fit:cover;
+    display:block;
+  }
+  .tile .check{
+    position:absolute;
+    top:6px; right:6px;
+    width:22px;height:22px;
+    border-radius:50%;
+    background:var(--green);
+    display:flex;align-items:center;justify-content:center;
+    font-size:12px;
+    font-weight:800;
+    border:2px solid rgba(0,0,0,0.35);
+  }
+  .tile.kept{
+    opacity:0.4;
+  }
+  .tile.kept .check{
+    background:rgba(255,255,255,0.15);
+    border:1px solid rgba(255,255,255,0.3);
+  }
+  .tile.kept .check::after{ content:""; }
+  .tile.dim-unselected{
+    opacity:0.45;
+  }
+  .tile.dim-unselected .check{
+    background:rgba(255,255,255,0.12);
+    border:1px solid rgba(255,255,255,0.25);
+  }
+
+  .footer{
+    position:absolute;
+    left:0;right:0;bottom:0;
+    padding:14px 20px 26px;
+    background:linear-gradient(to top, rgba(0,0,0,0.97) 60%, rgba(0,0,0,0));
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+  }
+  .confirm-btn{
+    background:var(--red);
+    color:var(--white);
+    font-size:16px;
+    font-weight:700;
+    text-align:center;
+    padding:16px;
+    border-radius:16px;
+  }
+  .recover-note{
+    text-align:center;
+    font-size:11.5px;
+    color:var(--dim2);
+  }
+
+  /* ---------- Option B swipe deck ---------- */
+  .deck-wrap{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    padding-top:8px;
+  }
+  .card-stack{
+    position:relative;
+    width:322px;
+    height:400px;
+    margin-top:8px;
+  }
+  .swipe-card{
+    position:absolute;
+    inset:0;
+    border-radius:24px;
+    overflow:hidden;
+    background:#222;
+  }
+  .swipe-card img{ width:100%;height:100%;object-fit:cover; }
+  .swipe-card.back{
+    transform:scale(0.93) translateY(14px);
+    filter:brightness(0.5);
+    z-index:1;
+  }
+  .swipe-card.front{ z-index:2; box-shadow:0 20px 40px rgba(0,0,0,0.5);}
+  .swipe-card .meta-tag{
+    position:absolute;
+    top:14px;left:14px;
+    background:rgba(0,0,0,0.55);
+    padding:6px 10px;
+    border-radius:10px;
+    font-size:11px;
+    color:var(--dim);
+  }
+  .verdict-label{
+    position:absolute;
+    top:16px;
+    padding:6px 16px;
+    border-radius:20px;
+    font-size:13px;
+    font-weight:800;
+    letter-spacing:0.5px;
+  }
+  .verdict-label.trash{ right:14px; background:rgba(255,59,48,0.85); color:#fff; transform:rotate(8deg);}
+  .verdict-label.keep{ left:14px; background:rgba(52,199,89,0.85); color:#fff; transform:rotate(-8deg);}
+  .deck-actions{
+    display:flex;
+    gap:40px;
+    align-items:center;
+    margin-top:26px;
+  }
+  .deck-actions .big-btn{
+    width:64px;height:64px;
+    border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    font-size:26px;
+  }
+  .deck-actions .keep-btn{ background:rgba(52,199,89,0.18); color:var(--green); }
+  .deck-actions .trash-btn{ background:rgba(255,59,48,0.18); color:var(--red); }
+  .deck-actions .undo-btn{ background:var(--btn); color:var(--white); width:44px;height:44px; font-size:16px;}
+  .deck-position{
+    margin-top:14px;
+    font-size:11px;
+    font-weight:700;
+    letter-spacing:0.5px;
+    color:var(--dim2);
+  }
+  .deck-filmstrip{
+    display:flex;
+    gap:5px;
+    margin-top:16px;
+    padding:0 20px;
+    overflow-x:auto;
+  }
+  .deck-filmstrip .f-thumb{
+    width:40px;height:40px;
+    border-radius:8px;
+    overflow:hidden;
+    flex-shrink:0;
+    opacity:0.5;
+  }
+  .deck-filmstrip .f-thumb.current{ opacity:1; outline:2px solid var(--white); }
+  .deck-filmstrip .f-thumb img{width:100%;height:100%;object-fit:cover;}
+
+  /* ---------- Option C accordion ---------- */
+  .accordion-group{
+    margin:0 20px 16px;
+    background:var(--card);
+    border-radius:18px;
+    overflow:hidden;
+  }
+  .accordion-head{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:16px 16px;
+  }
+  .accordion-head .left{
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+  }
+  .accordion-head .name{
+    font-size:14.5px;
+    font-weight:700;
+  }
+  .accordion-head .desc{
+    font-size:11.5px;
+    color:var(--dim2);
+  }
+  .chevron{
+    font-size:13px;
+    color:var(--dim);
+  }
+  .accordion-body{
+    padding:0 16px 16px;
+  }
+  .accordion-body .grid{ padding:0; }
+  .toggle-all-row{
+    display:flex;
+    gap:14px;
+    font-size:12px;
+    font-weight:600;
+    color:#5eb3ff;
+    padding:0 0 10px;
+  }
+</style>
+</head>
+<body>
+
+<h1 class="page-title">Google Photos Cleanup — Confirm Screen</h1>
+<p class="page-sub">Nothing is trashed from this screen until the primary button is tapped. Google Photos trash is recoverable for 60 days. Three layout directions for review.</p>
+
+<div class="row">
+
+  <!-- ============ OPTION A ============ -->
+  <div class="col">
+    <div class="opt-label">Option A — Full grid with sections</div>
+    <div class="opt-desc">Scrollable grid of all candidates up front, deselect individually. A visually separated lower section holds items that probably aren't from this iPhone, defaulted to kept. Sticky confirm bar at the bottom.</div>
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="screen">
+        <div class="statusbar"></div>
+        <div class="top-header">
+          <div class="title-row">
+            <h2>Google Photos cleanup</h2>
+            <div class="icon-btn">✕</div>
+          </div>
+          <div class="summary-line">
+            <b>March 2026</b> · 1,204 on phone · 1,391 in Google · <b>187</b> only in Google
+          </div>
+        </div>
+
+        <div class="selectbar">
+          <div class="links"><span>Select all</span><span>Select none</span></div>
+          <div class="count-pill">164 selected</div>
+        </div>
+
+        <div class="section-head">
+          <div class="label">From this iPhone — likely already backed up</div>
+          <div class="sub">These match photos you took on this phone. Tap a photo to keep it instead of trashing it.</div>
+        </div>
+        <div class="grid" id="gridA1">
+        </div>
+
+        <div class="section-head" style="margin-top:6px;">
+          <div class="label" style="color:#ffd479;">Probably not from this iPhone</div>
+          <div class="sub">Other camera, WhatsApp, or shared with you. Not preselected — review before including.</div>
+        </div>
+        <div class="grid" id="gridA2" style="margin-bottom:120px;">
+        </div>
+
+        <div style="height:90px;"></div>
+      </div>
+      <div class="footer">
+        <div class="confirm-btn">Move 164 to Google trash</div>
+        <div class="recover-note">Recoverable from Google Photos trash for 60 days</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ OPTION B ============ -->
+  <div class="col">
+    <div class="opt-label">Option B — Swipe-deck review</div>
+    <div class="opt-desc">Reuses the app's own swipe metaphor: swipe left to trash, right to keep, one candidate at a time. A running counter and filmstrip track progress, ending on a confirm step.</div>
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="screen">
+        <div class="statusbar"></div>
+        <div class="top-header">
+          <div class="title-row">
+            <div class="icon-btn" style="font-size:13px;">↺</div>
+            <div style="text-align:center;">
+              <div style="font-size:15px;font-weight:700;">Google Photos cleanup</div>
+              <div style="font-size:11px;color:var(--dim2);margin-top:2px;">MARCH 2026 · ONLY IN GOOGLE</div>
+            </div>
+            <div class="icon-btn">✕</div>
+          </div>
+        </div>
+        <div class="summary-line" style="padding:0 20px 4px;">
+          <b>1,204</b> on phone · <b>1,391</b> in Google · <b>187</b> to review
+        </div>
+
+        <div class="deck-wrap">
+          <div class="card-stack">
+            <div class="swipe-card back"><img src="https://picsum.photos/seed/gpb2/340/420" alt=""></div>
+            <div class="swipe-card front">
+              <img src="https://picsum.photos/seed/gpb1/340/420" alt="">
+              <div class="meta-tag">Mar 14 · from this iPhone</div>
+              <div class="verdict-label trash">TRASH</div>
+            </div>
+          </div>
+          <div class="deck-actions">
+            <div class="big-btn undo-btn">↺</div>
+            <div class="big-btn keep-btn">♥</div>
+            <div class="big-btn trash-btn">🗑</div>
+          </div>
+          <div class="deck-position">23 OF 187</div>
+          <div class="deck-filmstrip">
+            <div class="f-thumb"><img src="https://picsum.photos/seed/fb1/80/80"></div>
+            <div class="f-thumb"><img src="https://picsum.photos/seed/fb2/80/80"></div>
+            <div class="f-thumb current"><img src="https://picsum.photos/seed/gpb1/80/80"></div>
+            <div class="f-thumb"><img src="https://picsum.photos/seed/fb4/80/80"></div>
+            <div class="f-thumb"><img src="https://picsum.photos/seed/fb5/80/80"></div>
+            <div class="f-thumb"><img src="https://picsum.photos/seed/fb6/80/80"></div>
+            <div class="f-thumb"><img src="https://picsum.photos/seed/fb7/80/80"></div>
+          </div>
+        </div>
+      </div>
+      <div class="footer" style="background:linear-gradient(to top, rgba(0,0,0,0.97) 70%, rgba(0,0,0,0));">
+        <div class="confirm-btn" style="background:var(--btn); color:var(--dim);">Finish reviewing to confirm</div>
+        <div class="recover-note">164 marked for trash so far · recoverable 60 days</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ OPTION C ============ -->
+  <div class="col">
+    <div class="opt-label">Option C — Summary sheet, collapsible groups</div>
+    <div class="opt-desc">Opens on totals only. Two collapsible cards break candidates into "from this iPhone" (expanded, preselected) and "probably not from this iPhone" (collapsed, unselected). Tap a card header to expand.</div>
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="screen">
+        <div class="statusbar"></div>
+        <div class="top-header">
+          <div class="title-row">
+            <h2>Google Photos cleanup</h2>
+            <div class="icon-btn">✕</div>
+          </div>
+        </div>
+
+        <div style="padding:6px 20px 20px;">
+          <div style="background:var(--card); border-radius:18px; padding:18px;">
+            <div style="font-size:13px; color:var(--dim); margin-bottom:10px;">March 2026</div>
+            <div style="display:flex; justify-content:space-between;">
+              <div>
+                <div style="font-size:22px; font-weight:800;">1,204</div>
+                <div style="font-size:11px; color:var(--dim2);">on phone</div>
+              </div>
+              <div>
+                <div style="font-size:22px; font-weight:800;">1,391</div>
+                <div style="font-size:11px; color:var(--dim2);">in Google</div>
+              </div>
+              <div>
+                <div style="font-size:22px; font-weight:800; color:#ffd479;">187</div>
+                <div style="font-size:11px; color:var(--dim2);">only in Google</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="accordion-group">
+          <div class="accordion-head">
+            <div class="left">
+              <div class="name">From this iPhone — 142 selected</div>
+              <div class="desc">Already safe: these match photos still on your phone.</div>
+            </div>
+            <div class="chevron">▾ expanded</div>
+          </div>
+          <div class="accordion-body">
+            <div class="toggle-all-row"><span>Select all</span><span>Select none</span></div>
+            <div class="grid" id="gridC1"></div>
+          </div>
+        </div>
+
+        <div class="accordion-group">
+          <div class="accordion-head">
+            <div class="left">
+              <div class="name" style="color:#ffd479;">Probably not from this iPhone — 45</div>
+              <div class="desc">Other camera, WhatsApp, or shared. None selected by default.</div>
+            </div>
+            <div class="chevron">▸ collapsed</div>
+          </div>
+        </div>
+
+        <div style="height:120px;"></div>
+      </div>
+      <div class="footer">
+        <div class="confirm-btn">Move 142 to Google trash</div>
+        <div class="recover-note">Recoverable from Google Photos trash for 60 days</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  function fillGrid(id, count, seedPrefix, options){
+    options = options || {};
+    const el = document.getElementById(id);
+    if(!el) return;
+    let html = '';
+    for(let i=1;i<=count;i++){
+      const kept = options.keptIndices && options.keptIndices.includes(i);
+      const dim = options.allDim;
+      const cls = kept ? 'tile kept' : (dim ? 'tile dim-unselected' : 'tile');
+      const checkMark = kept ? '' : (dim ? '' : '✓');
+      html += `<div class="${cls}">
+        <img src="https://picsum.photos/seed/${seedPrefix}${i}/200/200" alt="">
+        <div class="check">${checkMark}</div>
+      </div>`;
+    }
+    el.innerHTML = html;
+  }
+
+  fillGrid('gridA1', 16, 'gpa1_', { keptIndices: [3, 9, 14] });
+  fillGrid('gridA2', 8, 'gpa2_', { allDim: true });
+  fillGrid('gridC1', 12, 'gpc1_', { keptIndices: [5, 11] });
+</script>
+
+</body>
+</html>

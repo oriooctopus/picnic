@@ -240,6 +240,13 @@ struct OfflineDownloadView: View {
                 }
             }
             .font(.system(size: 14))
+            if failed > 0, let top = downloader.topFailureReason {
+                Text("\(top.count) × \(top.reason)")
+                    .font(.system(size: 12))
+                    .foregroundStyle(DL.red)
+                    .lineLimit(2)
+                    .accessibilityIdentifier("download.failureReason")
+            }
             Text("\(OfflineDownloadPlan.formatDuration(minutes: OfflineDownloadPlan.readyMinutes(readyCount: done, pace: downloader.pace))) of \(downloader.hours)h ready")
                 .font(.system(size: 13))
                 .foregroundStyle(DL.secondary)

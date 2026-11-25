@@ -124,6 +124,26 @@ final class OfflineDownloaderTests: XCTestCase {
         XCTAssertEqual(d.failedCount, 0)
     }
 
+    /// The PhotoKit error behind a failure is kept and counted, so the tray can say why
+    /// (206 of 213 failed on the phone with no hint), and a retry starts the tally fresh.
+    func testFailureReasonKeepsPhotoKitErrorAndClearsOnRetry() async {
+        let (defaults, dir) = env()
+        let failing: Set<String> = ["a1", "a2", "b0"]
+        let d = OfflineDownloader(defaults: defaults, directory: dir, fetch: { item, _ in
+            if failing.contains(item.id) {
+                throw NSError(domain: "CloudPhotoLibraryErrorDomain", code: 1005,
+                              userInfo: [NSLocalizedDescriptionKey: "Network unavailable"])
+            }
+        })
+        d.update(months: [monthA, monthB], pace: 8)
+        d.start()
+        await eventually("run ends") { d.state == .idle && d.doneCount == 13 }
+        XCTAssertEqual(d.topFailureReason?.count, 3)
+        XCTAssertEqual(d.topFailureReason?.reason, "CloudPhotoLibraryErrorDomain 1005: Network unavailable")
+        d.retryFailed()
+        XCTAssertNil(d.topFailureReason)
+    }
+
     func testCompletedSetPersistsAcrossInstances() async {
         let e = env()
         let d = make(e, FetchRecorder())

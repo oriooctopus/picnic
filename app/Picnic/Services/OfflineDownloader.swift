@@ -78,6 +78,10 @@ final class OfflineDownloader: ObservableObject {
     @Published private(set) var completed: [String: Quality]
     @Published private(set) var failed: Set<String> = []
     @Published private(set) var lastError: String?
+    /// Failure count per reason (see `reason(for:)`) for the current run. Shown under
+    /// "N failed · Retry": a bare count told nothing when 206 of 213 failed on the
+    /// phone, and the underlying PhotoKit error was being thrown away.
+    @Published private(set) var failureReasons: [String: Int] = [:]
     /// Original file sizes by asset id (photos in Original mode, videos always).
     @Published private(set) var sizes: [String: Int64] = [:]
     @Published private(set) var freeBytes: Int64?
@@ -215,6 +219,24 @@ final class OfflineDownloader: ObservableObject {
     var remainingCount: Int { items.count - doneCount }
     var failedCount: Int { items.filter { failed.contains($0.id) }.count }
 
+    /// The most common failure reason with its count, nil when nothing failed.
+    var topFailureReason: (reason: String, count: Int)? {
+        failureReasons.max { $0.value < $1.value }.map { ($0.key, $0.value) }
+    }
+
+    /// Short label for a fetch failure: PhotoKit / iCloud errors as "Domain code: message",
+    /// so a phone screenshot is enough to tell no-network, iCloud throttling and missing
+    /// assets apart.
+    nonisolated static func reason(for error: Error) -> String {
+        switch error {
+        case FetchError.assetMissing: return "Not in library"
+        case FetchError.incomplete: return "No image returned"
+        default:
+            let ns = error as NSError
+            return "\(ns.domain) \(ns.code): \(ns.localizedDescription)"
+        }
+    }
+
     /// The month's items under its limit (what would be queued if it is selected).
     func monthItems(_ month: PlanMonth) -> [Item] {
         OfflineDownloadPlan.items(for: month, includeVideos: includeVideos, limit: limits[month.key])
@@ -264,6 +286,7 @@ final class OfflineDownloader: ObservableObject {
     func start() {
         interrupted = false
         failed = []
+        failureReasons = [:]
         completionDates = []
         state = .running
         pump()
@@ -283,6 +306,7 @@ final class OfflineDownloader: ObservableObject {
 
     func retryFailed() {
         failed = []
+        failureReasons = [:]
         completionDates = []
         state = .running
         pump()
@@ -317,6 +341,7 @@ final class OfflineDownloader: ObservableObject {
         inFlight[item.id] = nil
         if let failure {
             failed.insert(item.id)
+            failureReasons[Self.reason(for: failure), default: 0] += 1
             lastError = "\(item.id): \(failure)"
         } else {
             completed[item.id] = item.isVideo ? .original : q
@@ -393,7 +418,16 @@ final class OfflineDownloader: ObservableObject {
         // finished the 35-photo seed library before the test could capture the
         // mid-run state; 800 ms x 35 / 4 in flight is ~7 s.
         if ProcessInfo.processInfo.arguments.contains("--simulate-offline-download") {
-            return { _, _ in try await Task.sleep(nanoseconds: 800_000_000) }
+            // `--simulate-offline-download-failures` additionally fails every 3rd item (by
+            // id hash) with an iCloud-style NSError, so UI tests can see the failure reason.
+            let failSome = ProcessInfo.processInfo.arguments.contains("--simulate-offline-download-failures")
+            return { item, _ in
+                try await Task.sleep(nanoseconds: 800_000_000)
+                if failSome && item.id.utf8.reduce(0, { $0 &+ Int($1) }) % 3 == 0 {
+                    throw NSError(domain: "CloudPhotoLibraryErrorDomain", code: 1005,
+                                  userInfo: [NSLocalizedDescriptionKey: "Simulated network failure"])
+                }
+            }
         }
         #endif
         return { item, quality in try await fetchReal(item, quality) }
@@ -412,6 +446,12 @@ final class OfflineDownloader: ObservableObject {
         }
     }
 
+    /// The error PhotoKit attached to a failed request (iCloud download errors arrive here),
+    /// rethrown as-is so `reason(for:)` can show its domain and code.
+    private nonisolated static func photoKitError(_ info: [AnyHashable: Any]?) -> Error? {
+        info?[PHImageErrorKey] as? Error
+    }
+
     /// Exactly the request DeckPrefetcher.start makes (shared options and
     /// completeness test), so a finished download turns the offline probe to "yes".
     private nonisolated static func fetchScreen(_ asset: PHAsset) async throws {
@@ -426,7 +466,7 @@ final class OfflineDownloader: ObservableObject {
                 if DeckPrefetcher.isCompleteScreenImage(image, info) {
                     continuation.resume()
                 } else {
-                    continuation.resume(throwing: FetchError.incomplete(asset.localIdentifier))
+                    continuation.resume(throwing: photoKitError(info) ?? FetchError.incomplete(asset.localIdentifier))
                 }
             }
         }
@@ -445,7 +485,7 @@ final class OfflineDownloader: ObservableObject {
                 if data != nil && info?[PHImageErrorKey] == nil {
                     continuation.resume()
                 } else {
-                    continuation.resume(throwing: FetchError.incomplete(asset.localIdentifier))
+                    continuation.resume(throwing: photoKitError(info) ?? FetchError.incomplete(asset.localIdentifier))
                 }
             }
         }
@@ -466,7 +506,7 @@ final class OfflineDownloader: ObservableObject {
                 if avAsset != nil && info?[PHImageErrorKey] == nil {
                     continuation.resume()
                 } else {
-                    continuation.resume(throwing: FetchError.incomplete(asset.localIdentifier))
+                    continuation.resume(throwing: photoKitError(info) ?? FetchError.incomplete(asset.localIdentifier))
                 }
             }
         }

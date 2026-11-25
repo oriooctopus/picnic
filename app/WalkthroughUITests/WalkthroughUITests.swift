@@ -4055,6 +4055,34 @@ final class WalkthroughUITests: XCTestCase {
     /// never used (the phone bug: the grid said "Nothing downloaded" because it
     /// only counted Download-screen items). The seeded simulator photos are
     /// local, so the on-device scan must surface the seeded month.
+    /// Done mid-run only closes the screen: the run keeps going (it lives in AppState),
+    /// and failed fetches show their reason under "N failed · Retry".
+    func test60OfflineDownloadContinuesAfterDoneAndShowsFailureReason() throws {
+        relaunch(withExtraArguments: ["--reset-offline-download", "--reset-sort-state",
+                                      "--simulate-offline-download", "--simulate-offline-download-failures"])
+        openMyLifeGrid()
+        app.buttons["myLife.downloadButton"].tap()
+        let primary = app.buttons["download.primary"]
+        XCTAssertTrue(primary.waitForExistence(timeout: 10), "Download screen should open")
+        app.buttons["download.hours.1"].tap()
+        primary.tap()
+        let progress = app.staticTexts["download.progress"]
+        XCTAssertTrue(progress.waitForExistence(timeout: 10), "Progress should show once the run starts")
+        let doneBefore = Int(progress.label.replacingOccurrences(of: ",", with: "").components(separatedBy: " / ")[0]) ?? -1
+
+        app.buttons["download.done"].tap()
+        Thread.sleep(forTimeInterval: 4)
+        app.buttons["myLife.downloadButton"].tap()
+        XCTAssertTrue(progress.waitForExistence(timeout: 10), "Reopened screen should still show the run")
+        let doneAfter = Int(progress.label.replacingOccurrences(of: ",", with: "").components(separatedBy: " / ")[0]) ?? -1
+        XCTAssertGreaterThan(doneAfter, doneBefore, "Run should keep downloading while the screen is closed")
+
+        let reason = app.staticTexts["download.failureReason"]
+        XCTAssertTrue(reason.waitForExistence(timeout: 60), "Failure reason should show once an item fails")
+        capture("download-failure-reason", delay: 0.3)
+        XCTAssertTrue(reason.label.contains("CloudPhotoLibraryErrorDomain 1005"), "Got \(reason.label)")
+    }
+
     func test59OfflineModeCountsPhotosAlreadyOnPhone() throws {
         relaunch(withExtraArguments: ["--reset-offline-download", "--reset-offline-only", "--reset-sort-state"])
         openMyLifeGrid()
