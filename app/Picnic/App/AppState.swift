@@ -94,7 +94,7 @@ final class AppState: ObservableObject {
         }
         // Loaded-only defaults ON, which would hide every not-yet-probed card in
         // the seeded UI tests; they start with it off unless they pass --loaded-only.
-        if isSeeding {
+        if args.contains("--seed-library") || args.contains("--seed-large-month") {
             UserDefaults.standard.set(args.contains("--loaded-only"), forKey: DeckViewModel.loadedOnlyDefaultsKey)
         }
         // Same persistence story for the offline download settings and its
