@@ -15,7 +15,7 @@ final class OnDeviceStore {
     private(set) var ids: Set<String>
     private let url: URL
 
-    static var defaultURL: URL {
+    nonisolated static var defaultURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("OnDeviceIDs.json")
     }
