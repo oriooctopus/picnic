@@ -15,9 +15,9 @@ import Photos
 ///
 /// Cost: one network-off screen-size request per unsorted photo, 4 at a time,
 /// newest month first so the months at the top of the grid fill in first.
-/// Results are kept for the app's lifetime (never re-asked): an item iOS
-/// offloads later still shows here until the next launch, and the deck's own
-/// probe still hides it.
+/// Positives persist in `OnDeviceStore`: a launch seeds `availableIDs` from it
+/// so the count shows at once, then the pass probes unknown photos first and
+/// re-verifies the stored ones, dropping any iOS has since offloaded.
 @MainActor
 final class OfflineMonthScanner: ObservableObject {
     /// Probes at once. Matches `LocalAvailability.maxConcurrent`.
@@ -32,6 +32,10 @@ final class OfflineMonthScanner: ObservableObject {
     /// not empty. Starting false showed "Nothing downloaded" on the phone for
     /// the moment between launch and the first scan (buckets not loaded yet).
     @Published private(set) var isScanning = true
+    /// True while the storage line should read "Checking": a scan is running
+    /// and there is no stored or found count to show yet. Seeded counts are a
+    /// real (if slightly stale) answer, so they never wait on the scan.
+    @Published private(set) var showsChecking: Bool
     /// Bumped per `scan`, so a cancelled pass finishing late can't clear
     /// `isScanning` while its replacement is still running.
     private var generation = 0
@@ -42,9 +46,14 @@ final class OfflineMonthScanner: ObservableObject {
     /// The probe. Injectable for tests.
     typealias Probe = @Sendable (PHAsset, Int) async -> Bool
     private let probe: Probe
+    private let store: OnDeviceStore
 
-    init(probe: @escaping Probe = { asset, index in await LocalAvailability.probeOne(.local(asset), monthIndex: index) }) {
+    init(store: OnDeviceStore,
+         probe: @escaping Probe = { asset, index in await LocalAvailability.probeOne(.local(asset), monthIndex: index) }) {
+        self.store = store
         self.probe = probe
+        availableIDs = store.ids
+        showsChecking = store.ids.isEmpty
     }
 
     /// Restarts the pass over `months` (newest first, as the grid lists them),
@@ -56,6 +65,7 @@ final class OfflineMonthScanner: ObservableObject {
         // the grid calls scan again when the buckets arrive.
         guard !months.isEmpty else { return }
         isScanning = true
+        showsChecking = availableIDs.isEmpty
         // Bumped here, synchronously, not inside the task: otherwise the old
         // pass could finish between this call and the new task starting, still
         // match the generation, and clear isScanning mid-scan.
@@ -69,6 +79,7 @@ final class OfflineMonthScanner: ObservableObject {
     func markAvailable(_ ids: [String]) {
         probedIDs.formUnion(ids)
         availableIDs.formUnion(ids)
+        store.add(ids)
     }
 
     func stop() {
@@ -81,15 +92,25 @@ final class OfflineMonthScanner: ObservableObject {
                      isMonthSorted: (String) -> Bool, isUnsorted: (PHAsset) -> Bool) async {
         defer {
             flush()
-            if generation == myGeneration { isScanning = false }
+            if generation == myGeneration { isScanning = false; showsChecking = false }
         }
         // (asset, index in its month): the index only feeds the DEBUG
         // partially-downloaded simulation, which keys off month position.
-        let queue: [(PHAsset, Int)] = months.filter { !isMonthSorted($0.key) }.flatMap { month in
+        let candidates: [(PHAsset, Int)] = months.filter { !isMonthSorted($0.key) }.flatMap { month in
             month.assets.enumerated().compactMap { index, asset in
-                isUnsorted(asset) && !probedIDs.contains(asset.localIdentifier) ? (asset, index) : nil
+                isUnsorted(asset) ? (asset, index) : nil
             }
         }
+        // Sorted since the last launch: no longer part of the offline pool.
+        let stillUnsorted = Set(candidates.map { $0.0.localIdentifier })
+        let sortedAway = store.ids.subtracting(stillUnsorted)
+        store.remove(sortedAway)
+        availableIDs.subtract(sortedAway)
+        // Unknown photos first (they fill the grid), then re-verify stored
+        // positives, which may have been offloaded since they were saved.
+        let todo = candidates.filter { !probedIDs.contains($0.0.localIdentifier) }
+        let queue = todo.filter { !availableIDs.contains($0.0.localIdentifier) }
+            + todo.filter { availableIDs.contains($0.0.localIdentifier) }
         guard !queue.isEmpty else { return }
         let probe = self.probe
         await withTaskGroup(of: (String, Bool).self) { group in
@@ -104,6 +125,10 @@ final class OfflineMonthScanner: ObservableObject {
                 if ok {
                     pendingAvailable.insert(id)
                     if pendingAvailable.count >= Self.flushEvery { flush() }
+                } else if !Task.isCancelled, availableIDs.contains(id) {
+                    // Offloaded since it was stored (not a probe cut short by cancel).
+                    availableIDs.remove(id)
+                    store.remove([id])
                 }
                 if !Task.isCancelled, next < queue.count {
                     let (asset, index) = queue[next]
@@ -117,6 +142,7 @@ final class OfflineMonthScanner: ObservableObject {
     private func flush() {
         guard !pendingAvailable.isEmpty else { return }
         availableIDs.formUnion(pendingAvailable)
+        store.add(pendingAvailable)
         pendingAvailable.removeAll()
     }
 }

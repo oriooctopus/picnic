@@ -1,6 +1,7 @@
 import SwiftUI
 import Photos
 import SwiftData
+import BackgroundTasks
 
 /// Root object wiring together PhotoKit access, local persistence, and the
 /// mirror queue. Owned once by PicnicApp and injected as an EnvironmentObject.
@@ -18,10 +19,12 @@ final class AppState: ObservableObject {
     /// Bulk "Download for offline" run; see OfflineDownloader. Constructed at
     /// the end of init, after the debug reset block.
     let offlineDownloader: OfflineDownloader
+    /// Photos known to be on the phone, persisted; shared by scanner and keeper.
+    let onDeviceStore: OnDeviceStore
     /// On-device check behind My Life's offline mode; see OfflineMonthScanner.
-    let offlineScanner = OfflineMonthScanner()
+    let offlineScanner: OfflineMonthScanner
     /// Keeps 300 unsorted photos at full quality on the phone; see OfflineKeeper.
-    let offlineKeeper = OfflineKeeper()
+    let offlineKeeper: OfflineKeeper
 
     @Published var monthBuckets: [MonthBucket] = []
     // Set by MonthCardView's "Clean up Google" context-menu button; MyLifeView
@@ -161,6 +164,10 @@ final class AppState: ObservableObject {
         jobs = JobRuntime(context: modelContext, pathSource: NetworkPathWatcher())
         #endif
         offlineDownloader = OfflineDownloader()
+        let store = OnDeviceStore()
+        onDeviceStore = store
+        offlineScanner = OfflineMonthScanner(store: store)
+        offlineKeeper = OfflineKeeper(store: store)
     }
 
     func bootstrap() async {
@@ -258,5 +265,38 @@ final class AppState: ObservableObject {
             isMonthSorted: { [sortStore] in sortStore.isMonthManuallySorted($0) },
             isUnsorted: { [sortStore] in sortStore.state(for: $0) == .unsorted },
             onAvailable: { [offlineScanner] in offlineScanner.markAvailable($0) })
+    }
+
+    /// The BGProcessingTask body. The app may have been launched in the
+    /// background with no UI, so bootstrap never ran: load the months directly
+    /// (not `refreshMonths`, whose keeper restart is foreground-only) and run
+    /// the keeper until it is done or iOS expires the task.
+    func refillOfflinePhotosInBackground(_ task: BGProcessingTask) async {
+        OfflineKeeperBackground.schedule()
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else {
+            print("OfflineKeeperBackground: photo access is \(status.rawValue), nothing to refill")
+            task.setTaskCompleted(success: false)
+            return
+        }
+        var completed = false
+        let finish = { (success: Bool) in
+            guard !completed else { return }
+            completed = true
+            task.setTaskCompleted(success: success)
+        }
+        task.expirationHandler = { [offlineKeeper] in
+            Task { @MainActor in
+                offlineKeeper.stop()
+                finish(false)
+            }
+        }
+        monthBuckets = photoLibrary.fetchMonthBuckets()
+        let ranToEnd = await offlineKeeper.runInBackground(
+            months: monthBuckets,
+            isMonthSorted: { [sortStore] in sortStore.isMonthManuallySorted($0) },
+            isUnsorted: { [sortStore] in sortStore.state(for: $0) == .unsorted },
+            onAvailable: { [offlineScanner] in offlineScanner.markAvailable($0) })
+        finish(ranToEnd)
     }
 }

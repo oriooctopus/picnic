@@ -26,6 +26,7 @@ struct MyLifeView: View {
     /// photos found on the phone without going through the Download screen.
     @State private var onDevice: Set<String> = []
     @State private var isScanning = false
+    @State private var showsChecking = true
     /// Bytes behind the offline-mode storage line (nil until first computed).
     @StateObject private var storageMeter = OfflineStorageMeter()
 
@@ -81,10 +82,10 @@ struct MyLifeView: View {
     }
 
     /// `152 photos · 412 MB`, or Checking while the scan or the first size read
-    /// is still running (a partial number would read as the real one).
+    /// is still running with nothing to show yet (a stored count is shown at once).
     private var offlineStorageLine: some View {
         let count = offlineReadyIDs.count
-        let checking = isScanning || storageMeter.bytes == nil
+        let checking = showsChecking || storageMeter.bytes == nil
         let text = checking
             ? "Checking"
             : "\(count) photo\(count == 1 ? "" : "s") · \(ByteCountFormatter.string(fromByteCount: storageMeter.bytes ?? 0, countStyle: .file))"
@@ -194,6 +195,7 @@ struct MyLifeView: View {
             .onReceive(appState.offlineDownloader.$completed) { downloaded = $0 }
             .onReceive(appState.offlineScanner.$availableIDs) { onDevice = $0 }
             .onReceive(appState.offlineScanner.$isScanning) { isScanning = $0 }
+            .onReceive(appState.offlineScanner.$showsChecking) { showsChecking = $0 }
             .onAppear { updateOfflineScan() }
             .onChange(of: offlineOnly) { _, _ in updateOfflineScan(); updateStorage() }
             .onChange(of: offlineReadyIDs.count) { _, _ in updateStorage() }

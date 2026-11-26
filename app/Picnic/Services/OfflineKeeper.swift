@@ -14,10 +14,13 @@ import UIKit
 /// device or the library runs out. Results are discarded: PhotoKit's own store
 /// is the goal.
 ///
-/// Foreground only (`setActive`), 2 requests at a time so it doesn't fight an
-/// open deck's prefetcher, restarted whenever the months change (a sort moves
-/// photos out of the unsorted pool). Positive answers are remembered for the
-/// app's lifetime, like `OfflineMonthScanner`, so a restart doesn't re-probe.
+/// Foreground starts only (`setActive`), 2 requests at a time so it doesn't
+/// fight an open deck's prefetcher, restarted whenever the months change (a
+/// sort moves photos out of the unsorted pool). Leaving the foreground does not
+/// cut a pass off: `beginGracePeriod` asks iOS for its ~30 s of background
+/// time, and `OfflineKeeperBackground`'s BGProcessingTask refills later via
+/// `runInBackground`. Positive answers persist in `OnDeviceStore` (shared with
+/// `OfflineMonthScanner`), so neither a restart nor a relaunch re-probes.
 @MainActor
 final class OfflineKeeper: ObservableObject {
     /// The user's ask, verbatim: "we should always have at least 300 full
@@ -36,7 +39,15 @@ final class OfflineKeeper: ObservableObject {
 
     private var isActive = true
     private var task: Task<Void, Never>?
-    private var known: Set<String> = []
+    private let store: OnDeviceStore
+    private var graceTask: UIBackgroundTaskIdentifier = .invalid
+
+    /// Photos already known to be on the device; the shared store's ids.
+    var known: Set<String> { store.ids }
+
+    init(store: OnDeviceStore) {
+        self.store = store
+    }
 
     /// Of `ordered` (newest-first candidates probed so far), which ids to
     /// download so that `target` of them are available: the first unavailable
@@ -49,7 +60,23 @@ final class OfflineKeeper: ObservableObject {
 
     func setActive(_ active: Bool) {
         isActive = active
-        if !active { stop() }
+    }
+
+    /// Called as the app enters the background: lets an in-flight pass keep
+    /// going for iOS's grace period instead of being cut instantly. The
+    /// expiration handler cancels the pass; either way the grace is returned.
+    func beginGracePeriod() {
+        guard let pass = task, graceTask == .invalid else { return }
+        graceTask = UIApplication.shared.beginBackgroundTask(withName: "offlineKeeper") { [weak self] in
+            Task { @MainActor in self?.stop(); self?.endGracePeriod() }
+        }
+        Task { await pass.value; endGracePeriod() }
+    }
+
+    private func endGracePeriod() {
+        guard graceTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(graceTask)
+        graceTask = .invalid
     }
 
     func stop() {
@@ -68,10 +95,27 @@ final class OfflineKeeper: ObservableObject {
         #if DEBUG
         if ThumbnailLoader.simulatedUpdates() != nil || ThumbnailLoader.simulatePartiallyDownloaded { return }
         #endif
-        let candidates: [PHAsset] = months.filter { !isMonthSorted($0.key) }.flatMap { month in
+        let candidates = Self.candidates(months: months, isMonthSorted: isMonthSorted, isUnsorted: isUnsorted)
+        task = Task { await run(candidates: candidates, onAvailable: onAvailable) }
+    }
+
+    /// The BGProcessingTask's pass: same as `start` but allowed while the app
+    /// is backgrounded, and awaited so the caller can complete the task. False
+    /// if `stop()` (the task's expiration) cut it short.
+    func runInBackground(months: [MonthBucket], isMonthSorted: (String) -> Bool, isUnsorted: (PHAsset) -> Bool,
+                         onAvailable: @escaping ([String]) -> Void) async -> Bool {
+        task?.cancel()
+        let candidates = Self.candidates(months: months, isMonthSorted: isMonthSorted, isUnsorted: isUnsorted)
+        let pass = Task { await run(candidates: candidates, onAvailable: onAvailable) }
+        task = pass
+        await pass.value
+        return !pass.isCancelled
+    }
+
+    private static func candidates(months: [MonthBucket], isMonthSorted: (String) -> Bool, isUnsorted: (PHAsset) -> Bool) -> [PHAsset] {
+        months.filter { !isMonthSorted($0.key) }.flatMap { month in
             month.assets.filter { $0.mediaType != .video && isUnsorted($0) }
         }
-        task = Task { await run(candidates: candidates, onAvailable: onAvailable) }
     }
 
     private func run(candidates: [PHAsset], onAvailable: ([String]) -> Void) async {
@@ -82,16 +126,17 @@ final class OfflineKeeper: ObservableObject {
         while !Task.isCancelled, available.count < Self.targetCount, index < candidates.count {
             let batch = Array(candidates[index..<min(index + Self.batchSize, candidates.count)])
             index += batch.count
-            let unknown = batch.filter { !known.contains($0.localIdentifier) }
+            let knownBefore = known
+            let unknown = batch.filter { !knownBefore.contains($0.localIdentifier) }
             let probedOK = await Self.succeeded(in: unknown) { asset in
                 await LocalAvailability.probeOne(.local(asset), monthIndex: 0, countWarm: false)
             }
             for asset in batch {
                 let id = asset.localIdentifier
                 ordered.append(id)
-                if known.contains(id) || probedOK.contains(id) { available.insert(id) }
+                if knownBefore.contains(id) || probedOK.contains(id) { available.insert(id) }
             }
-            known.formUnion(probedOK)
+            store.add(probedOK)
 
             let wanted = Set(Self.idsToDownload(ordered: ordered.filter { !failed.contains($0) },
                                                 available: available, target: Self.targetCount))
@@ -99,7 +144,7 @@ final class OfflineKeeper: ObservableObject {
             let downloaded = await Self.succeeded(in: toDownload) { await Self.download($0) }
             failed.formUnion(wanted.subtracting(downloaded))
             available.formUnion(downloaded)
-            known.formUnion(downloaded)
+            store.add(downloaded)
             availableCount = available.count
             if !downloaded.isEmpty { onAvailable(Array(downloaded)) }
         }

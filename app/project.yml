@@ -40,6 +40,11 @@ targets:
           - CFBundleURLName: com.oliverullman.picnic.photo
             CFBundleURLSchemes: [picnic]
         ITSAppUsesNonExemptEncryption: false
+        # OfflineKeeper's background refill (OfflineKeeperBackground).
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.oliverullman.picnic.offlineKeeper
+        UIBackgroundModes:
+          - processing
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         NSPhotoLibraryUsageDescription: "Picnic reads your camera roll so you can swipe-sort it month by month."
