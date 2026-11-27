@@ -124,12 +124,15 @@ final class DeckViewModel: ObservableObject {
     @Published var newestFirst = UserDefaults.standard.bool(forKey: DeckViewModel.newestFirstDefaultsKey) {
         didSet {
             UserDefaults.standard.set(newestFirst, forKey: DeckViewModel.newestFirstDefaultsKey)
-            // Captured before the reverse: orderedItems' didSet refreshes with
-            // no anchor, which only clamps currentIndex and would leave the
-            // deck on whatever photo now sits at the old index.
-            let anchor = currentItem?.id ?? lastAnchorID
             orderedItems.reverse()
-            refresh(follow: anchor)
+            // Toggling the order jumps to the START of the new order (the
+            // newest photo for newest-first, the oldest otherwise). It used to
+            // stay on the current card, which left the user swiping all the
+            // way back to reach the newest photos they flipped the order for.
+            // Following orderedItems.first (not just currentIndex = 0) also
+            // covers a newest photo hidden by a filter: reanchor lands on the
+            // first visible card after it in the new order.
+            refresh(follow: orderedItems.first?.id)
         }
     }
     /// What is downloaded, as far as probing and prefetching have found out.
@@ -510,6 +513,24 @@ final class DeckViewModel: ObservableObject {
 
         reanchorCurrentIndex(toFollow: assetID)
         if let current = currentItem { lastAnchorID = current.id }
+    }
+
+    /// Replaces a local deck's items with a fresh PhotoKit fetch of its month
+    /// (`items` oldest-first, as MonthBucket holds them), keeping the user on
+    /// the card they were looking at. Without this an open deck is a snapshot
+    /// from when it opened: the app auto-reopens the last month on launch and
+    /// iOS keeps it suspended for days, so photos taken since never appeared.
+    /// No-op when the set and order of ids is unchanged, so a foreground
+    /// refresh with nothing new doesn't rebuild Compare groups.
+    func applyLibraryItems(_ items: [DeckItem]) {
+        let ordered = newestFirst ? Array(items.reversed()) : items
+        guard ordered.map(\.id) != orderedItems.map(\.id) else { return }
+        // Captured before the assignment: orderedItems' didSet refreshes with
+        // no anchor, which only clamps currentIndex onto whatever photo now
+        // sits at the old index (shifted by every newly inserted photo).
+        let anchor = currentItem?.id ?? lastAnchorID
+        orderedItems = ordered
+        refresh(follow: anchor)
     }
 
     /// Swaps in a freshly fetched PHAsset after an edit saved from the deck

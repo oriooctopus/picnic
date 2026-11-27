@@ -56,17 +56,33 @@ final class NewestFirstTests: XCTestCase {
         return viewModel
     }
 
-    func testTogglingReversesOrderAndKeepsCurrentCard() async throws {
+    func testTogglingReversesOrderAndJumpsToStartOfNewOrder() async throws {
         let vm = try await makeDeck(count: 5)
         XCTAssertEqual(vm.visibleItems.map(\.id), (0..<5).map(id), "default is oldest-first")
         vm.currentIndex = 1
 
         vm.newestFirst = true
         XCTAssertEqual(vm.visibleItems.map(\.id), (0..<5).reversed().map(id))
-        XCTAssertEqual(vm.currentItem?.id, id(1), "toggling must not jump off the photo the user is on")
+        XCTAssertEqual(vm.currentItem?.id, id(4), "newest-first opens on the newest photo")
 
+        vm.currentIndex = 2
         vm.newestFirst = false
         XCTAssertEqual(vm.visibleItems.map(\.id), (0..<5).map(id))
+        XCTAssertEqual(vm.currentItem?.id, id(0), "oldest-first goes back to the oldest photo")
+    }
+
+    /// A photo taken while the deck was open (or the app suspended) arrives
+    /// via a fresh library fetch; it must join the deck in order without
+    /// moving the user off the card they are on.
+    func testApplyLibraryItemsAddsNewPhotosAndKeepsCurrentCard() async throws {
+        let vm = try await makeDeck(count: 3)
+        vm.newestFirst = true  // on k2
+        vm.currentIndex = 1    // k1
+        // newestFirst is persisted, so this deck is newest-first too; reversed
+        // gives oldest-first k0...k4, the order a MonthBucket holds.
+        let fresh = try await makeDeck(count: 5).orderedItems.reversed()
+        vm.applyLibraryItems(Array(fresh))
+        XCTAssertEqual(vm.visibleItems.map(\.id), (0..<5).reversed().map(id))
         XCTAssertEqual(vm.currentItem?.id, id(1))
     }
 

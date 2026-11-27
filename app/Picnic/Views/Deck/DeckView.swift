@@ -321,6 +321,16 @@ struct DeckView: View {
         .onChange(of: viewModel.currentItem?.id) { _, _ in
             isTrimming = false
         }
+        // AppState refetches the library on every foreground; feed this
+        // month's fresh assets into the open deck so photos taken while the
+        // app was suspended show up without closing and reopening the deck.
+        // onReceive rather than onChange over a derived id list: that would
+        // rebuild the list on every body render, including swipe frames.
+        .onReceive(appState.$monthBuckets) { buckets in
+            guard !viewModel.isRemote,
+                  let bucket = buckets.first(where: { $0.key == viewModel.monthKey }) else { return }
+            viewModel.applyLibraryItems(bucket.assets.map(DeckItem.local))
+        }
         // Frees the shared AVPlayer's current item when the deck itself
         // goes away — the other half of "no leaked AVPlayer" alongside
         // loadCurrentImage()'s per-card clear()/load() below.

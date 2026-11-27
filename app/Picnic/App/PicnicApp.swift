@@ -37,7 +37,21 @@ struct PicnicApp: App {
                         appState.offlineKeeper.beginGracePeriod()
                         OfflineKeeperBackground.schedule()
                     }
-                    if newPhase == .active { appState.restartOfflineKeeper() }
+                    // Refetch the library on every foreground (this also
+                    // restarts the keeper): months and an open deck are
+                    // otherwise snapshots from launch, so photos taken while
+                    // the app sat suspended never showed up.
+                    // Gated on access: the first .active of a cold launch
+                    // comes before bootstrap's permission request answers,
+                    // and bootstrap does its own first fetch.
+                    if newPhase == .active {
+                        let access = appState.photoLibrary.authorizationStatus
+                        if access == .authorized || access == .limited {
+                            appState.refreshMonths()
+                        } else {
+                            appState.restartOfflineKeeper()
+                        }
+                    }
                     Task { await appState.jobs.scenePhaseChanged(active: newPhase == .active) }
                 }
         }
