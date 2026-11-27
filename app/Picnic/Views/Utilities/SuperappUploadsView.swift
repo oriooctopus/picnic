@@ -161,6 +161,10 @@ struct SuperappUploadsGrid: View {
             Button(selecting ? "Done" : "Select") { selecting.toggle() }
                 .accessibilityIdentifier("superapp.selectMode")
             Spacer()
+            if viewModel.hiddenCount > 0 {
+                Button("Kept \(viewModel.hiddenCount)") { Task { await viewModel.unhide() } }
+                    .accessibilityIdentifier("superapp.unhide")
+            }
             Button("Delete all") { viewModel.setAllKept(false) }
                 .accessibilityIdentifier("superapp.deleteAll")
             Button("Keep all") { viewModel.setAllKept(true) }

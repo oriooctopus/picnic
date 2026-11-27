@@ -147,12 +147,26 @@ final class SuperappUploadsViewModel: ObservableObject {
         return Set(keptStore.defaults.stringArray(forKey: hiddenKey) ?? [])
     }
 
+    /// How many tiles are hidden (kept through an earlier confirmed delete).
+    @Published private(set) var hiddenCount = 0
+
+    /// Brings hidden tiles back into the grid, still marked keep, so revealing
+    /// them never exposes them to the next delete; the next confirm hides them again.
+    func unhide() async {
+        guard let keptStore, let hiddenKey else { return }
+        keptStore.defaults.set(Array(kept.union(storedHidden())), forKey: keptStore.key)
+        keptStore.defaults.removeObject(forKey: hiddenKey)
+        await load()
+    }
+
     func load() async {
         state = .loading
         actionMessage = nil
         do {
             let hidden = storedHidden()
-            items = try await loadItems().filter { !hidden.contains($0.id) }
+            let all = try await loadItems()
+            items = all.filter { !hidden.contains($0.id) }
+            hiddenCount = all.count - items.count
             // Intersect with the current items so ids of deleted assets drop out.
             let stored = keptStore.flatMap { $0.defaults.stringArray(forKey: $0.key) } ?? []
             kept = Set(stored).intersection(items.map(\.id))

@@ -154,4 +154,24 @@ final class SuperappScreenshotFilterTests: XCTestCase {
         await second.load()
         XCTAssertEqual(second.items.map(\.id), ["a", "b"])
     }
+
+    /// Unhiding brings hidden tiles back still kept, so a confirm right after cannot delete them.
+    func testUnhideRestoresHiddenTilesAsKept() async {
+        let defaults = freshDefaults()
+        let first = collectionModel(["a", "b"], defaults: defaults)
+        await first.load()
+        first.toggle(first.items[0])
+        await first.confirm()
+
+        var deleted: [String] = []
+        let second = collectionModel(["a", "c"], defaults: defaults) { deleted = $0 }
+        await second.load()
+        XCTAssertEqual(second.hiddenCount, 1)
+        await second.unhide()
+        XCTAssertEqual(second.items.map(\.id), ["a", "c"])
+        XCTAssertEqual(second.kept, ["a"])
+        XCTAssertEqual(second.hiddenCount, 0)
+        await second.confirm()
+        XCTAssertEqual(deleted, ["c"])
+    }
 }
