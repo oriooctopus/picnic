@@ -127,4 +127,31 @@ final class SuperappScreenshotFilterTests: XCTestCase {
         await second.load()
         XCTAssertEqual(second.kept, [])
     }
+
+    /// Tiles kept through a confirmed delete are settled: the next visit must
+    /// not show them again, while still listing new items.
+    func testKeptTilesAreHiddenAfterConfirmedDelete() async {
+        let defaults = freshDefaults()
+        let first = collectionModel(["a", "b", "c"], defaults: defaults)
+        await first.load()
+        first.toggle(first.items[0])
+        await first.confirm()
+        XCTAssertEqual(first.state, .done)
+
+        let second = collectionModel(["a", "d"], defaults: defaults)
+        await second.load()
+        XCTAssertEqual(second.items.map(\.id), ["d"])
+        XCTAssertEqual(second.kept, [])
+    }
+
+    /// Kept picks without a confirm are still pending and stay visible.
+    func testKeptTilesStayVisibleWithoutConfirm() async {
+        let defaults = freshDefaults()
+        let first = collectionModel(["a", "b"], defaults: defaults)
+        await first.load()
+        first.toggle(first.items[0])
+        let second = collectionModel(["a", "b"], defaults: defaults)
+        await second.load()
+        XCTAssertEqual(second.items.map(\.id), ["a", "b"])
+    }
 }
