@@ -137,11 +137,22 @@ final class SuperappUploadsViewModel: ObservableObject {
         if let keptStore { keptStore.defaults.set(Array(kept), forKey: keptStore.key) }
     }
 
+    /// Ids kept through a confirmed delete. They are settled, so later visits
+    /// leave them out of the grid instead of offering them for deletion again.
+    /// Only for local lists: server-backed lists record "kept" via `resolve`.
+    private var hiddenKey: String? { keptStore.map { "\($0.key).hidden" } }
+
+    private func storedHidden() -> Set<String> {
+        guard let keptStore, let hiddenKey else { return [] }
+        return Set(keptStore.defaults.stringArray(forKey: hiddenKey) ?? [])
+    }
+
     func load() async {
         state = .loading
         actionMessage = nil
         do {
-            items = try await loadItems()
+            let hidden = storedHidden()
+            items = try await loadItems().filter { !hidden.contains($0.id) }
             // Intersect with the current items so ids of deleted assets drop out.
             let stored = keptStore.flatMap { $0.defaults.stringArray(forKey: $0.key) } ?? []
             kept = Set(stored).intersection(items.map(\.id))
@@ -172,6 +183,12 @@ final class SuperappUploadsViewModel: ObservableObject {
         do {
             try await resolve(toDelete.map(\.id), .deleted)
             try await resolve(toKeep.map(\.id), .kept)
+            if let keptStore, let hiddenKey {
+                // The kept picks become hidden, so the pending-kept list starts empty again.
+                keptStore.defaults.set(Array(storedHidden().union(toKeep.map(\.id))), forKey: hiddenKey)
+                kept = []
+                persistKept()
+            }
             state = .done
         } catch {
             state = .failed("Deleted, but syncing failed: \(error.localizedDescription)")

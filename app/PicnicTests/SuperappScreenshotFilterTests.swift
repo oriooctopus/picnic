@@ -63,7 +63,7 @@ final class SuperappScreenshotFilterTests: XCTestCase {
         model.set(model.items[1], kept: true)
         model.set(model.items[2], kept: true)
         XCTAssertEqual(model.deleteCount, 2)
-        XCTAssertNil(defaults.stringArray(forKey: "kept"))
+        XCTAssertEqual(defaults.stringArray(forKey: "kept"), [], "setAllKept(false) stored []; painting must not add to it before endPaint")
         model.endPaint()
         XCTAssertEqual(Set(defaults.stringArray(forKey: "kept") ?? []), ["b", "c"])
     }
